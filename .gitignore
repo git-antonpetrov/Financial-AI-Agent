@@ -216,3 +216,33 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- Custom rules for Hybrid RAG AI Project ---
+
+# 1. Secrets and API keys
+.env
+.env.*
+*.key
+*.pem
+
+# 2. Local vector databases
+chroma_db/
+.chroma/
+vectordb/
+
+# 3. Heavy source data and documents
+data/
+raw_data/
+docs/
+datasets/
+*.pdf
+*.jsonl
+
+# 4. Standard Python artifacts and IDE settings
+__pycache__/
+*.pyc
+venv/
+.venv/
+env/
+.idea/
+.vscode/
