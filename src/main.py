@@ -51,11 +51,12 @@ def main():
         for iteration in range(MAX_ITERATIONS):
             print(f"System: \033[96m[Итерация]\033[0m Запуск шага {iteration + 1}/{MAX_ITERATIONS}")
             response = completion(
-                model="vertex_ai/gemini-3.1-pro-preview",
+                model=os.getenv("MAIN_MODEL_NAME", "vertex_ai/gemini-3.1-pro-preview"),
                 messages=messages,
                 tools=[CLIENT_CONTEXT_SCHEMA, CBR_RATE_SCHEMA, KNOWLEDGE_BASE_SCHEMA],
                 vertex_project=os.getenv("VERTEX_PROJECT"),
-                vertex_location=os.getenv("VERTEX_LOCATION")
+                vertex_location=os.getenv("VERTEX_LOCATION"),
+                reasoning_effort=os.getenv("MAIN_REASONING_EFFORT", "high")
             )
             message = response.choices[0].message
             
