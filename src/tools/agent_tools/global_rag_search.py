@@ -20,7 +20,10 @@ def search_global_knowledge_base(query: str) -> str:
         )
         
         if results and results.get("documents") and len(results["documents"][0]) > 0:
-            return f"НАЙДЕНО В БАЗЕ ЗНАНИЙ: {results['documents'][0][0]}"
+            meta_list = results.get("metadatas")
+            meta = meta_list[0][0] if meta_list and meta_list[0] and meta_list[0][0] else {}
+            source_name = meta.get("source", "Неизвестный источник")
+            return f"ИНФОРМАЦИЯ ИЗ БАЗЫ ЗНАНИЙ:\nИсточник: {source_name}\nТекст: {results['documents'][0][0]}"
             
     except Exception as e:
         print(f"Logs: \033[91m[Ошибка]\033[0m Сбой поиска в базе: {e}") 

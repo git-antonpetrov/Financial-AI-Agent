@@ -1,13 +1,49 @@
 import os
 import sys
 import glob
-import uuid
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
 # pyrefly: ignore [missing-import]
 from src.app_clients import AppClients
 # pyrefly: ignore [missing-import]
+from src.tools.metadata_generator import extract_document_title
+# pyrefly: ignore [missing-import]
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+# pyrefly: ignore [missing-import]
+from langchain_community.document_loaders import (
+    TextLoader,
+    PyPDFLoader,
+    Docx2txtLoader,
+    UnstructuredWordDocumentLoader,
+    UnstructuredODTLoader,
+    UnstructuredMarkdownLoader,
+)
+
+def extract_text_from_file(filepath: str) -> str:
+    ext = os.path.splitext(filepath)[1].lower()
+    try:
+        match ext:
+            case '.txt':
+                loader = TextLoader(filepath, encoding='utf-8')
+            case '.pdf':
+                loader = PyPDFLoader(filepath)
+            case '.docx':
+                loader = Docx2txtLoader(filepath)
+            case '.doc':
+                loader = UnstructuredWordDocumentLoader(filepath)
+            case '.odt':
+                loader = UnstructuredODTLoader(filepath)
+            case '.md':
+                loader = UnstructuredMarkdownLoader(filepath)
+            case _:
+                print(f"Logs: \033[93m[Предупреждение]\033[0m Формат {ext} не поддерживается: {filepath}")
+                return ""
+                
+        docs = loader.load()
+        return "\n".join(doc.page_content for doc in docs)
+    except Exception as e:
+        print(f"Logs: \033[91m[Ошибка]\033[0m Ошибка при чтении файла {filepath}: {e}")
+        return ""
 
 def index_all_documents():
     print("Logs: \033[92m[Старт]\033[0m Начинаем индексацию базы знаний...")
@@ -22,12 +58,15 @@ def index_all_documents():
         embedding_function=embedder
     )
     
-    # 3. Ищем текстовые файлы
+    # 3. Ищем файлы
     kb_dir = "knowledge_base"
-    txt_files = glob.glob(os.path.join(kb_dir, "*.txt"))
+    SUPPORTED_EXTENSIONS = ('.txt', '.md', '.pdf', '.docx', '.doc', '.odt')
     
-    if not txt_files:
-        print("Logs: \033[91m[Ошибка]\033[0m База знаний пуста (нет файлов)")
+    all_files = glob.glob(os.path.join(kb_dir, "*"))
+    files_to_index = [f for f in all_files if os.path.splitext(f)[1].lower() in SUPPORTED_EXTENSIONS]
+    
+    if not files_to_index:
+        print("Logs: \033[91m[Ошибка]\033[0m База знаний пуста (нет подходящих файлов)")
         return
 
     # 4. Настраиваем сплиттер
@@ -39,10 +78,9 @@ def index_all_documents():
     
     total_chunks = 0
     
-    for filepath in txt_files:
+    for filepath in files_to_index:
         print(f"Logs: \033[96m[Процесс]\033[0m Читаем файл: {filepath}")
-        with open(filepath, "r", encoding="utf-8") as f:
-            text = f.read()
+        text = extract_text_from_file(filepath)
             
         if not text.strip():
             print(f"Logs: \033[93m[Пропуск]\033[0m Файл {filepath} пуст")
@@ -50,17 +88,13 @@ def index_all_documents():
             
         # Нарезаем на чанки
         chunks = text_splitter.split_text(text)
+        filename = os.path.basename(filepath)
+        source_title = extract_document_title(text, filename)
         
-        documents = []
-        ids = []
-        metadatas = []
+        documents = chunks
+        ids = [f"{filename}_chunk_{i}" for i in range(len(chunks))]
+        metadatas = [{"source": source_title} for _ in chunks]
         
-        for i, chunk in enumerate(chunks):
-            documents.append(chunk)
-            chunk_id = str(uuid.uuid4())
-            ids.append(chunk_id)
-            metadatas.append({"source": filepath, "chunk": i})
-            
         # Загружаем в базу
         collection.upsert(
             documents=documents,
