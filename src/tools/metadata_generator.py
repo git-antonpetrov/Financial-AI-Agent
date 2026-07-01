@@ -1,8 +1,8 @@
 import os
 # pyrefly: ignore [missing-import]
-from litellm import completion
+from litellm import acompletion
 
-def extract_document_title(text: str, default_filename: str) -> str:
+async def extract_document_title(text: str, default_filename: str) -> str:
     text_snippet = text[:2000]
     prompt = (
         f"Ты системный анализатор документов. Твоя задача — прочитать начало текста "
@@ -12,7 +12,7 @@ def extract_document_title(text: str, default_filename: str) -> str:
     )
     
     try:
-        response = completion(
+        response = await acompletion(
             model=os.getenv("META_MODEL_NAME", "vertex_ai/gemini-3.5-flash"),
             messages=[{"role": "user", "content": prompt}],
             vertex_project=os.getenv("VERTEX_PROJECT"),

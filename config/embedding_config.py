@@ -7,11 +7,20 @@ from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
 
 class LiteLLMVertexEmbeddingFunction(EmbeddingFunction):
     def __call__(self, input: list[str]):
-        response = litellm.embedding(
-            model="vertex_ai/gemini-embedding-001",
-            input=input
-        )
-        return [item['embedding'] for item in response['data']]
+        # Vertex AI поддерживает максимум 250 текстов за один запрос.
+        # Бьем входной массив на батчи по 100 элементов для надежности.
+        BATCH_SIZE = 100
+        all_embeddings = []
+        
+        for i in range(0, len(input), BATCH_SIZE):
+            batch = input[i:i + BATCH_SIZE]
+            response = litellm.embedding(
+                model="vertex_ai/gemini-embedding-001",
+                input=batch
+            )
+            all_embeddings.extend([item['embedding'] for item in response['data']])
+            
+        return all_embeddings
 
 def get_embedder():
     """Создает функцию эмбеддинга в зависимости от настроек."""

@@ -1,6 +1,16 @@
 import os
 import sys
 import glob
+import time
+
+sys.stdout.reconfigure(encoding='utf-8')
+import asyncio
+# pyrefly: ignore [missing-import]
+from litellm import aembedding
+
+MAX_NETWORK_CONCURRENCY = 15
+MAX_IO_CONCURRENCY = 50
+EMBEDDING_BATCH_SIZE = 200
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
 # pyrefly: ignore [missing-import]
@@ -45,8 +55,76 @@ def extract_text_from_file(filepath: str) -> str:
         print(f"Logs: \033[91m[Ошибка]\033[0m Ошибка при чтении файла {filepath}: {e}")
         return ""
 
-def index_all_documents():
+async def process_file(filepath, text_splitter, collection, io_sem: asyncio.Semaphore, network_sem: asyncio.Semaphore):
+    print(f"Logs: \033[96m[Процесс]\033[0m Читаем файл: {filepath}")
+    t0 = time.perf_counter()
+    
+    async with io_sem:
+        text = await asyncio.to_thread(extract_text_from_file, filepath)
+        
+    t1 = time.perf_counter()
+    parse_time = t1 - t0
+        
+    if not text.strip():
+        print(f"Logs: \033[93m[Пропуск]\033[0m Файл {filepath} пуст")
+        return 0
+        
+    # Нарезаем на чанки
+    chunks = text_splitter.split_text(text)
+    filename = os.path.basename(filepath)
+    
+    async with network_sem:
+        source_title = await extract_document_title(text, filename)
+        
+    t2 = time.perf_counter()
+    meta_time = t2 - t1
+    
+    documents = chunks
+    ids = [f"{filename}_chunk_{i}" for i in range(len(chunks))]
+    metadatas = [{"source": source_title, "raw_filename": filename} for _ in chunks]
+    
+    # Асинхронная векторизация батчами
+    async def _safe_embed(batch):
+        async with network_sem:
+            return await aembedding(
+                model=os.getenv("EMBEDDING_PROVIDER_MODEL", "vertex_ai/gemini-embedding-001"),
+                input=batch,
+                vertex_project=os.getenv("VERTEX_PROJECT"),
+                vertex_location=os.getenv("VERTEX_LOCATION")
+            )
+
+    embedding_tasks = []
+    for i in range(0, len(chunks), EMBEDDING_BATCH_SIZE):
+        batch = chunks[i:i + EMBEDDING_BATCH_SIZE]
+        embedding_tasks.append(_safe_embed(batch))
+    
+    responses = await asyncio.gather(*embedding_tasks)
+    
+    file_embeddings = []
+    for response in responses:
+        batch_embeddings = [item["embedding"] for item in response["data"]]
+        file_embeddings.extend(batch_embeddings)
+    
+    # Загружаем в базу (Изолируем блокирующий I/O в отдельный поток)
+    async with io_sem:
+        await asyncio.to_thread(
+            collection.upsert,
+            documents=documents,
+            ids=ids,
+            metadatas=metadatas,
+            embeddings=file_embeddings
+        )
+        
+    t3 = time.perf_counter()
+    embed_time = t3 - t2
+    
+    print(f"Logs: \033[92m[Успех]\033[0m Файл {filepath} загружен ({len(chunks)} фрагментов)")
+    print(f"Stats: \033[94m[Профилирование]\033[0m Чтение: {parse_time:.2f}с | Метаданные (LLM): {meta_time:.2f}с | Векторизация: {embed_time:.2f}с")
+    return len(chunks)
+
+async def main_async():
     print("Logs: \033[92m[Старт]\033[0m Начинаем индексацию базы знаний...")
+    global_t0 = time.perf_counter()
     
     # 1. Получаем клиент ChromaDB
     client = AppClients.get_chroma_db()
@@ -76,35 +154,17 @@ def index_all_documents():
         length_function=len
     )
     
-    total_chunks = 0
-    
-    for filepath in files_to_index:
-        print(f"Logs: \033[96m[Процесс]\033[0m Читаем файл: {filepath}")
-        text = extract_text_from_file(filepath)
-            
-        if not text.strip():
-            print(f"Logs: \033[93m[Пропуск]\033[0m Файл {filepath} пуст")
-            continue
-            
-        # Нарезаем на чанки
-        chunks = text_splitter.split_text(text)
-        filename = os.path.basename(filepath)
-        source_title = extract_document_title(text, filename)
-        
-        documents = chunks
-        ids = [f"{filename}_chunk_{i}" for i in range(len(chunks))]
-        metadatas = [{"source": source_title} for _ in chunks]
-        
-        # Загружаем в базу
-        collection.upsert(
-            documents=documents,
-            ids=ids,
-            metadatas=metadatas
-        )
-        total_chunks += len(chunks)
-        print(f"Logs: \033[92m[Успех]\033[0m Файл {filepath} загружен ({len(chunks)} фрагментов)")
+    io_sem = asyncio.Semaphore(MAX_IO_CONCURRENCY)
+    network_sem = asyncio.Semaphore(MAX_NETWORK_CONCURRENCY)
+    tasks = [process_file(filepath, text_splitter, collection, io_sem, network_sem) for filepath in files_to_index]
+    results = await asyncio.gather(*tasks)
+    total_chunks = sum(results)
 
+    global_t1 = time.perf_counter()
+    total_time = global_t1 - global_t0
+    
     print(f"Logs: \033[92m[Финиш]\033[0m Индексация завершена. Всего фрагментов: {total_chunks}")
+    print(f"Stats: \033[94m[Общее время]\033[0m Затрачено времени: {total_time:.2f}с")
 
 if __name__ == "__main__":
-    index_all_documents()
+    asyncio.run(main_async())

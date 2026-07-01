@@ -16,14 +16,20 @@ def search_global_knowledge_base(query: str) -> str:
         )
         results = collection.query(
             query_texts=[query],
-            n_results=1
+            n_results=3
         )
         
         if results and results.get("documents") and len(results["documents"][0]) > 0:
-            meta_list = results.get("metadatas")
-            meta = meta_list[0][0] if meta_list and meta_list[0] and meta_list[0][0] else {}
-            source_name = meta.get("source", "Неизвестный источник")
-            return f"ИНФОРМАЦИЯ ИЗ БАЗЫ ЗНАНИЙ:\nИсточник: {source_name}\nТекст: {results['documents'][0][0]}"
+            docs = results["documents"][0]
+            metas = results.get("metadatas", [[{}]])[0]
+            
+            response_text = "ИНФОРМАЦИЯ ИЗ БАЗЫ ЗНАНИЙ:\n\n"
+            for i, doc in enumerate(docs):
+                meta = metas[i] if metas and i < len(metas) and metas[i] else {}
+                source_name = meta.get("source", "Неизвестный источник")
+                response_text += f"--- ФРАГМЕНТ {i+1} ---\nИсточник: {source_name}\nТекст: {doc}\n\n"
+                
+            return response_text.strip()
             
     except Exception as e:
         print(f"Logs: \033[91m[Ошибка]\033[0m Сбой поиска в базе: {e}") 

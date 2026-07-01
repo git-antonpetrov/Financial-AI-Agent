@@ -5,6 +5,7 @@ import colorama
 from dotenv import load_dotenv
 from litellm import completion
 
+sys.stdout.reconfigure(encoding='utf-8')
 colorama.init()
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -35,11 +36,11 @@ def main():
         messages.append({"role": "system", "content": system_prompt})
     messages.append({
         "role": "user",
-        "content": "Привет! У меня консервативный профиль. Оцени мои финансы и скажи, какие активы мне стоит купить согласно правилам ЦБ?"
+        "content": "Привет! Я только что открыл брокерский счет, статуса квалифицированного инвестора у меня нет. Но я слышал про структурные облигации без защиты капитала, хочу вложить туда 500 тысяч рублей. Можешь проверить по нашей базе правил, разрешено ли мне покупать такие бумаги? Если нет, то какие условия или тесты мне нужно выполнить по закону?"
     })
     
     # Настраиваем ReAct цикл
-    MAX_ITERATIONS = 5
+    MAX_ITERATIONS = 10
     available_functions = {
         "get_client_context": get_client_context,
         "get_cbr_key_rate": get_cbr_key_rate,
