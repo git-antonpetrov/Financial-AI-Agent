@@ -259,7 +259,14 @@ data/state_tracker.json
 # Логи, артефакты парсеров и дампы ошибок
 logs/*
 !logs/.gitkeep
+
+# Оставляем подпапки, но игнорируем их содержимое
+!logs/errors/
+logs/errors/*
 !logs/errors/.gitkeep
+
+!logs/parsers/
+logs/parsers/*
 !logs/parsers/.gitkeep
 
 # 4. Standard Python artifacts and IDE settings
