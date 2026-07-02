@@ -8,8 +8,8 @@ from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
 class LiteLLMVertexEmbeddingFunction(EmbeddingFunction):
     def __call__(self, input: list[str]):
         # Vertex AI поддерживает максимум 250 текстов за один запрос.
-        # Бьем входной массив на батчи по 100 элементов для надежности.
-        BATCH_SIZE = 100
+        # Бьем входной массив на батчи по 200 элементов для надежности.
+        BATCH_SIZE = 200
         all_embeddings = []
         
         for i in range(0, len(input), BATCH_SIZE):
