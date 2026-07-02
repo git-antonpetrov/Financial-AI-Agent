@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: financial_agent_chroma
+
+    ports:
+      - "8000:8000"
+
+    volumes:
+      - ./docker_volume_chroma:/data

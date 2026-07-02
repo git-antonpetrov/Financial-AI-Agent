@@ -20,48 +20,16 @@ from src.tools.metadata_generator import extract_document_title
 # pyrefly: ignore [missing-import]
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 # pyrefly: ignore [missing-import]
-from langchain_community.document_loaders import (
-    TextLoader,
-    PyPDFLoader,
-    Docx2txtLoader,
-    UnstructuredWordDocumentLoader,
-    UnstructuredODTLoader,
-    UnstructuredMarkdownLoader,
-)
+from src.utils.text_extractor import UniversalExtractor
 
-def extract_text_from_file(filepath: str) -> str:
-    ext = os.path.splitext(filepath)[1].lower()
-    try:
-        match ext:
-            case '.txt':
-                loader = TextLoader(filepath, encoding='utf-8')
-            case '.pdf':
-                loader = PyPDFLoader(filepath)
-            case '.docx':
-                loader = Docx2txtLoader(filepath)
-            case '.doc':
-                loader = UnstructuredWordDocumentLoader(filepath)
-            case '.odt':
-                loader = UnstructuredODTLoader(filepath)
-            case '.md':
-                loader = UnstructuredMarkdownLoader(filepath)
-            case _:
-                print(f"Logs: \033[93m[Предупреждение]\033[0m Формат {ext} не поддерживается: {filepath}")
-                return ""
-                
-        docs = loader.load()
-        return "\n".join(doc.page_content for doc in docs)
-    except Exception as e:
-        print(f"Logs: \033[91m[Ошибка]\033[0m Ошибка при чтении файла {filepath}: {e}")
-        return ""
+
 
 async def process_file(filepath, text_splitter, collection, io_sem: asyncio.Semaphore, network_sem: asyncio.Semaphore):
     print(f"Logs: \033[96m[Процесс]\033[0m Читаем файл: {filepath}")
     t0 = time.perf_counter()
     
     async with io_sem:
-        text = await asyncio.to_thread(extract_text_from_file, filepath)
-        
+        text = await UniversalExtractor.extract_text(filepath)
     t1 = time.perf_counter()
     parse_time = t1 - t0
         
@@ -137,7 +105,7 @@ async def main_async():
     )
     
     # 3. Ищем файлы
-    kb_dir = "knowledge_base"
+    kb_dir = "data/2_storage"
     SUPPORTED_EXTENSIONS = ('.txt', '.md', '.pdf', '.docx', '.doc', '.odt')
     
     all_files = glob.glob(os.path.join(kb_dir, "*"))
