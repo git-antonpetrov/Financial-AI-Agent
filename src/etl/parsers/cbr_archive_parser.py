@@ -67,7 +67,8 @@ async def main():
         await asyncio.gather(*tasks)
         
     # Сохранение отчета об ошибках
-    errors_dir = os.path.join(os.path.dirname(__file__), "errors")
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+    errors_dir = os.path.join(project_root, "logs", "errors")
     os.makedirs(errors_dir, exist_ok=True)
     errors_file = os.path.join(errors_dir, "cbr_archive_parser_errors.json")
     

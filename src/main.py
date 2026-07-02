@@ -9,9 +9,9 @@ sys.stdout.reconfigure(encoding='utf-8')
 colorama.init()
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
-from tools.agent_tools.main_agent.client_context import CLIENT_CONTEXT_SCHEMA, get_client_context
-from tools.agent_tools.main_agent.market_data import CBR_RATE_SCHEMA, get_cbr_key_rate
-from tools.agent_tools.global_rag_search import KNOWLEDGE_BASE_SCHEMA, search_global_knowledge_base
+from agent_tools.main_agent.client_context import CLIENT_CONTEXT_SCHEMA, get_client_context
+from agent_tools.main_agent.market_data import CBR_RATE_SCHEMA, get_cbr_key_rate
+from agent_tools.global_rag_search import KNOWLEDGE_BASE_SCHEMA, search_global_knowledge_base
 
 # Загружаем переменные окружения из .env файла
 load_dotenv()
@@ -27,7 +27,7 @@ def read_system_prompt(file_path: str) -> str:
 
 def main():
     # Получаем системный промт
-    prompt_path = "promts/main-agent-system-promt.md"
+    prompt_path = "prompts/main-agent-system-prompt.md"
     system_prompt = read_system_prompt(prompt_path)
     
     # Собираем сообщение

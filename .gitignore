@@ -256,6 +256,12 @@ data/state_tracker.json
 !data/2_storage/.gitkeep
 !data/.text_cache/.gitkeep
 
+# Логи, артефакты парсеров и дампы ошибок
+logs/*
+!logs/.gitkeep
+!logs/errors/.gitkeep
+!logs/parsers/.gitkeep
+
 # 4. Standard Python artifacts and IDE settings
 __pycache__/
 *.pyc

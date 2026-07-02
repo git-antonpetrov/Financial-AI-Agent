@@ -13,10 +13,16 @@ sys.stdout.reconfigure(encoding='utf-8')
 # Добавляем корень проекта в sys.path
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
 
-# Пути к файлам (сохраняем прямо рядом со скриптом)
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-LINKS_FILE = os.path.join(CURRENT_DIR, "parsed_cbr_links.json")
-ERRORS_FILE = os.path.join(CURRENT_DIR, "get_link_errors.json")
+# Пути к файлам (сохраняем в logs)
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+PARSERS_LOG_DIR = os.path.join(PROJECT_ROOT, "logs", "parsers")
+ERRORS_LOG_DIR = os.path.join(PROJECT_ROOT, "logs", "errors")
+
+os.makedirs(PARSERS_LOG_DIR, exist_ok=True)
+os.makedirs(ERRORS_LOG_DIR, exist_ok=True)
+
+LINKS_FILE = os.path.join(PARSERS_LOG_DIR, "parsed_cbr_links.json")
+ERRORS_FILE = os.path.join(ERRORS_LOG_DIR, "get_link_errors.json")
 
 BASE_URL = "https://cbr.ru"
 START_URL = "https://cbr.ru/na/"
