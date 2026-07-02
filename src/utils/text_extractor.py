@@ -48,7 +48,9 @@ class UniversalExtractor:
     
     @classmethod
     def _log_error(cls, filepath: str, reason: str, page_num: Optional[int] = None):
-        error_file = "src/utils/errors/text_extractor_errors.json"
+        error_dir = os.path.join("logs", "errors")
+        os.makedirs(error_dir, exist_ok=True)
+        error_file = os.path.join(error_dir, "text_extractor_errors.json")
         error_entry = {
             "file": filepath,
             "page": page_num,

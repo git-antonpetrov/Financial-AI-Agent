@@ -16,7 +16,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
 # pyrefly: ignore [missing-import]
 from src.app_clients import AppClients
 # pyrefly: ignore [missing-import]
-from src.tools.metadata_generator import extract_document_title
+from src.agent_tools.metadata_generator import extract_document_title
 # pyrefly: ignore [missing-import]
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 # pyrefly: ignore [missing-import]
