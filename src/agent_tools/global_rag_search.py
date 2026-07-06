@@ -3,7 +3,7 @@ import sys
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 # pyrefly: ignore [missing-import]
-from src.app_clients import AppClients
+from src.core.app_clients import AppClients
 
 def search_global_knowledge_base(query: str) -> str:
     """Выполняет семантический поиск по векторной базе знаний."""

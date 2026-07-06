@@ -1,12 +1,42 @@
-version: '3.8'
-
 services:
-  chromadb:
-    image: chromadb/chroma:latest
-    container_name: financial_agent_chroma
+  s3-minio:
+    image: quay.io/minio/minio:latest
+    container_name: s3-storage-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    restart: unless-stopped
 
+  vector-db:
+    image: chromadb/chroma:latest
+    container_name: chroma-vector-db
     ports:
       - "8000:8000"
-
     volumes:
-      - ./docker_volume_chroma:/data
+      - chroma_gold_data:/chroma/chroma
+    restart: unless-stopped
+
+  extract-parsers:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: extract-parsers
+    depends_on:
+      - s3-minio
+    environment:
+      - MINIO_ENDPOINT=s3-minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+volumes:
+  minio_data:
+  chroma_gold_data:
