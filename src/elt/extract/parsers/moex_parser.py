@@ -16,7 +16,7 @@ sys.stdout.reconfigure(encoding='utf-8')
 
 try:
     # pyrefly: ignore [missing-import]
-    from minio import Minio
+    from src.core.app_clients import AppClients
     # pyrefly: ignore [missing-import]
     from minio.error import S3Error
 except ImportError:
@@ -50,19 +50,8 @@ class MoexParser:
             'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
         }
         
-        # Настройка MinIO клиента
-        # TODO: Можно вынести в переменные окружения (.env)
-        self.minio_endpoint = os.getenv("MINIO_ENDPOINT", "localhost:9000")
-        self.minio_access_key = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
-        self.minio_secret_key = os.getenv("MINIO_SECRET_KEY", "minioadmin")
-        self.minio_bucket = "rag-documents"
-        
-        self.minio_client = Minio(
-            self.minio_endpoint,
-            access_key=self.minio_access_key,
-            secret_key=self.minio_secret_key,
-            secure=False
-        )
+        self.minio_bucket = "raw-documents"
+        self.minio_client = AppClients.get_minio_client()
         
         self._ensure_bucket_exists()
 

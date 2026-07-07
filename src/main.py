@@ -3,7 +3,7 @@ import sys
 import os
 import colorama
 from dotenv import load_dotenv
-from litellm import completion
+from src.core.app_clients import AppClients
 
 sys.stdout.reconfigure(encoding='utf-8')
 colorama.init()
@@ -51,7 +51,7 @@ def main():
     try:
         for iteration in range(MAX_ITERATIONS):
             print(f"System: \033[96m[Итерация]\033[0m Запуск шага {iteration + 1}/{MAX_ITERATIONS}")
-            response = completion(
+            response = AppClients.get_cloud_ai_client().completion(
                 model=os.getenv("MAIN_MODEL_NAME", "vertex_ai/gemini-3.1-pro-preview"),
                 messages=messages,
                 tools=[CLIENT_CONTEXT_SCHEMA, CBR_RATE_SCHEMA, KNOWLEDGE_BASE_SCHEMA],

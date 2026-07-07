@@ -1,6 +1,5 @@
 import os
-# pyrefly: ignore [missing-import]
-from litellm import acompletion
+from src.core.app_clients import AppClients
 
 async def extract_document_title(text: str, default_filename: str) -> str:
     text_snippet = text[:2000]
@@ -12,7 +11,7 @@ async def extract_document_title(text: str, default_filename: str) -> str:
     )
     
     try:
-        response = await acompletion(
+        response = await AppClients.get_cloud_ai_client().acompletion(
             model=os.getenv("META_MODEL_NAME", "vertex_ai/gemini-3.5-flash"),
             messages=[{"role": "user", "content": prompt}],
             vertex_project=os.getenv("VERTEX_PROJECT"),

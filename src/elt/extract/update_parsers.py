@@ -17,12 +17,12 @@ except ImportError:
     print("\033[91m[Ошибка]\033[0m Библиотека apscheduler не установлена. Установите ее: pip install apscheduler")
     sys.exit(1)
 
-# StorageManager пока импортируем, но он будет переделан позже
+# MainPipeline импортируем для обработки загруженных данных
 try:
-    from src.elt.load.storage_manager import StorageManager
-    has_storage_manager = True
+    from src.elt.load.main_pipeline import MainPipeline
+    has_main_pipeline = True
 except ImportError:
-    has_storage_manager = False
+    has_main_pipeline = False
 
 async def main():
     print("\033[96m[Оркестратор]\033[0m Инициализация...")
@@ -64,14 +64,14 @@ async def main():
     
     if moex_has_new or cbr_has_new:
         print("\033[92m[Оркестратор]\033[0m Обнаружены новые загруженные файлы.")
-        if has_storage_manager:
-            print("\033[96m[Оркестратор]\033[0m Запуск StorageManager...")
-            sm = StorageManager()
+        if has_main_pipeline:
+            print("\033[96m[Оркестратор]\033[0m Запуск MainPipeline...")
+            pipeline = MainPipeline()
             try:
-                await sm.process_all_landing_files()
+                await pipeline.run()
                 print("\033[92m[Оркестратор]\033[0m Обработка завершена.")
-            except Timeout:
-                print("\033[93m[Внимание]\033[0m StorageManager уже запущен в другом процессе.\033[0m")
+            except Exception as e:
+                print(f"\033[93m[Внимание]\033[0m Ошибка при выполнении MainPipeline: {e}\033[0m")
     else:
         print("\033[96m[Оркестратор]\033[0m Нет новых файлов ни в одном из источников.")
 
