@@ -2,6 +2,8 @@ import os
 import sys
 import json
 import time
+import hashlib
+import base64
 import asyncio
 import io
 import re
@@ -24,9 +26,31 @@ from src.utils.document_to_pdf import convert_to_pdf
 
 class DocumentAnalysisResult(BaseModel):
     is_relevant: bool = Field(description="Релевантен ли этот документ для финансового агента?")
-    official_name: str = Field(description="Полное точное официальное название.")
-    system_name: str = Field(description="Системное имя (формат типдокумента_номер_датаподписания).")
-    sign_date: str = Field(description="Дата подписания (дд.мм.гггг).")
+    official_name: str = Field(description="Полное точное официальное название на русском языке.")
+    system_name: str = Field(description="Системное имя СТРОГО НА АНГЛИЙСКОМ ЯЗЫКЕ (транслит), БЕЗ ТОЧЕК, БЕЗ СЛЕШЕЙ, БЕЗ ПРОБЕЛОВ. Только буквы, цифры и подчеркивания. Формат: tip_dokumenta_nomer_data (например: fz_115_01012024, pismo_03_04_05_18072025).")
+    sign_date: str = Field(description="Дата подписания строго в формате дд.мм.гггг.")
+    short_number: str = Field(description="Короткий номер акта (например ФЗ-115, 153-И).")
+
+def parse_russian_date(date_str: str) -> datetime:
+    if not date_str:
+        return datetime.min
+    # Try dd.mm.yyyy
+    match = re.search(r"(\d{1,2})\.(\d{1,2})\.(\d{4})", date_str)
+    if match:
+        return datetime(int(match.group(3)), int(match.group(2)), int(match.group(1)))
+    # Try text format
+    months = {
+        "января": 1, "февраля": 2, "марта": 3, "апреля": 4, "мая": 5, "июня": 6,
+        "июля": 7, "августа": 8, "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12,
+        "янв": 1, "фев": 2, "мар": 3, "апр": 4, "июн": 6, "июл": 7, "авг": 8, "сен": 9, "окт": 10, "ноя": 11, "дек": 12
+    }
+    date_str_lower = date_str.lower()
+    for m_name, m_num in months.items():
+        if m_name in date_str_lower:
+            match = re.search(r"(\d{1,2})\s+" + m_name + r".*?(\d{4})", date_str_lower)
+            if match:
+                return datetime(int(match.group(2)), m_num, int(match.group(1)))
+    return datetime.min
 
 class RepealedDocumentsResult(BaseModel):
     repealed_docs_system_names: list[str] = Field(description="Список системных имен отмененных актов.")
@@ -91,7 +115,7 @@ class MainPipeline:
         elif level == "SUCCESS": color = Fore.GREEN
         elif level == "WARNING": color = Fore.YELLOW
         elif level == "ERROR": color = Fore.RED
-        print(f"{color}[{level}] {msg}{Style.RESET_ALL}")
+        print(f"{color}[{level}]:{Style.RESET_ALL} {msg}")
 
     async def _read_system_prompt(self) -> str:
         with open(self.system_prompt_path, "r", encoding="utf-8") as f:
@@ -152,45 +176,62 @@ class MainPipeline:
                 response.close()
                 response.release_conn()
                 
-                # 2. Конвертация в PDF
-                pdf_bytes = await self._convert_to_pdf_if_needed(file_name, file_bytes)
+                file_hash = hashlib.md5(file_bytes).hexdigest()
+                cache_info["md5"] = file_hash
                 
-                # 3. Валидация PDF
-                if not self._validate_pdf(pdf_bytes):
-                    self._log("ERROR", f"Файл {file_name} является битым PDF. Удаление.")
-                    self.minio_client.remove_object(self.raw_bucket, file_name)
-                    cache_info["status"] = "failed_validation"
-                    await self._save_cache(file_name, cache_info)
-                    return
-
-                # 4. Content AI (Распознавание)
-                self._log("INFO", f"Отправка {file_name} в Content AI...")
-                temp_pdf_path = os.path.join(self.cache_dir, "temp_recognition.pdf")
-                with open(temp_pdf_path, "wb") as f:
-                    f.write(pdf_bytes)
+                # Check duplicates by hash
+                cache_dict = await self._load_cache()
+                for key, data in cache_dict.items():
+                    if data.get("status") == "completed" and data.get("md5") == file_hash:
+                        self._log("WARNING", f"Файл {file_name} является дубликатом по MD5 хэшу. Пропуск и удаление.")
+                        self.minio_client.remove_object(self.raw_bucket, file_name)
+                        return
+                
+                ext = os.path.splitext(file_name)[1].lower()
+                
+                if ext == ".md":
+                    self._log("INFO", f"Файл {file_name} уже в формате Markdown. Пропуск Content AI.")
+                    markdown_content = file_bytes.decode("utf-8")
+                else:
+                    # 2. Конвертация в PDF
+                    pdf_bytes = await self._convert_to_pdf_if_needed(file_name, file_bytes)
                     
-                # Content AI can take time, run in thread
-                rec_result = await asyncio.to_thread(self.content_ai.recognize, temp_pdf_path)
-                if os.path.exists(temp_pdf_path):
-                    os.remove(temp_pdf_path)
-                
-                # Since Content Capture might return multiple documents, we take the first available
-                if not rec_result:
-                    self._log("WARNING", f"Content AI не вернул результатов для {file_name}")
-                    cache_info["status"] = "no_recognition_result"
-                    self.minio_client.remove_object(self.raw_bucket, file_name)
-                    await self._save_cache(file_name, cache_info)
-                    return
+                    # 3. Валидация PDF
+                    if not self._validate_pdf(pdf_bytes):
+                        self._log("ERROR", f"Файл {file_name} является битым PDF. Удаление.")
+                        self.minio_client.remove_object(self.raw_bucket, file_name)
+                        cache_info["status"] = "failed_validation"
+                        await self._save_cache(file_name, cache_info)
+                        return
+    
+                    # 4. Content AI (Распознавание)
+                    self._log("INFO", f"Отправка {file_name} в Content AI...")
+                    temp_pdf_path = os.path.join(self.cache_dir, "temp_recognition.pdf")
+                    with open(temp_pdf_path, "wb") as f:
+                        f.write(pdf_bytes)
+                        
+                    # Content AI can take time, run in thread
+                    rec_result = await asyncio.to_thread(self.content_ai.recognize, temp_pdf_path)
+                    if os.path.exists(temp_pdf_path):
+                        os.remove(temp_pdf_path)
                     
-                doc_data = list(rec_result.values())[0]
-                markdown_content = doc_data.get("raw_xml", "")
-                
-                if not markdown_content.strip():
-                    self._log("WARNING", f"Content AI вернул пустой текст для {file_name}")
-                    cache_info["status"] = "empty_text"
-                    self.minio_client.remove_object(self.raw_bucket, file_name)
-                    await self._save_cache(file_name, cache_info)
-                    return
+                    # Since Content Capture might return multiple documents, we take the first available
+                    if not rec_result:
+                        self._log("WARNING", f"Content AI не вернул результатов для {file_name}")
+                        cache_info["status"] = "no_recognition_result"
+                        self.minio_client.remove_object(self.raw_bucket, file_name)
+                        await self._save_cache(file_name, cache_info)
+                        return
+                        
+                    doc_data = list(rec_result.values())[0]
+                    markdown_content = doc_data.get("raw_xml", "")
+                    
+                    if not markdown_content.strip():
+                        self._log("WARNING", f"Content AI вернул пустой текст для {file_name}")
+                        cache_info["status"] = "empty_text"
+                        self.minio_client.remove_object(self.raw_bucket, file_name)
+                        await self._save_cache(file_name, cache_info)
+                        return
 
                 # 5. Умный Анализ (Gemini JSON)
                 self._log("INFO", f"Анализ документа {file_name} в LLM...")
@@ -202,7 +243,8 @@ class MainPipeline:
                     "1) Релевантен ли этот документ для финансового агента? (т.е. является ли документ 'плохим' или 'хорошим') "
                     "2) Полное точное официальное название. "
                     "3) Системное имя (формат типдокумента_номер_датаподписания). "
-                    "4) Дату подписания."
+                    "4) Дату подписания СТРОГО в формате дд.мм.гггг. "
+                    "5) Короткий номер акта (например ФЗ-115, 153-И, 1648-У)."
                 )
                 
                 messages = [
@@ -214,7 +256,8 @@ class MainPipeline:
                     model=self.llm_model,
                     messages=messages,
                     response_format=DocumentAnalysisResult,
-                    reasoning_effort=self.reasoning_effort
+                    reasoning_effort=self.reasoning_effort,
+                    temperature=0.0
                 )
                 
                 analysis_json = response1.choices[0].message.content
@@ -224,10 +267,59 @@ class MainPipeline:
                 
                 is_relevant = analysis_result.get("is_relevant", False)
                 system_name = analysis_result.get("system_name", "unknown_doc")
+                # Жесткая очистка от слешей и точек, если модель все-таки ошибется
+                system_name = system_name.replace("/", "_").replace("\\", "_").replace(".", "").replace(" ", "_")
+                
                 official_name = analysis_result.get("official_name", "Unknown Document")
                 sign_date = analysis_result.get("sign_date", "")
+                short_number = analysis_result.get("short_number", "")
                 
                 cache_info["analysis"] = analysis_result
+                cache_info["system_name"] = system_name
+                cache_info["official_name"] = official_name
+                cache_info["sign_date"] = sign_date
+                cache_info["short_number"] = short_number
+                
+                current_date = parse_russian_date(sign_date)
+                base_system_name = re.sub(r"_\d+$", "", system_name) if "_" in system_name else system_name
+                
+                is_new_version = False
+                
+                cache_dict = await self._load_cache()
+                
+                # Точное совпадение system_name
+                for key, data in cache_dict.items():
+                    if data.get("status") == "success" and data.get("system_name") == system_name:
+                        self._log("WARNING", f"Файл {file_name} является полным дубликатом (system_name). Пропуск и удаление.")
+                        self.minio_client.remove_object(self.raw_bucket, file_name)
+                        return
+                        
+                # Поиск старых версий
+                max_cache_date = datetime.min
+                found_prev_version = False
+                
+                for key, data in cache_dict.items():
+                    if data.get("status") == "success":
+                        c_system_name = data.get("system_name", "")
+                        c_base_system_name = re.sub(r"_\d+$", "", c_system_name) if "_" in c_system_name else c_system_name
+                        c_short_number = data.get("short_number", "")
+                        
+                        if (c_base_system_name == base_system_name) or (short_number and c_short_number == short_number):
+                            found_prev_version = True
+                            c_date = parse_russian_date(data.get("sign_date", ""))
+                            if c_date > max_cache_date:
+                                max_cache_date = c_date
+                                
+                if found_prev_version:
+                    if current_date <= max_cache_date:
+                        self._log("WARNING", f"Файл {file_name} является старой версией или дубликатом (дата <= {max_cache_date.strftime('%d.%m.%Y') if max_cache_date != datetime.min else 'N/A'}). Пропуск и удаление.")
+                        self.minio_client.remove_object(self.raw_bucket, file_name)
+                        return
+                    else:
+                        self._log("INFO", f"Файл {file_name} является НОВОЙ редакцией. Обработка продолжается.")
+                        is_new_version = True
+
+                
                 
                 # 6. Поиск отмененных актов
                 repeal_keywords = [r"утративш.*? силу", r"отменить", r"признать недействительн.*?"]
@@ -246,7 +338,7 @@ class MainPipeline:
                     user_prompt2 = (
                         "В данном документе упоминаются возможные отмены правовых актов. "
                         "Определи, какие уже существующие документы отменяет этот обрабатываемый документ. "
-                        "Верни строго JSON список всех актов, которые текущий документ отменяет. "
+                        "Верни строго JSON список номеров всех актов (например ФЗ-115, ), которые текущий документ отменяет. "
                         "Если отмененных актов нет, верни пустой список.\n\n"
                         f"Фрагменты для анализа:\n{snippets_text}"
                     )
@@ -256,12 +348,18 @@ class MainPipeline:
                         model=self.llm_model,
                         messages=messages,
                         response_format=RepealedDocumentsResult,
-                        reasoning_effort=self.reasoning_effort
+                        reasoning_effort=self.reasoning_effort,
+                        temperature=0.0
                     )
                     
                     repeal_json = response2.choices[0].message.content
                     repeal_result = json.loads(repeal_json)
                     repealed_docs = list(set(repeal_result.get("repealed_docs_system_names", [])))
+                    
+                if is_new_version and short_number:
+                    repealed_docs.append(short_number)
+                    repealed_docs = list(set(repealed_docs))
+                    self._log("INFO", f"В список отмен добавлена предыдущая версия: {short_number}")
                     
                 cache_info["repealed_docs"] = repealed_docs
                 
@@ -270,8 +368,9 @@ class MainPipeline:
                     self._log("SUCCESS", f"Документ {file_name} признан релевантным. Сохранение в upsert...")
                     md_bytes = markdown_content.encode("utf-8")
                     metadata = {
-                        "official-name": official_name.encode('utf-8').decode('latin-1', 'ignore'),
-                        "sign-date": sign_date
+                        "official-name": base64.b64encode(official_name.encode('utf-8')).decode('ascii'),
+                        "sign-date": sign_date,
+                        "short-number": base64.b64encode(short_number.encode('utf-8')).decode('ascii') if short_number else "unknown"
                     }
                     self.minio_client.put_object(
                         self.rag_bucket,
