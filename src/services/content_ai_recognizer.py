@@ -207,7 +207,10 @@ class ContentCaptureRecognizer:
                                 doc_content = xml_bytes.decode('utf-8', errors='replace')
                     
                     if doc_content:
-                        results[file_name] = parse_result_xml(doc_content)
+                        results[file_name] = {
+                            "parsed_dict": parse_result_xml(doc_content),
+                            "raw_xml": doc_content
+                        }
                 except Exception as e:
                     print(f"Error processing document {doc_id}: {e}")
                 
