@@ -1,0 +1,20 @@
+name: Deploy to VDS
+
+on:
+  workflow_dispatch: # Позволяет запускать Action вручную по кнопке!
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to Server via SSH
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.VDS_HOST }}
+          username: ${{ secrets.VDS_USER }}
+          key: ${{ secrets.VDS_SSH_KEY }}
+          script: |
+            cd Financial-AI-Agent
+            git pull origin main
+            sudo docker compose up -d --build
