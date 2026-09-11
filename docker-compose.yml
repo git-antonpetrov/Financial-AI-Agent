@@ -3,8 +3,8 @@ services:
     image: quay.io/minio/minio:latest
     container_name: s3-storage-minio
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
@@ -17,7 +17,7 @@ services:
     image: chromadb/chroma:latest
     container_name: chroma-vector-db
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - chroma_gold_data:/chroma/chroma
     restart: unless-stopped
@@ -39,6 +39,8 @@ services:
       - .env
     volumes:
       - ./data:/app/data
+      # Проброс Application Default Credentials с хоста (Linux VDS)
+      - ~/.config/gcloud:/root/.config/gcloud:ro
     restart: unless-stopped
 
   postgres-db:
@@ -49,7 +51,7 @@ services:
       POSTGRES_PASSWORD: agent_password
       POSTGRES_DB: financial_agent
     ports:
-      - "15432:5432"
+      - "127.0.0.1:15432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
@@ -61,7 +63,7 @@ services:
       PGADMIN_DEFAULT_EMAIL: admin@admin.com
       PGADMIN_DEFAULT_PASSWORD: admin
     ports:
-      - "5050:80"
+      - "127.0.0.1:5050:80"
     volumes:
       - pgadmin_data:/var/lib/pgadmin
     depends_on:
