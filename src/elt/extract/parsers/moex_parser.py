@@ -10,25 +10,19 @@ from io import BytesIO
 from urllib.parse import urljoin, unquote
 # pyrefly: ignore [missing-import]
 from bs4 import BeautifulSoup
+from typing import Callable, Any
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")))
 from src.utils.console_logger import log_info, log_error, log_warning
+from src.core.models import ExtractState
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+# pyrefly: ignore [missing-import]
+from minio.error import S3Error
+from minio import Minio
 
 # Исправление кодировки консоли Windows
 sys.stdout.reconfigure(encoding='utf-8')
-
-try:
-    # pyrefly: ignore [missing-import]
-    from src.core.app_clients import AppClients
-    # pyrefly: ignore [missing-import]
-    from src.core.models import ExtractState
-    from sqlalchemy import select
-    # pyrefly: ignore [missing-import]
-    from minio.error import S3Error
-except ImportError:
-    log_error("MOEX Парсер", "Отсутствуют необходимые библиотеки. Проверьте requirements.txt")
-    sys.exit(1)
-
-# Добавление корня проекта в sys.path для импортов из src
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 
 # Отключение предупреждений InsecureRequestWarning для ГОСТ-сайтов
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -38,8 +32,10 @@ class MoexParser:
     Парсер для загрузки документов с сайта Московской Биржи (MOEX).
     Скачивает файлы и сохраняет их в бакет MinIO, а также логирует состояние в базу данных PostgreSQL.
     """
-    def __init__(self, base_dir: str):
+    def __init__(self, db_session_maker: Callable[..., AsyncSession], minio_client: Minio, base_dir: str):
         self.base_dir = base_dir
+        self.db_session_maker = db_session_maker
+        self.minio_client = minio_client
         
         self.target_urls = [
             "https://www.moex.com/ru/documents/301",
@@ -56,12 +52,10 @@ class MoexParser:
         }
         
         self.minio_bucket = "raw-documents"
-        self.minio_client = AppClients.get_minio_client()
-        self.db_session_maker = AppClients.get_async_session()
-        
         self._ensure_bucket_exists()
 
     def _ensure_bucket_exists(self):
+        """Проверяет существование бакета в MinIO и создает его при необходимости."""
         try:
             if not self.minio_client.bucket_exists(self.minio_bucket):
                 self.minio_client.make_bucket(self.minio_bucket)
@@ -69,7 +63,7 @@ class MoexParser:
         except Exception as e:
             log_error("MinIO", f"Не удалось проверить или создать бакет: {e}")
 
-    def _extract_document_link(self, soup: BeautifulSoup, base_url: str) -> str:
+    def _extract_document_link(self, soup: BeautifulSoup, base_url: str) -> str | None:
         """Извлекает ссылку на документ 'Действующая редакция' со страницы."""
         if 'moex.com' in base_url:
             for link in soup.find_all("a", href=True):
@@ -116,7 +110,8 @@ class MoexParser:
             log_error("MinIO", f"Неожиданная ошибка MinIO: {e}")
             return False
 
-    async def _process_page(self, session, page_url, sem):
+    async def _process_page(self, session: aiohttp.ClientSession, page_url: str, sem: asyncio.Semaphore) -> bool:
+        """Анализирует страницу, ищет документ и при необходимости скачивает его."""
         async with sem:
             try:
                 async with session.get(page_url, headers=self.headers, ssl=False, timeout=15) as resp:
@@ -203,6 +198,7 @@ class MoexParser:
                 return False
 
     async def fetch_and_download(self) -> bool:
+        """Запускает асинхронный опрос целевых страниц."""
         log_info("MOEX Парсер", f"Старт параллельной проверки документов ({len(self.target_urls)} страниц)...")
         
         sem = asyncio.Semaphore(3)
@@ -214,11 +210,17 @@ class MoexParser:
         log_info("MOEX Парсер", "Завершена работа парсера MOEX.")
         return any(results)
 
-def run_moex_parser(base_dir=None):
+def run_moex_parser(db_session_maker: Callable[..., AsyncSession], minio_client: Minio, base_dir: str = None) -> bool:
+    """Точка входа для запуска парсера MOEX."""
     if base_dir is None:
         base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
-    parser = MoexParser(base_dir)
+    parser = MoexParser(db_session_maker, minio_client, base_dir)
     return asyncio.run(parser.fetch_and_download())
 
 if __name__ == "__main__":
-    run_moex_parser()
+    from src.core.clients.db import get_async_session_maker
+    from src.core.clients.storage import get_minio_client
+    
+    db_maker = get_async_session_maker()
+    minio = get_minio_client()
+    run_moex_parser(db_maker, minio)

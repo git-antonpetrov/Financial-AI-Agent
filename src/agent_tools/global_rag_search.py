@@ -2,13 +2,14 @@ import os
 import sys
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-# pyrefly: ignore [missing-import]
-from src.core.app_clients import AppClients
+from src.core.clients.vector_db import get_chroma_client
+from src.core.clients.llm import get_embedder
+from src.utils.console_logger import log_error
 
 def search_global_knowledge_base(query: str) -> str:
-    """Выполняет семантический поиск по векторной базе знаний."""
-    client = AppClients.get_chroma_db()
-    embedder = AppClients.get_embedder_client()
+    """Осуществляется семантический поиск по векторной базе знаний."""
+    client = get_chroma_client()
+    embedder = get_embedder()
     try:
         collection = client.get_collection(
             name="global_rules",
@@ -32,7 +33,7 @@ def search_global_knowledge_base(query: str) -> str:
             return response_text.strip()
             
     except Exception as e:
-        print(f"Logs: \033[91m[Ошибка]\033[0m Сбой поиска в базе: {e}") 
+        log_error("Global RAG Search", f"Сбой поиска в базе: {e}") 
     return "Ничего релевантного в нормативной базе не найдено."
 
 KNOWLEDGE_BASE_SCHEMA = {
