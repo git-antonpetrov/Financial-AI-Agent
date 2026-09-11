@@ -195,7 +195,7 @@ class CbrRssParser:
                 
             print(f"\033[96m[CBR Парсер]\033[0m Найдено новых документов: {len(new_items)}")
             
-            sem = asyncio.Semaphore(20) # Ограничение: максимум 20 одновременных задач
+            sem = asyncio.Semaphore(3) # Ограничение: максимум 3 одновременных задач
             tasks = [self._process_item(session, item, sem, tracker, processed_guids) for item in new_items]
             
             results = await asyncio.gather(*tasks)

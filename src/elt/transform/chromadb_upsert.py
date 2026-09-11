@@ -34,7 +34,7 @@ class ChromaDBUpsert:
             length_function=len
         )
         
-        self.max_concurrency = 5
+        self.max_concurrency = 3
         self.semaphore = asyncio.Semaphore(self.max_concurrency)
         self.embedding_batch_size = 200
         

@@ -25,7 +25,7 @@ services:
   extract-parsers:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: src/elt/Dockerfile
     container_name: extract-parsers
     depends_on:
       - s3-minio

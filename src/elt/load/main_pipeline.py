@@ -63,8 +63,8 @@ class MainPipeline:
         self.minio_client = AppClients.get_minio_client()
         self.content_ai = AppClients.get_content_ai_client()
         self.cloud_ai = AppClients.get_cloud_ai_client()
-        
-        self.semaphore = asyncio.Semaphore(3)
+        # Контроль одновременных задач (снижено до 1 для экономии ресурсов)
+        self.semaphore = asyncio.Semaphore(1)
         
         # Cache setup
         self.cache_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "data", "cache", "main_pipeline")

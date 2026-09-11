@@ -197,7 +197,7 @@ class MoexParser:
         tracker = self._load_tracker()
         processed_urls = set(tracker.get("processed_urls", []))
         
-        sem = asyncio.Semaphore(5)
+        sem = asyncio.Semaphore(3)
         
         async with aiohttp.ClientSession() as session:
             tasks = [self._process_page(session, url, sem, tracker, processed_urls) for url in self.target_urls]
