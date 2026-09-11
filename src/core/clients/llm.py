@@ -22,14 +22,29 @@ class LiteLLMVertexEmbeddingFunction(EmbeddingFunction):
         Returns:
             list: Список полученных эмбеддингов.
         """
+        settings = get_settings()
         BATCH_SIZE = 200
         all_embeddings = []
         for i in range(0, len(input), BATCH_SIZE):
             batch = input[i:i + BATCH_SIZE]
-            response = litellm.embedding(
-                model="vertex_ai/gemini-embedding-001",
-                input=batch
-            )
+            
+            kwargs = {
+                "model": "vertex_ai/gemini-embedding-001",
+                "input": batch
+            }
+            if settings.VERTEX_API_BASE:
+                # litellm ожидает, что api_base будет полным URL до модели, иначе он ломает путь
+                location = settings.VERTEX_LOCATION or "global"
+                project = settings.VERTEX_PROJECT
+                model_clean = "gemini-embedding-001"
+                base = settings.VERTEX_API_BASE.rstrip('/')
+                kwargs["api_base"] = f"{base}/v1/projects/{project}/locations/{location}/publishers/google/models/{model_clean}"
+            if settings.VERTEX_LOCATION:
+                kwargs["vertex_location"] = settings.VERTEX_LOCATION
+            if settings.VERTEX_PROJECT:
+                kwargs["vertex_project"] = settings.VERTEX_PROJECT
+                
+            response = litellm.embedding(**kwargs)
             all_embeddings.extend([item['embedding'] for item in response['data']])
         return all_embeddings
 
@@ -67,18 +82,32 @@ class CloudAIClient:
 
     def completion(self, *args, **kwargs):
         """Синхронный вызов LLM с автоматической подстановкой параметров проекта."""
-        if "vertex_location" not in kwargs:
+        if "vertex_location" not in kwargs and self.settings.VERTEX_LOCATION:
             kwargs["vertex_location"] = self.settings.VERTEX_LOCATION
-        if "vertex_project" not in kwargs:
+        if "vertex_project" not in kwargs and self.settings.VERTEX_PROJECT:
             kwargs["vertex_project"] = self.settings.VERTEX_PROJECT
+        if "api_base" not in kwargs and self.settings.VERTEX_API_BASE:
+            location = kwargs["vertex_location"]
+            project = kwargs["vertex_project"]
+            model = args[0] if args else kwargs.get("model", "")
+            model_clean = model.replace("vertex_ai/", "")
+            base = self.settings.VERTEX_API_BASE.rstrip('/')
+            kwargs["api_base"] = f"{base}/v1/projects/{project}/locations/{location}/publishers/google/models/{model_clean}"
         return litellm.completion(*args, **kwargs)
 
     async def acompletion(self, *args, **kwargs):
         """Асинхронный вызов LLM с автоматической подстановкой параметров проекта."""
-        if "vertex_location" not in kwargs:
+        if "vertex_location" not in kwargs and self.settings.VERTEX_LOCATION:
             kwargs["vertex_location"] = self.settings.VERTEX_LOCATION
-        if "vertex_project" not in kwargs:
+        if "vertex_project" not in kwargs and self.settings.VERTEX_PROJECT:
             kwargs["vertex_project"] = self.settings.VERTEX_PROJECT
+        if "api_base" not in kwargs and self.settings.VERTEX_API_BASE:
+            location = kwargs["vertex_location"]
+            project = kwargs["vertex_project"]
+            model = args[0] if args else kwargs.get("model", "")
+            model_clean = model.replace("vertex_ai/", "")
+            base = self.settings.VERTEX_API_BASE.rstrip('/')
+            kwargs["api_base"] = f"{base}/v1/projects/{project}/locations/{location}/publishers/google/models/{model_clean}"
         return await litellm.acompletion(*args, **kwargs)
 
 @lru_cache

@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     # LLM Settings (Vertex)
     VERTEX_PROJECT: Optional[str] = None
     VERTEX_LOCATION: str = "global"
+    VERTEX_API_BASE: Optional[str] = None
     EMBEDDING_PROVIDER: str = "vertex"
     OPENAI_API_KEY: Optional[str] = None
     
