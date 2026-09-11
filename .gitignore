@@ -198,11 +198,8 @@ docker_volume_chroma/
 # Локальные системные бинарники
 poppler/
 popler/
-# Игнорируем всё внутри папки data, кроме .gitkeep
-data/*
-!data/cache/
-data/cache/*
-!data/cache/.gitkeep
+# Игнорируем папку data с временными файлами
+data/
 # Логи, артефакты парсеров и дампы ошибок
 # Оставляем подпапки, но игнорируем их содержимое
 !logs/errors/

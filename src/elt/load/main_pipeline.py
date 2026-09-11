@@ -7,6 +7,7 @@ import asyncio
 import io
 import re
 import json
+import tempfile
 from datetime import datetime, date
 from pydantic import BaseModel, Field
 import fitz
@@ -88,10 +89,6 @@ class MainPipeline:
         # Ограничение одновременных задач для экономии ресурсов
         self.semaphore = asyncio.Semaphore(1)
         
-        # Папка для временных файлов
-        self.temp_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "data", "temp_main_pipeline")
-        os.makedirs(self.temp_dir, exist_ok=True)
-        
         self.llm_model = os.getenv("PIPELINE_MODEL_NAME", "vertex_ai/gemini-3.5-flash")
         self.reasoning_effort = os.getenv("PIPELINE_REASONING_EFFORT", "medium")
         
@@ -136,7 +133,7 @@ class MainPipeline:
         except Exception:
             return False
 
-    async def _convert_to_pdf_if_needed(self, file_name: str, file_bytes: bytes) -> bytes:
+    async def _convert_to_pdf_if_needed(self, file_name: str, file_bytes: bytes, temp_dir: str) -> bytes:
         """Конвертирует документ в формат PDF, если он таковым не является."""
         ext = os.path.splitext(file_name)[1].lower()
         if ext == ".pdf":
@@ -144,13 +141,13 @@ class MainPipeline:
 
         log_info("Main Pipeline", f"Конвертация файла {file_name} в PDF...")
         
-        input_path = os.path.join(self.temp_dir, file_name)
+        input_path = os.path.join(temp_dir, file_name)
         with open(input_path, "wb") as f:
             f.write(file_bytes)
             
         try:
             # Вызов синхронной логики конвертации через to_thread
-            pdf_path = await asyncio.to_thread(convert_to_pdf, input_path, self.temp_dir)
+            pdf_path = await asyncio.to_thread(convert_to_pdf, input_path, temp_dir)
             with open(pdf_path, "rb") as f:
                 pdf_bytes = f.read()
             return pdf_bytes
@@ -158,7 +155,7 @@ class MainPipeline:
             # Очистка временных файлов
             if os.path.exists(input_path):
                 os.remove(input_path)
-            expected_pdf = os.path.join(self.temp_dir, f"{os.path.splitext(file_name)[0]}.pdf")
+            expected_pdf = os.path.join(temp_dir, f"{os.path.splitext(file_name)[0]}.pdf")
             if os.path.exists(expected_pdf):
                 os.remove(expected_pdf)
 
@@ -219,20 +216,21 @@ class MainPipeline:
                     markdown_content = file_bytes.decode("utf-8")
                 else:
                     # 2. Конвертация в PDF
-                    pdf_bytes = await self._convert_to_pdf_if_needed(file_name, file_bytes)
-                    
-                    # 3. Валидация PDF документа
-                    if not self._validate_pdf(pdf_bytes):
-                        log_error("Main Pipeline", f"Файл {file_name} является битым PDF. Удаление.")
-                        self.minio_client.remove_object(self.raw_bucket, file_name)
-                        await self._update_db_state(state_id, md5_hash=file_hash, status="skipped", error_message="Дубликат по хешу", processing_end_date=datetime.now().date(), processing_end_time=datetime.now().time())
-                        return
-    
-                    # 4. Распознавание текста с помощью Content AI
-                    log_info("Main Pipeline", f"Отправка {file_name} в Content AI...")
-                    temp_pdf_path = os.path.join(self.temp_dir, "temp_recognition.pdf")
-                    with open(temp_pdf_path, "wb") as f:
-                        f.write(pdf_bytes)
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        pdf_bytes = await self._convert_to_pdf_if_needed(file_name, file_bytes, temp_dir)
+                        
+                        # 3. Валидация PDF документа
+                        if not self._validate_pdf(pdf_bytes):
+                            log_error("Main Pipeline", f"Файл {file_name} является битым PDF. Удаление.")
+                            self.minio_client.remove_object(self.raw_bucket, file_name)
+                            await self._update_db_state(state_id, md5_hash=file_hash, status="skipped", error_message="Дубликат по хешу", processing_end_date=datetime.now().date(), processing_end_time=datetime.now().time())
+                            return
+        
+                        # 4. Распознавание текста с помощью Content AI
+                        log_info("Main Pipeline", f"Отправка {file_name} в Content AI...")
+                        temp_pdf_path = os.path.join(temp_dir, "temp_recognition.pdf")
+                        with open(temp_pdf_path, "wb") as f:
+                            f.write(pdf_bytes)
                         
                     # Распознавание может занять время, запуск в отдельном потоке
                     rec_result = await asyncio.to_thread(self.content_ai.recognize, temp_pdf_path)
