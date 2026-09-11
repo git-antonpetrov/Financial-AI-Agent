@@ -103,3 +103,5 @@ zeep==4.3.3
 lxml==6.1.1
 minio==7.2.20
 apscheduler==3.11.3
+sqlalchemy>=2.0.0
+asyncpg>=0.29.0

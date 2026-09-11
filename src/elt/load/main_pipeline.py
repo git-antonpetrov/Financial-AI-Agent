@@ -1,17 +1,18 @@
 import os
 import sys
-import json
 import time
 import hashlib
 import base64
 import asyncio
 import io
 import re
-from datetime import datetime
+import json
+from datetime import datetime, date
 from pydantic import BaseModel, Field
 import fitz
 # pyrefly: ignore [missing-import]
 from minio.error import S3Error
+from sqlalchemy import select, and_
 
 # Исправление кодировки консоли Windows
 sys.stdout.reconfigure(encoding='utf-8')
@@ -19,6 +20,7 @@ sys.stdout.reconfigure(encoding='utf-8')
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 
 from src.core.app_clients import AppClients
+from src.core.models import LoadState
 from src.utils.document_to_pdf import convert_to_pdf
 from src.utils.console_logger import log_info, log_error, log_warning
 
@@ -29,16 +31,16 @@ class DocumentAnalysisResult(BaseModel):
     sign_date: str = Field(description="Дата подписания строго в формате дд.мм.гггг.")
     short_number: str = Field(description="Короткий номер акта (например ФЗ-115, 153-И).")
 
-def parse_russian_date(date_str: str) -> datetime:
+def parse_russian_date(date_str: str) -> date:
     """
-    Преобразует строку с датой на русском языке в объект datetime.
+    Преобразует строку с датой на русском языке в объект date.
     """
     if not date_str:
-        return datetime.min
+        return date.min
     # Проверка формата дд.мм.гггг
     match = re.search(r"(\d{1,2})\.(\d{1,2})\.(\d{4})", date_str)
     if match:
-        return datetime(int(match.group(3)), int(match.group(2)), int(match.group(1)))
+        return date(int(match.group(3)), int(match.group(2)), int(match.group(1)))
     # Проверка текстового формата (например, 1 января 2024)
     months = {
         "января": 1, "февраля": 2, "марта": 3, "апреля": 4, "мая": 5, "июня": 6,
@@ -50,8 +52,8 @@ def parse_russian_date(date_str: str) -> datetime:
         if m_name in date_str_lower:
             match = re.search(r"(\d{1,2})\s+" + m_name + r".*?(\d{4})", date_str_lower)
             if match:
-                return datetime(int(match.group(2)), m_num, int(match.group(1)))
-    return datetime.min
+                return date(int(match.group(2)), m_num, int(match.group(1)))
+    return date.min
 
 class RepealedDocumentsResult(BaseModel):
     repealed_docs_system_names: list[str] = Field(description="Список системных имен отмененных актов.")
@@ -61,6 +63,7 @@ class MainPipeline:
     Главный конвейер (Load Layer).
     Отвечает за выгрузку сырых документов из MinIO, конвертацию, распознавание,
     классификацию с помощью LLM и загрузку в итоговые бакеты.
+    Логирует состояние каждого документа в PostgreSQL.
     """
     def __init__(self):
         self.raw_bucket = "raw-documents"
@@ -69,14 +72,14 @@ class MainPipeline:
         self.minio_client = AppClients.get_minio_client()
         self.content_ai = AppClients.get_content_ai_client()
         self.cloud_ai = AppClients.get_cloud_ai_client()
+        self.db_session_maker = AppClients.get_async_session()
+        
         # Ограничение одновременных задач для экономии ресурсов
         self.semaphore = asyncio.Semaphore(1)
         
-        # Настройка кэша
-        self.cache_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "data", "cache", "main_pipeline")
-        os.makedirs(self.cache_dir, exist_ok=True)
-        self.cache_file = os.path.join(self.cache_dir, "pipeline_cache.json")
-        self.cache_lock = asyncio.Lock()
+        # Папка для временных файлов
+        self.temp_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "data", "temp_main_pipeline")
+        os.makedirs(self.temp_dir, exist_ok=True)
         
         self.llm_model = os.getenv("PIPELINE_MODEL_NAME", "vertex_ai/gemini-3.5-flash")
         self.reasoning_effort = os.getenv("PIPELINE_REASONING_EFFORT", "medium")
@@ -93,30 +96,15 @@ class MainPipeline:
             if not self.minio_client.bucket_exists(bucket):
                 self.minio_client.make_bucket(bucket)
 
-    async def _load_cache(self) -> dict:
-        """Загружает состояние кэша из файла."""
-        async with self.cache_lock:
-            if os.path.exists(self.cache_file):
-                try:
-                    with open(self.cache_file, "r", encoding="utf-8") as f:
-                        return json.load(f)
-                except json.JSONDecodeError:
-                    pass
-            return {}
-
-    async def _save_cache(self, file_name: str, cache_data: dict):
-        """Сохраняет состояние обработки файла в кэш."""
-        async with self.cache_lock:
-            current_cache = {}
-            if os.path.exists(self.cache_file):
-                try:
-                    with open(self.cache_file, "r", encoding="utf-8") as f:
-                        current_cache = json.load(f)
-                except json.JSONDecodeError:
-                    pass
-            current_cache[file_name] = cache_data
-            with open(self.cache_file, "w", encoding="utf-8") as f:
-                json.dump(current_cache, f, indent=4, ensure_ascii=False)
+    async def _update_db_state(self, state_id: str, **kwargs):
+        """Обновляет запись о состоянии загрузки в БД."""
+        async with self.db_session_maker() as db:
+            result = await db.execute(select(LoadState).where(LoadState.id == state_id))
+            state = result.scalar_one_or_none()
+            if state:
+                for key, value in kwargs.items():
+                    setattr(state, key, value)
+                await db.commit()
 
     async def _read_system_prompt(self) -> str:
         """Читает системный промпт из файла."""
@@ -144,16 +132,14 @@ class MainPipeline:
             return file_bytes
 
         log_info("Main Pipeline", f"Конвертация файла {file_name} в PDF...")
-        temp_dir = os.path.join(self.cache_dir, "temp_conversion")
-        os.makedirs(temp_dir, exist_ok=True)
         
-        input_path = os.path.join(temp_dir, file_name)
+        input_path = os.path.join(self.temp_dir, file_name)
         with open(input_path, "wb") as f:
             f.write(file_bytes)
             
         try:
             # Вызов синхронной логики конвертации через to_thread
-            pdf_path = await asyncio.to_thread(convert_to_pdf, input_path, temp_dir)
+            pdf_path = await asyncio.to_thread(convert_to_pdf, input_path, self.temp_dir)
             with open(pdf_path, "rb") as f:
                 pdf_bytes = f.read()
             return pdf_bytes
@@ -161,7 +147,7 @@ class MainPipeline:
             # Очистка временных файлов
             if os.path.exists(input_path):
                 os.remove(input_path)
-            expected_pdf = os.path.join(temp_dir, f"{os.path.splitext(file_name)[0]}.pdf")
+            expected_pdf = os.path.join(self.temp_dir, f"{os.path.splitext(file_name)[0]}.pdf")
             if os.path.exists(expected_pdf):
                 os.remove(expected_pdf)
 
@@ -172,15 +158,24 @@ class MainPipeline:
         2. Выполняет конвертацию и распознавание текста.
         3. Запускает анализ документа через LLM (Gemini).
         4. Находит отмененные акты.
-        5. Переносит результаты в MinIO и обновляет кэш.
+        5. Переносит результаты в MinIO и обновляет БД.
         """
         async with self.semaphore:
-            start_time = datetime.now()
-            cache_info = {
-                "start_time": start_time.isoformat(),
-                "status": "processing",
-                "file_name": file_name
-            }
+            processing_start_time = datetime.now()
+            
+            # Создаем начальную запись в БД
+            async with self.db_session_maker() as db:
+                new_state = LoadState(
+                    file_name=file_name,
+                    started_at=processing_start_time,
+                    status="processing"
+                )
+                db.add(new_state)
+                await db.commit()
+                # Получаем присвоенный UUID
+                await db.refresh(new_state)
+                state_id = new_state.id
+                
             try:
                 # 1. Скачивание документа
                 response = self.minio_client.get_object(self.raw_bucket, file_name)
@@ -189,14 +184,19 @@ class MainPipeline:
                 response.release_conn()
                 
                 file_hash = hashlib.md5(file_bytes).hexdigest()
-                cache_info["md5"] = file_hash
+                await self._update_db_state(state_id, file_hash=file_hash)
                 
-                # Проверка на наличие дубликатов по хэшу
-                cache_dict = await self._load_cache()
-                for key, data in cache_dict.items():
-                    if data.get("status") == "completed" and data.get("md5") == file_hash:
+                # Проверка на наличие дубликатов по хэшу в БД
+                async with self.db_session_maker() as db:
+                    result = await db.execute(
+                        select(LoadState)
+                        .where(and_(LoadState.file_hash == file_hash, LoadState.status == "completed"))
+                    )
+                    duplicate = result.scalar_one_or_none()
+                    if duplicate:
                         log_warning("Main Pipeline", f"Файл {file_name} является дубликатом по MD5 хэшу. Пропуск и удаление.")
                         self.minio_client.remove_object(self.raw_bucket, file_name)
+                        await self._update_db_state(state_id, status="duplicate", completed_at=datetime.now())
                         return
                 
                 ext = os.path.splitext(file_name)[1].lower()
@@ -212,13 +212,12 @@ class MainPipeline:
                     if not self._validate_pdf(pdf_bytes):
                         log_error("Main Pipeline", f"Файл {file_name} является битым PDF. Удаление.")
                         self.minio_client.remove_object(self.raw_bucket, file_name)
-                        cache_info["status"] = "failed_validation"
-                        await self._save_cache(file_name, cache_info)
+                        await self._update_db_state(state_id, status="failed_validation", completed_at=datetime.now())
                         return
     
                     # 4. Распознавание текста с помощью Content AI
                     log_info("Main Pipeline", f"Отправка {file_name} в Content AI...")
-                    temp_pdf_path = os.path.join(self.cache_dir, "temp_recognition.pdf")
+                    temp_pdf_path = os.path.join(self.temp_dir, "temp_recognition.pdf")
                     with open(temp_pdf_path, "wb") as f:
                         f.write(pdf_bytes)
                         
@@ -230,9 +229,8 @@ class MainPipeline:
                     # Content Capture может вернуть несколько документов, берется первый
                     if not rec_result:
                         log_warning("Main Pipeline", f"Content AI не вернул результатов для {file_name}")
-                        cache_info["status"] = "no_recognition_result"
                         self.minio_client.remove_object(self.raw_bucket, file_name)
-                        await self._save_cache(file_name, cache_info)
+                        await self._update_db_state(state_id, status="no_recognition_result", completed_at=datetime.now())
                         return
                         
                     doc_data = list(rec_result.values())[0]
@@ -240,13 +238,12 @@ class MainPipeline:
                     
                     if not markdown_content.strip():
                         log_warning("Main Pipeline", f"Content AI вернул пустой текст для {file_name}")
-                        cache_info["status"] = "empty_text"
                         self.minio_client.remove_object(self.raw_bucket, file_name)
-                        await self._save_cache(file_name, cache_info)
+                        await self._update_db_state(state_id, status="empty_text", completed_at=datetime.now())
                         return
 
                 # 5. Умный Анализ (Gemini JSON)
-                self._log("INFO", f"Анализ документа {file_name} в LLM...")
+                log_info("Main Pipeline", f"Анализ документа {file_name} в LLM...")
                 sys_prompt = await self._read_system_prompt()
                 text_snippet = markdown_content[:5000]
                 
@@ -286,53 +283,62 @@ class MainPipeline:
                 sign_date = analysis_result.get("sign_date", "")
                 short_number = analysis_result.get("short_number", "")
                 
-                cache_info["analysis"] = analysis_result
-                cache_info["system_name"] = system_name
-                cache_info["official_name"] = official_name
-                cache_info["sign_date"] = sign_date
-                cache_info["short_number"] = short_number
-                
                 current_date = parse_russian_date(sign_date)
+                
+                await self._update_db_state(
+                    state_id,
+                    system_name=system_name,
+                    official_name=official_name,
+                    sign_date=current_date if current_date != date.min else None,
+                    short_number=short_number
+                )
+                
                 base_system_name = re.sub(r"_\d+$", "", system_name) if "_" in system_name else system_name
                 
                 is_new_version = False
                 
-                cache_dict = await self._load_cache()
-                
-                # Точное совпадение system_name
-                for key, data in cache_dict.items():
-                    if data.get("status") == "success" and data.get("system_name") == system_name:
-                        self._log("WARNING", f"Файл {file_name} является полным дубликатом (system_name). Пропуск и удаление.")
+                # Поиск в БД по system_name
+                async with self.db_session_maker() as db:
+                    result = await db.execute(
+                        select(LoadState)
+                        .where(and_(LoadState.system_name == system_name, LoadState.status == "completed"))
+                    )
+                    if result.scalar_one_or_none():
+                        log_warning("Main Pipeline", f"Файл {file_name} является полным дубликатом (system_name). Пропуск и удаление.")
                         self.minio_client.remove_object(self.raw_bucket, file_name)
+                        await self._update_db_state(state_id, status="duplicate", completed_at=datetime.now())
                         return
                         
-                # Поиск старых версий
-                max_cache_date = datetime.min
-                found_prev_version = False
-                
-                for key, data in cache_dict.items():
-                    if data.get("status") == "success":
-                        c_system_name = data.get("system_name", "")
+                    # Поиск старых версий (like base_system_name% или short_number)
+                    result = await db.execute(
+                        select(LoadState).where(LoadState.status == "completed")
+                    )
+                    all_completed = result.scalars().all()
+                    
+                    max_cache_date = date.min
+                    found_prev_version = False
+                    
+                    for state in all_completed:
+                        c_system_name = state.system_name or ""
                         c_base_system_name = re.sub(r"_\d+$", "", c_system_name) if "_" in c_system_name else c_system_name
-                        c_short_number = data.get("short_number", "")
+                        c_short_number = state.short_number or ""
                         
                         if (c_base_system_name == base_system_name) or (short_number and c_short_number == short_number):
                             found_prev_version = True
-                            c_date = parse_russian_date(data.get("sign_date", ""))
-                            if c_date > max_cache_date:
+                            c_date = state.sign_date
+                            if c_date and c_date > max_cache_date:
                                 max_cache_date = c_date
                                 
-                if found_prev_version:
-                    if current_date <= max_cache_date:
-                        self._log("WARNING", f"Файл {file_name} является старой версией или дубликатом (дата <= {max_cache_date.strftime('%d.%m.%Y') if max_cache_date != datetime.min else 'N/A'}). Пропуск и удаление.")
-                        self.minio_client.remove_object(self.raw_bucket, file_name)
-                        return
-                    else:
-                        self._log("INFO", f"Файл {file_name} является НОВОЙ редакцией. Обработка продолжается.")
-                        is_new_version = True
+                    if found_prev_version:
+                        if current_date <= max_cache_date:
+                            log_warning("Main Pipeline", f"Файл {file_name} является старой версией или дубликатом (дата <= {max_cache_date.strftime('%d.%m.%Y') if max_cache_date != date.min else 'N/A'}). Пропуск и удаление.")
+                            self.minio_client.remove_object(self.raw_bucket, file_name)
+                            await self._update_db_state(state_id, status="old_version", completed_at=datetime.now())
+                            return
+                        else:
+                            log_info("Main Pipeline", f"Файл {file_name} является НОВОЙ редакцией. Обработка продолжается.")
+                            is_new_version = True
 
-                
-                
                 # 6. Поиск отмененных актов
                 repeal_keywords = [r"утративш.*? силу", r"отменить", r"признать недействительн.*?"]
                 repeal_pattern = re.compile("|".join(repeal_keywords), re.IGNORECASE)
@@ -373,7 +379,7 @@ class MainPipeline:
                     repealed_docs = list(set(repealed_docs))
                     log_info("Main Pipeline", f"В список отмен добавлена предыдущая версия: {short_number}")
                     
-                cache_info["repealed_docs"] = repealed_docs
+                await self._update_db_state(state_id, repealed_docs=repealed_docs)
                 
                 # 7. Маршрутизация в rag-documents
                 if is_relevant:
@@ -407,17 +413,12 @@ class MainPipeline:
                 # 8. Удаление оригинала
                 self.minio_client.remove_object(self.raw_bucket, file_name)
                 
-                cache_info["status"] = "completed"
-                cache_info["end_time"] = datetime.now().isoformat()
-                await self._save_cache(file_name, cache_info)
+                await self._update_db_state(state_id, status="completed", completed_at=datetime.now())
                 log_info("Main Pipeline", f"Успешно обработан {file_name}")
 
             except Exception as e:
                 log_error("Main Pipeline", f"Ошибка при обработке {file_name}: {str(e)}")
-                cache_info["status"] = "error"
-                cache_info["error"] = str(e)
-                cache_info["end_time"] = datetime.now().isoformat()
-                await self._save_cache(file_name, cache_info)
+                await self._update_db_state(state_id, status="error", error_message=str(e)[:500], completed_at=datetime.now())
 
     async def run(self):
         """

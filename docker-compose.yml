@@ -29,14 +29,45 @@ services:
     container_name: extract-parsers
     depends_on:
       - s3-minio
+      - postgres-db
     environment:
       - MINIO_ENDPOINT=s3-minio:9000
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
+      - DATABASE_URL=postgresql+asyncpg://agent_user:agent_password@postgres-db:5432/financial_agent
     volumes:
       - ./data:/app/data
+    restart: unless-stopped
+
+  postgres-db:
+    image: postgres:15-alpine
+    container_name: financial-postgres
+    environment:
+      POSTGRES_USER: agent_user
+      POSTGRES_PASSWORD: agent_password
+      POSTGRES_DB: financial_agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: pgadmin4_container
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - postgres-db
     restart: unless-stopped
 
 volumes:
   minio_data:
   chroma_gold_data:
+  postgres_data:
+  pgadmin_data:

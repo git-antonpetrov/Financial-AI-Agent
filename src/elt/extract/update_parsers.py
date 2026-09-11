@@ -32,28 +32,29 @@ async def main():
     главный конвейер загрузки (Load), а затем трансформации и векторизации (Transform).
     """
     log_info("Оркестратор Парсеров", "Инициализация...")
-    
     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-    cache_dir = os.path.join(base_dir, "data", "cache")
-    os.makedirs(cache_dir, exist_ok=True)
-    
-    tracker_path = os.path.join(cache_dir, "orchestrator_state.json")
     
     # Проверка даты последнего запуска
-    today_str = datetime.date.today().isoformat()
+    today_date = datetime.date.today()
     
-    if os.path.exists(tracker_path):
-        try:
-            with open(tracker_path, "r", encoding="utf-8") as f:
-                tracker = json.load(f)
-                last_run = tracker.get("last_run_date")
-                if last_run == today_str:
-                    log_warning("Оркестратор Парсеров", f"Скрипт уже запускался сегодня ({today_str}). Пропуск.")
-                    return
-        except json.JSONDecodeError:
-            pass
+    try:
+        from src.core.app_clients import AppClients
+        from src.core.models import OrchestratorRun
+        from sqlalchemy import select
+        
+        session_maker = AppClients.get_async_session()
+        async with session_maker() as session:
+            result = await session.execute(select(OrchestratorRun).where(OrchestratorRun.run_date == today_date))
+            existing_run = result.scalar_one_or_none()
+            if existing_run:
+                log_warning("Оркестратор Парсеров", f"Скрипт уже запускался сегодня ({today_date}). Пропуск.")
+                return
+    except Exception as e:
+        log_error("Оркестратор Парсеров", f"Ошибка проверки состояния в БД: {e}")
+        return
             
-    log_info("Оркестратор Парсеров", f"Запуск параллельного обновления парсеров (дата: {today_str})...")
+    log_info("Оркестратор Парсеров", f"Запуск параллельного обновления парсеров (дата: {today_date})...")
+    started_at = datetime.datetime.now()
     
     # Парсеры запускаются параллельно через потоки, так как их точки входа используют asyncio.run()
     moex_task = asyncio.to_thread(run_moex_parser, base_dir)
@@ -63,10 +64,21 @@ async def main():
     
     moex_has_new = results[0]
     cbr_has_new = results[1]
+    has_new_files = moex_has_new or cbr_has_new
     
     # Трекер обновляется после успешного запуска
-    with open(tracker_path, "w", encoding="utf-8") as f:
-        json.dump({"last_run_date": today_str}, f, indent=4)
+    try:
+        async with session_maker() as session:
+            new_run = OrchestratorRun(
+                run_date=today_date,
+                started_at=started_at,
+                completed_at=datetime.datetime.now(),
+                has_new_files=has_new_files
+            )
+            session.add(new_run)
+            await session.commit()
+    except Exception as e:
+        log_error("Оркестратор Парсеров", f"Ошибка сохранения состояния запуска в БД: {e}")
     
     if moex_has_new or cbr_has_new:
         log_info("Оркестратор Парсеров", "Обнаружены новые загруженные файлы. Начинается цепочка обработки.")
@@ -110,6 +122,9 @@ async def start_service():
     Запускает фоновый сервис планировщика APScheduler.
     Гарантирует выполнение пайплайна сразу при запуске и далее раз в сутки по расписанию.
     """
+    from src.core.app_clients import AppClients
+    await AppClients.init_db()
+
     log_info("Оркестратор Парсеров", "Запуск фонового сервиса (APScheduler)...")
     
     # Настраивается планировщик

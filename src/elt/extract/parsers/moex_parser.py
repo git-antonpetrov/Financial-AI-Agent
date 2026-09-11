@@ -1,11 +1,11 @@
 import os
 import sys
-import json
 import uuid
 import urllib3
 import re
 import asyncio
 import aiohttp
+from datetime import datetime, date
 from io import BytesIO
 from urllib.parse import urljoin, unquote
 # pyrefly: ignore [missing-import]
@@ -19,9 +19,12 @@ try:
     # pyrefly: ignore [missing-import]
     from src.core.app_clients import AppClients
     # pyrefly: ignore [missing-import]
+    from src.core.models import ExtractState
+    from sqlalchemy import select
+    # pyrefly: ignore [missing-import]
     from minio.error import S3Error
 except ImportError:
-    log_error("MOEX Парсер", "Библиотека 'minio' не найдена. Установите ее: pip install minio")
+    log_error("MOEX Парсер", "Отсутствуют необходимые библиотеки. Проверьте requirements.txt")
     sys.exit(1)
 
 # Добавление корня проекта в sys.path для импортов из src
@@ -33,13 +36,10 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 class MoexParser:
     """
     Парсер для загрузки документов с сайта Московской Биржи (MOEX).
-    Скачивает файлы и сохраняет их в бакет MinIO.
+    Скачивает файлы и сохраняет их в бакет MinIO, а также логирует состояние в базу данных PostgreSQL.
     """
     def __init__(self, base_dir: str):
         self.base_dir = base_dir
-        self.cache_dir = os.path.join(base_dir, "data", "cache", "moex_parser")
-        os.makedirs(self.cache_dir, exist_ok=True)
-        self.tracker_path = os.path.join(self.cache_dir, "moex_state_tracker.json")
         
         self.target_urls = [
             "https://www.moex.com/ru/documents/301",
@@ -57,6 +57,7 @@ class MoexParser:
         
         self.minio_bucket = "raw-documents"
         self.minio_client = AppClients.get_minio_client()
+        self.db_session_maker = AppClients.get_async_session()
         
         self._ensure_bucket_exists()
 
@@ -67,19 +68,6 @@ class MoexParser:
                 log_info("MOEX Парсер", f"Создан бакет: {self.minio_bucket}")
         except Exception as e:
             log_error("MinIO", f"Не удалось проверить или создать бакет: {e}")
-
-    def _load_tracker(self) -> dict:
-        if os.path.exists(self.tracker_path):
-            try:
-                with open(self.tracker_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except json.JSONDecodeError:
-                pass
-        return {"processed_urls": []}
-
-    def _save_tracker(self, data: dict):
-        with open(self.tracker_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
 
     def _extract_document_link(self, soup: BeautifulSoup, base_url: str) -> str:
         """Извлекает ссылку на документ 'Действующая редакция' со страницы."""
@@ -128,7 +116,7 @@ class MoexParser:
             log_error("MinIO", f"Неожиданная ошибка MinIO: {e}")
             return False
 
-    async def _process_page(self, session, page_url, sem, tracker, processed_urls):
+    async def _process_page(self, session, page_url, sem):
         async with sem:
             try:
                 async with session.get(page_url, headers=self.headers, ssl=False, timeout=15) as resp:
@@ -149,15 +137,22 @@ class MoexParser:
                 else:
                     absolute_url = urljoin(page_url, pdf_path)
                 
-                if absolute_url in processed_urls:
-                    log_info("MOEX Парсер", f"Документ уже загружен ранее (пропуск): {absolute_url}")
-                    return False
-                
+                # Проверка наличия документа в БД
+                async with self.db_session_maker() as db:
+                    result = await db.execute(select(ExtractState).where(ExtractState.source_url == absolute_url))
+                    if result.scalar_one_or_none():
+                        log_info("MOEX Парсер", f"Документ уже загружен ранее (пропуск): {absolute_url}")
+                        return False
+
                 log_info("MOEX Парсер", f"Скачивание нового документа: {absolute_url}")
+                download_start_time = datetime.now().time()
+                
                 async with session.get(absolute_url, headers=self.headers, ssl=False, timeout=30) as doc_resp:
                     doc_resp.raise_for_status()
                     content = await doc_resp.read()
                     content_disp = doc_resp.headers.get("Content-Disposition", "")
+                    
+                download_end_time = datetime.now().time()
                     
                 filename = ""
                 if content_disp:
@@ -186,9 +181,20 @@ class MoexParser:
                 upload_success = await asyncio.to_thread(self.upload_to_minio, content, filename)
                 
                 if upload_success:
-                    processed_urls.add(absolute_url)
-                    tracker["processed_urls"] = list(processed_urls)
-                    self._save_tracker(tracker)
+                    # Сохранение в базу данных
+                    async with self.db_session_maker() as db:
+                        new_state = ExtractState(
+                            source="MOEX",
+                            source_url=absolute_url,
+                            file_name=filename,
+                            pub_date=date.today(), # MOEX не предоставляет дату, ставим сегодня
+                            download_date=date.today(),
+                            download_start_time=download_start_time,
+                            download_end_time=download_end_time,
+                            status="downloaded"
+                        )
+                        db.add(new_state)
+                        await db.commit()
                     return True
                 return False
                 
@@ -198,13 +204,11 @@ class MoexParser:
 
     async def fetch_and_download(self) -> bool:
         log_info("MOEX Парсер", f"Старт параллельной проверки документов ({len(self.target_urls)} страниц)...")
-        tracker = self._load_tracker()
-        processed_urls = set(tracker.get("processed_urls", []))
         
         sem = asyncio.Semaphore(3)
         
         async with aiohttp.ClientSession() as session:
-            tasks = [self._process_page(session, url, sem, tracker, processed_urls) for url in self.target_urls]
+            tasks = [self._process_page(session, url, sem) for url in self.target_urls]
             results = await asyncio.gather(*tasks)
             
         log_info("MOEX Парсер", "Завершена работа парсера MOEX.")

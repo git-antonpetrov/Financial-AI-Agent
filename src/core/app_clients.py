@@ -14,7 +14,9 @@ from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
 # pyrefly: ignore [missing-import]
 from minio import Minio
 from src.services.content_ai_recognizer import ContentCaptureRecognizer
-from src.utils.console_logger import log_info
+from src.utils.console_logger import log_info, log_error
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine, async_sessionmaker, AsyncSession
+from src.core.models import Base
 
 def get_chroma_client():
     """
@@ -100,6 +102,8 @@ class AppClients:
     _minio_client = None
     _content_ai_client = None
     _cloud_ai_client = None
+    _db_engine: AsyncEngine | None = None
+    _async_session_maker: async_sessionmaker[AsyncSession] | None = None
 
     @classmethod
     def get_embedder_client(cls) -> Any:
@@ -148,3 +152,44 @@ class AppClients:
             log_info("Инициализация", "Инициализация Cloud AI Client...")
             cls._cloud_ai_client = CloudAIClient()
         return cls._cloud_ai_client
+
+    @classmethod
+    def get_db_engine(cls) -> AsyncEngine:
+        """
+        Ленивая инициализация движка базы данных PostgreSQL (asyncpg).
+        Использует строку подключения DATABASE_URL из переменных окружения.
+        """
+        if cls._db_engine is None:
+            db_url = os.getenv("DATABASE_URL")
+            if not db_url:
+                log_error("Система БД", "Переменная окружения DATABASE_URL не задана!")
+                raise ValueError("DATABASE_URL must be set")
+            
+            # Создаем движок асинхронно
+            cls._db_engine = create_async_engine(db_url, echo=False)
+            cls._async_session_maker = async_sessionmaker(cls._db_engine, class_=AsyncSession, expire_on_commit=False)
+            log_info("Система БД", "Асинхронный движок SQLAlchemy успешно инициализирован.")
+            
+        return cls._db_engine
+
+    @classmethod
+    def get_async_session(cls) -> async_sessionmaker[AsyncSession]:
+        """
+        Возвращает фабрику асинхронных сессий. При необходимости инициализирует движок.
+        """
+        if cls._async_session_maker is None:
+            cls.get_db_engine()
+        # Добавляем # type: ignore, чтобы линтер не ругался (мы уверены, что он проинициализирован)
+        return cls._async_session_maker # type: ignore
+
+    @classmethod
+    async def init_db(cls):
+        """
+        Создает все таблицы в базе данных (если они еще не существуют).
+        Должно вызываться один раз при старте приложения.
+        """
+        engine = cls.get_db_engine()
+        log_info("Система БД", "Проверка и создание таблиц PostgreSQL...")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        log_info("Система БД", "Таблицы успешно проверены/созданы.")
