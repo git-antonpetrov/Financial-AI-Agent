@@ -239,25 +239,25 @@ class MainPipeline:
                             log_warning("Main Pipeline", f"Не удалось определить количество страниц, извините: {e}")
                             page_count = 1
                         
-                    # Запускаем извлечение текста в отдельном потоке (блокирующий I/O)
-                    try:
-                        markdown_content = await asyncio.to_thread(extract_text_cloud, temp_pdf_path, page_count)
-                    except Exception as e:
-                        log_error("Main Pipeline", f"К сожалению, Google Cloud Vision не справился с {file_name}: {e}")
+                        # Запускаем извлечение текста в отдельном потоке (блокирующий I/O)
+                        try:
+                            markdown_content = await asyncio.to_thread(extract_text_cloud, temp_pdf_path, page_count)
+                        except Exception as e:
+                            log_error("Main Pipeline", f"К сожалению, Google Cloud Vision не справился с {file_name}: {e}")
+                            if os.path.exists(temp_pdf_path):
+                                os.remove(temp_pdf_path)
+                            self.minio_client.remove_object(self.raw_bucket, file_name)
+                            await self._update_db_state(state_id, status="ocr_error", error_message=str(e)[:500], processing_end_date=datetime.now().date(), processing_end_time=datetime.now().time())
+                            return
+    
                         if os.path.exists(temp_pdf_path):
                             os.remove(temp_pdf_path)
-                        self.minio_client.remove_object(self.raw_bucket, file_name)
-                        await self._update_db_state(state_id, status="ocr_error", error_message=str(e)[:500], processing_end_date=datetime.now().date(), processing_end_time=datetime.now().time())
-                        return
-
-                    if os.path.exists(temp_pdf_path):
-                        os.remove(temp_pdf_path)
-                    
-                    if not markdown_content or not markdown_content.strip():
-                        log_warning("Main Pipeline", f"Увы, облачный сервис вернул пустой текст для {file_name}")
-                        self.minio_client.remove_object(self.raw_bucket, file_name)
-                        await self._update_db_state(state_id, status="empty_text", processing_end_date=datetime.now().date(), processing_end_time=datetime.now().time())
-                        return
+                        
+                        if not markdown_content or not markdown_content.strip():
+                            log_warning("Main Pipeline", f"Увы, облачный сервис вернул пустой текст для {file_name}")
+                            self.minio_client.remove_object(self.raw_bucket, file_name)
+                            await self._update_db_state(state_id, status="empty_text", processing_end_date=datetime.now().date(), processing_end_time=datetime.now().time())
+                            return
 
                 # 5. Умный Анализ (Gemini JSON)
                 log_info("Main Pipeline", f"Анализ документа {file_name} в LLM...")
