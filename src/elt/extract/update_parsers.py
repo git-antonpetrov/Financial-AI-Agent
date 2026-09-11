@@ -46,14 +46,20 @@ async def main():
     today_date = datetime.date.today()
     
     try:
+        objects = list(minio_client.list_objects("raw-documents", recursive=True))
+        has_pending_files = len(objects) > 0
+    except Exception:
+        has_pending_files = False
+
+    try:
         from src.elt.db.models import OrchestratorRun
         from sqlalchemy import select
         
         async with db_session_maker() as session:
             result = await session.execute(select(OrchestratorRun).where(OrchestratorRun.run_date == today_date))
             existing_run = result.scalar_one_or_none()
-            if existing_run:
-                log_warning("Оркестратор Парсеров", f"Скрипт уже запускался сегодня ({today_date}). Пропуск.")
+            if existing_run and not has_pending_files:
+                log_warning("Оркестратор Парсеров", f"Скрипт уже запускался сегодня ({today_date}) и очередь файлов пуста. Пропуск.")
                 return
     except Exception as e:
         log_error("Оркестратор Парсеров", f"Ошибка проверки состояния в БД: {e}")
@@ -86,8 +92,15 @@ async def main():
     except Exception as e:
         log_error("Оркестратор Парсеров", f"Ошибка сохранения состояния запуска в БД: {e}")
     
-    if moex_has_new or cbr_has_new:
-        log_info("Оркестратор Парсеров", "Обнаружены новые загруженные файлы. Начинается цепочка обработки.")
+    # Проверка наличия недообработанных файлов (в случае падения пайплайна ранее)
+    try:
+        objects = list(minio_client.list_objects("raw-documents", recursive=True))
+        has_pending_files = len(objects) > 0
+    except Exception:
+        has_pending_files = False
+
+    if moex_has_new or cbr_has_new or has_pending_files:
+        log_info("Оркестратор Парсеров", "Есть файлы для обработки. Начинается цепочка обработки.")
         
         cloud_ai = get_cloud_ai_client()
         embedder = get_embedder()
