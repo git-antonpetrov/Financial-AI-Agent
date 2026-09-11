@@ -13,7 +13,6 @@ from src.elt.extract.parsers.moex_parser import run_moex_parser
 
 from src.core.clients.db import get_async_session_maker, init_db
 from src.core.clients.storage import get_minio_client
-from src.core.clients.ocr import get_content_ai_client
 from src.core.clients.llm import get_cloud_ai_client, get_embedder
 from src.core.clients.vector_db import get_chroma_client
 
@@ -90,7 +89,6 @@ async def main():
     if moex_has_new or cbr_has_new:
         log_info("Оркестратор Парсеров", "Обнаружены новые загруженные файлы. Начинается цепочка обработки.")
         
-        content_ai = get_content_ai_client()
         cloud_ai = get_cloud_ai_client()
         chroma_client = get_chroma_client()
         embedder = get_embedder()
@@ -101,7 +99,7 @@ async def main():
             await asyncio.sleep(30)
             
             log_info("MainPipeline", "Запуск MainPipeline (Load Layer)...")
-            pipeline = MainPipeline(db_session_maker, minio_client, content_ai, cloud_ai)
+            pipeline = MainPipeline(db_session_maker, minio_client, cloud_ai)
             try:
                 await pipeline.run()
                 log_info("MainPipeline", "MainPipeline успешно завершил работу.")
