@@ -35,12 +35,11 @@ services:
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
       - DATABASE_URL=postgresql+asyncpg://agent_user:agent_password@postgres-db:5432/financial_agent
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/data/gcp-service-account.json
     env_file:
       - .env
     volumes:
       - ./data:/app/data
-      # Проброс Application Default Credentials с хоста (Linux VDS)
-      - ~/.config/gcloud:/root/.config/gcloud:ro
     restart: unless-stopped
 
   postgres-db:
