@@ -2,9 +2,11 @@ FROM python:3.14-slim
 
 WORKDIR /app
 
-# Устанавливаем системные зависимости, если нужны (например, для сборки lxml или cryptography)
+# Устанавливаем системные зависимости (poppler для PDF, libreoffice для .doc/.docx)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    poppler-utils \
+    libreoffice \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

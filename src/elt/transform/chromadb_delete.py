@@ -23,7 +23,7 @@ class ChromaDBDelete:
             embedding_function=self.embedder
         )
         
-        self.max_concurrency = 10
+        self.max_concurrency = 3
         self.semaphore = asyncio.Semaphore(self.max_concurrency)
         
         self.cache_dir = "data/cache/transform"

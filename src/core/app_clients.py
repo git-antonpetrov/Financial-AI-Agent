@@ -17,7 +17,9 @@ from src.services.content_ai_recognizer import ContentCaptureRecognizer
 
 def get_chroma_client():
     """Инициализирует и возвращает клиент векторной базы данных."""
-    return chromadb.HttpClient(host="localhost", port=8000)
+    host = os.getenv("CHROMA_HOST", "localhost")
+    port = int(os.getenv("CHROMA_PORT", "8000"))
+    return chromadb.HttpClient(host=host, port=port)
 
 class LiteLLMVertexEmbeddingFunction(EmbeddingFunction):
     def __call__(self, input: list[str]):
