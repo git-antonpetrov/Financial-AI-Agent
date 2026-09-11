@@ -6,7 +6,7 @@ import requests
 import xml.etree.ElementTree as ET
 from requests.auth import HTTPBasicAuth
 from dotenv import load_dotenv
-from src.utils.console_logger import log_info, log_error, log_warning
+from src.core.utils.console_logger import log_info, log_error, log_warning
 
 def parse_result_xml(xml_str):
     """

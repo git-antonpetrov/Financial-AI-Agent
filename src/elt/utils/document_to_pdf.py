@@ -1,6 +1,6 @@
 import os
 import subprocess
-from src.utils.console_logger import log_error
+from src.core.utils.console_logger import log_error
 
 def convert_to_pdf(input_path: str, output_dir: str) -> str:
     """

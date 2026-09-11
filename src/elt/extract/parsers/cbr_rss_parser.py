@@ -12,8 +12,8 @@ import xml.etree.ElementTree as ET
 from typing import Callable
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")))
-from src.utils.console_logger import log_info, log_warning, log_error
-from src.core.models import ExtractState
+from src.core.utils.console_logger import log_info, log_warning, log_error
+from src.elt.db.models import ExtractState
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 # pyrefly: ignore [missing-import]

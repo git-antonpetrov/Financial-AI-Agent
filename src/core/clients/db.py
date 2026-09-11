@@ -1,8 +1,8 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine, async_sessionmaker, AsyncSession
 from functools import lru_cache
 from src.core.config import get_settings
-from src.core.models import Base
-from src.utils.console_logger import log_info, log_error
+from src.elt.db.models import Base
+from src.core.utils.console_logger import log_info, log_error
 
 @lru_cache
 def get_db_engine() -> AsyncEngine:

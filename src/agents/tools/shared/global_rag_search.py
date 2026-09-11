@@ -4,7 +4,7 @@ import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 from src.core.clients.vector_db import get_chroma_client
 from src.core.clients.llm import get_embedder
-from src.utils.console_logger import log_error
+from src.core.utils.console_logger import log_error
 
 def search_global_knowledge_base(query: str) -> str:
     """Осуществляется семантический поиск по векторной базе знаний."""

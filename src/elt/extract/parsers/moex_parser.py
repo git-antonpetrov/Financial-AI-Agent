@@ -13,8 +13,8 @@ from bs4 import BeautifulSoup
 from typing import Callable, Any
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")))
-from src.utils.console_logger import log_info, log_error, log_warning
-from src.core.models import ExtractState
+from src.core.utils.console_logger import log_info, log_error, log_warning
+from src.elt.db.models import ExtractState
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 # pyrefly: ignore [missing-import]

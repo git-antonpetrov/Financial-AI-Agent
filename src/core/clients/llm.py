@@ -6,7 +6,7 @@ from chromadb import EmbeddingFunction
 from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
 
 from src.core.config import get_settings
-from src.utils.console_logger import log_info
+from src.core.utils.console_logger import log_info
 
 class LiteLLMVertexEmbeddingFunction(EmbeddingFunction):
     """
