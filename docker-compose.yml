@@ -35,6 +35,8 @@ services:
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
       - DATABASE_URL=postgresql+asyncpg://agent_user:agent_password@postgres-db:5432/financial_agent
+    env_file:
+      - .env
     volumes:
       - ./data:/app/data
     restart: unless-stopped

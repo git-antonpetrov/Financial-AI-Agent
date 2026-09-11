@@ -24,7 +24,7 @@ from typing import Callable
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.elt.db.models import LoadState
 from minio import Minio
-from src.elt.utils.content_ai_recognizer import ContentCaptureRecognizer
+from src.elt.utils.cloud_text_extractor import extract_text_cloud
 # Импорт CloudAIClient пока условно, можно использовать Any
 from typing import Any
 from src.elt.utils.document_to_pdf import convert_to_pdf
@@ -75,14 +75,12 @@ class MainPipeline:
         self,
         db_session_maker: Callable[..., AsyncSession],
         minio_client: Minio,
-        content_ai: ContentCaptureRecognizer,
         cloud_ai: Any
     ):
         self.raw_bucket = "raw-documents"
         self.rag_bucket = "rag-documents"
         
         self.minio_client = minio_client
-        self.content_ai = content_ai
         self.cloud_ai = cloud_ai
         self.db_session_maker = db_session_maker
         
@@ -226,29 +224,37 @@ class MainPipeline:
                             await self._update_db_state(state_id, md5_hash=file_hash, status="skipped", error_message="Дубликат по хешу", processing_end_date=datetime.now().date(), processing_end_time=datetime.now().time())
                             return
         
-                        # 4. Распознавание текста с помощью Content AI
-                        log_info("Main Pipeline", f"Отправка {file_name} в Content AI...")
+                        # 4. Распознавание текста с помощью Google Cloud Vision
+                        log_info("Main Pipeline", f"Пожалуйста, ожидайте, отправка {file_name} в облачный сервис Google Cloud Vision...")
                         temp_pdf_path = os.path.join(temp_dir, "temp_recognition.pdf")
                         with open(temp_pdf_path, "wb") as f:
                             f.write(pdf_bytes)
                         
-                    # Распознавание может занять время, запуск в отдельном потоке
-                    rec_result = await asyncio.to_thread(self.content_ai.recognize, temp_pdf_path)
+                        # Определяем количество страниц для правильной конвертации
+                        try:
+                            pdf_doc = fitz.open(temp_pdf_path)
+                            page_count = len(pdf_doc)
+                            pdf_doc.close()
+                        except Exception as e:
+                            log_warning("Main Pipeline", f"Не удалось определить количество страниц, извините: {e}")
+                            page_count = 1
+                        
+                    # Запускаем извлечение текста в отдельном потоке (блокирующий I/O)
+                    try:
+                        markdown_content = await asyncio.to_thread(extract_text_cloud, temp_pdf_path, page_count)
+                    except Exception as e:
+                        log_error("Main Pipeline", f"К сожалению, Google Cloud Vision не справился с {file_name}: {e}")
+                        if os.path.exists(temp_pdf_path):
+                            os.remove(temp_pdf_path)
+                        self.minio_client.remove_object(self.raw_bucket, file_name)
+                        await self._update_db_state(state_id, status="ocr_error", error_message=str(e)[:500], processing_end_date=datetime.now().date(), processing_end_time=datetime.now().time())
+                        return
+
                     if os.path.exists(temp_pdf_path):
                         os.remove(temp_pdf_path)
                     
-                    # Content Capture может вернуть несколько документов, берется первый
-                    if not rec_result:
-                        log_warning("Main Pipeline", f"Content AI не вернул результатов для {file_name}")
-                        self.minio_client.remove_object(self.raw_bucket, file_name)
-                        await self._update_db_state(state_id, status="no_recognition_result", processing_end_date=datetime.now().date(), processing_end_time=datetime.now().time())
-                        return
-                        
-                    doc_data = list(rec_result.values())[0]
-                    markdown_content = doc_data.get("raw_xml", "")
-                    
-                    if not markdown_content.strip():
-                        log_warning("Main Pipeline", f"Content AI вернул пустой текст для {file_name}")
+                    if not markdown_content or not markdown_content.strip():
+                        log_warning("Main Pipeline", f"Увы, облачный сервис вернул пустой текст для {file_name}")
                         self.minio_client.remove_object(self.raw_bucket, file_name)
                         await self._update_db_state(state_id, status="empty_text", processing_end_date=datetime.now().date(), processing_end_time=datetime.now().time())
                         return
@@ -454,21 +460,18 @@ class MainPipeline:
 def start_pipeline(
     db_session_maker: Callable[..., AsyncSession],
     minio_client: Minio,
-    content_ai: ContentCaptureRecognizer,
     cloud_ai: Any
 ):
-    pipeline = MainPipeline(db_session_maker, minio_client, content_ai, cloud_ai)
+    pipeline = MainPipeline(db_session_maker, minio_client, cloud_ai)
     asyncio.run(pipeline.run())
 
 if __name__ == "__main__":
     from src.core.clients.db import get_async_session_maker
     from src.core.clients.storage import get_minio_client
-    from src.core.clients.ocr import get_content_ai_client
     from src.core.clients.llm import get_cloud_ai_client
 
     db_maker = get_async_session_maker()
     minio = get_minio_client()
-    ocr = get_content_ai_client()
     llm = get_cloud_ai_client()
 
-    start_pipeline(db_maker, minio, ocr, llm)
+    start_pipeline(db_maker, minio, llm)
