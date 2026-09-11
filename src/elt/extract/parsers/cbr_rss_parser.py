@@ -9,8 +9,9 @@ import aiohttp
 from io import BytesIO
 from urllib.parse import unquote
 import xml.etree.ElementTree as ET
+from src.utils.console_logger import log_info, log_warning, log_error
 
-# Fix Windows console encoding
+# Исправление кодировки консоли Windows
 sys.stdout.reconfigure(encoding='utf-8')
 
 try:
@@ -19,15 +20,19 @@ try:
     # pyrefly: ignore [missing-import]
     from minio.error import S3Error
 except ImportError:
-    print("\033[91m[Ошибка]\033[0m Библиотека 'minio' не найдена. Установите ее: pip install minio")
+    log_error("CBR Парсер", "Библиотека 'minio' не найдена. Установите ее: pip install minio")
     sys.exit(1)
 
-# Добавляем корень проекта в sys.path
+# Добавление корня проекта в sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")))
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class CbrRssParser:
+    """
+    Парсер для загрузки документов из RSS-ленты Центрального Банка РФ.
+    Скачивает файлы и сохраняет их в бакет MinIO.
+    """
     def __init__(self, base_dir: str):
         self.base_dir = base_dir
         self.cache_dir = os.path.join(base_dir, "data", "cache", "cbr_rss_parser")
@@ -51,9 +56,9 @@ class CbrRssParser:
         try:
             if not self.minio_client.bucket_exists(self.minio_bucket):
                 self.minio_client.make_bucket(self.minio_bucket)
-                print(f"\033[96m[CBR Парсер]\033[0m Создан бакет: {self.minio_bucket}")
+                log_info("CBR Парсер", f"Создан бакет: {self.minio_bucket}")
         except Exception as e:
-            print(f"\033[91m[Ошибка MinIO]\033[0m Не удалось проверить/создать бакет: {e}")
+            log_error("MinIO", f"Не удалось проверить или создать бакет: {e}")
 
     def _load_tracker(self) -> dict:
         if os.path.exists(self.tracker_path):
@@ -81,10 +86,10 @@ class CbrRssParser:
                 length=len(content),
                 content_type="application/pdf"
             )
-            print(f"\033[92m[Успех]\033[0m Файл загружен в MinIO: {original_filename}")
+            log_info("MinIO", f"Файл загружен: {original_filename}")
             return True
         except S3Error as e:
-            print(f"\033[93m[Внимание MinIO]\033[0m Ошибка при загрузке с именем '{original_filename}': {e}. Пробуем автоматическое имя...")
+            log_warning("MinIO", f"Ошибка при загрузке с именем '{original_filename}': {e}. Пробуется автоматическое имя...")
             try:
                 fallback_name = f"cbr_doc_{uuid.uuid4().hex}.pdf"
                 self.minio_client.put_object(
@@ -94,19 +99,19 @@ class CbrRssParser:
                     length=len(content),
                     content_type="application/pdf"
                 )
-                print(f"\033[92m[Успех]\033[0m Файл загружен в MinIO с автоматическим именем: {fallback_name}")
+                log_info("MinIO", f"Файл загружен с автоматическим именем: {fallback_name}")
                 return True
             except Exception as e2:
-                print(f"\033[91m[Критическая Ошибка MinIO]\033[0m Не удалось загрузить даже с UUID: {e2}")
+                log_error("MinIO", f"Не удалось загрузить файл даже с UUID: {e2}")
                 return False
         except Exception as e:
-            print(f"\033[91m[Ошибка]\033[0m Неожиданная ошибка MinIO: {e}")
+            log_error("MinIO", f"Неожиданная ошибка MinIO: {e}")
             return False
 
     async def _process_item(self, session, item, sem, tracker, processed_guids):
         url = item['url']
         async with sem:
-            print(f"\033[96m[CBR Парсер]\033[0m Скачивание документа: {url}")
+            log_info("CBR Парсер", f"Скачивание документа: {url}")
             try:
                 async with session.get(url, headers=self.headers, ssl=False, timeout=30) as doc_resp:
                     doc_resp.raise_for_status()
@@ -138,22 +143,22 @@ class CbrRssParser:
                     if not filename.endswith(".pdf") and not filename.endswith(".doc") and not filename.endswith(".docx"):
                         filename += ".pdf"
 
-                    # Запускаем синхронную загрузку в MinIO в отдельном потоке
+                    # Запускается синхронная загрузка в MinIO в отдельном потоке
                     upload_success = await asyncio.to_thread(self.upload_to_minio, content, filename)
                     
                     if upload_success:
                         processed_guids.add(item['guid'])
                         tracker["processed_guids"] = list(processed_guids)
-                        # Синхронная запись в файл, но json.dump на мелком словаре очень быстрый
+                        # Синхронная запись в файл
                         self._save_tracker(tracker)
                         return True
                     return False
             except Exception as e:
-                print(f"\033[91m[Ошибка]\033[0m Не удалось обработать документ {url}: {e}")
+                log_error("CBR Парсер", f"Не удалось обработать документ {url}: {e}")
                 return False
 
     async def fetch_and_download(self) -> bool:
-        print(f"\033[96m[CBR Парсер]\033[0m Загрузка ленты RSS...")
+        log_info("CBR Парсер", "Загрузка ленты RSS...")
         
         async with aiohttp.ClientSession() as session:
             try:
@@ -161,7 +166,7 @@ class CbrRssParser:
                     resp.raise_for_status()
                     xml_text = await resp.text()
             except Exception as e:
-                print(f"\033[91m[Ошибка]\033[0m Не удалось загрузить RSS ленту: {e}")
+                log_error("CBR Парсер", f"Не удалось загрузить RSS ленту: {e}")
                 return False
                 
             items = []
@@ -180,7 +185,7 @@ class CbrRssParser:
                                 'guid': guid_elem.text.strip()
                             })
             except Exception as e:
-                print(f"\033[91m[Ошибка Парсинга]\033[0m Исключение при парсинге XML: {e}")
+                log_error("CBR Парсер", f"Исключение при парсинге XML: {e}")
                 return False
 
             tracker = self._load_tracker()
@@ -190,19 +195,19 @@ class CbrRssParser:
             new_items = [item for item in items if item['guid'] not in processed_guids]
             
             if not new_items:
-                print("\033[90m[Пропуск]\033[0m Нет новых документов в ленте.")
+                log_info("CBR Парсер", "Нет новых документов в ленте. (пропуск)")
                 return False
                 
-            print(f"\033[96m[CBR Парсер]\033[0m Найдено новых документов: {len(new_items)}")
+            log_info("CBR Парсер", f"Найдено новых документов: {len(new_items)}")
             
-            sem = asyncio.Semaphore(3) # Ограничение: максимум 3 одновременных задач
+            sem = asyncio.Semaphore(3) # Ограничение: максимум 3 одновременных задачи
             tasks = [self._process_item(session, item, sem, tracker, processed_guids) for item in new_items]
             
             results = await asyncio.gather(*tasks)
             if any(results):
                 has_new = True
 
-            print("\033[92m[ОК]\033[0m Завершена работа парсера CBR RSS.")
+            log_info("CBR Парсер", "Завершена работа парсера CBR RSS.")
             return has_new
 
 def run_cbr_parser(base_dir=None):

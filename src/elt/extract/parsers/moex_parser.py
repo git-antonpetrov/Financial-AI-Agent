@@ -10,8 +10,9 @@ from io import BytesIO
 from urllib.parse import urljoin, unquote
 # pyrefly: ignore [missing-import]
 from bs4 import BeautifulSoup
+from src.utils.console_logger import log_info, log_error, log_warning
 
-# Fix Windows console encoding
+# Исправление кодировки консоли Windows
 sys.stdout.reconfigure(encoding='utf-8')
 
 try:
@@ -20,16 +21,20 @@ try:
     # pyrefly: ignore [missing-import]
     from minio.error import S3Error
 except ImportError:
-    print("\033[91m[Ошибка]\033[0m Библиотека 'minio' не найдена. Установите ее: pip install minio")
+    log_error("MOEX Парсер", "Библиотека 'minio' не найдена. Установите ее: pip install minio")
     sys.exit(1)
 
-# Добавляем корень проекта в sys.path, чтобы работал импорт из src
+# Добавление корня проекта в sys.path для импортов из src
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 
-# Отключаем предупреждения InsecureRequestWarning для ГОСТ-сайтов
+# Отключение предупреждений InsecureRequestWarning для ГОСТ-сайтов
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class MoexParser:
+    """
+    Парсер для загрузки документов с сайта Московской Биржи (MOEX).
+    Скачивает файлы и сохраняет их в бакет MinIO.
+    """
     def __init__(self, base_dir: str):
         self.base_dir = base_dir
         self.cache_dir = os.path.join(base_dir, "data", "cache", "moex_parser")
@@ -59,9 +64,9 @@ class MoexParser:
         try:
             if not self.minio_client.bucket_exists(self.minio_bucket):
                 self.minio_client.make_bucket(self.minio_bucket)
-                print(f"\033[96m[MOEX Парсер]\033[0m Создан бакет: {self.minio_bucket}")
+                log_info("MOEX Парсер", f"Создан бакет: {self.minio_bucket}")
         except Exception as e:
-            print(f"\033[91m[Ошибка MinIO]\033[0m Не удалось проверить/создать бакет: {e}")
+            log_error("MinIO", f"Не удалось проверить или создать бакет: {e}")
 
     def _load_tracker(self) -> dict:
         if os.path.exists(self.tracker_path):
@@ -92,7 +97,7 @@ class MoexParser:
         return None
 
     def upload_to_minio(self, content: bytes, original_filename: str) -> bool:
-        """Загружает файл в MinIO, синхронная функция, вызывается через to_thread."""
+        """Загружает файл в MinIO. Синхронная функция, вызывается через to_thread."""
         try:
             self.minio_client.put_object(
                 self.minio_bucket,
@@ -101,10 +106,10 @@ class MoexParser:
                 length=len(content),
                 content_type="application/pdf"
             )
-            print(f"\033[92m[Успех]\033[0m Файл загружен в MinIO: {original_filename}")
+            log_info("MinIO", f"Файл загружен: {original_filename}")
             return True
         except S3Error as e:
-            print(f"\033[93m[Внимание MinIO]\033[0m Ошибка при загрузке с именем '{original_filename}': {e}. Пробуем автоматическое имя...")
+            log_warning("MinIO", f"Ошибка при загрузке с именем '{original_filename}': {e}. Пробуется автоматическое имя...")
             try:
                 fallback_name = f"moex_doc_{uuid.uuid4().hex}.pdf"
                 self.minio_client.put_object(
@@ -114,13 +119,13 @@ class MoexParser:
                     length=len(content),
                     content_type="application/pdf"
                 )
-                print(f"\033[92m[Успех]\033[0m Файл загружен в MinIO с автоматическим именем: {fallback_name}")
+                log_info("MinIO", f"Файл загружен с автоматическим именем: {fallback_name}")
                 return True
             except Exception as e2:
-                print(f"\033[91m[Критическая Ошибка MinIO]\033[0m Не удалось загрузить даже с UUID: {e2}")
+                log_error("MinIO", f"Не удалось загрузить файл даже с UUID: {e2}")
                 return False
         except Exception as e:
-            print(f"\033[91m[Ошибка]\033[0m Неожиданная ошибка MinIO: {e}")
+            log_error("MinIO", f"Неожиданная ошибка MinIO: {e}")
             return False
 
     async def _process_page(self, session, page_url, sem, tracker, processed_urls):
@@ -130,13 +135,12 @@ class MoexParser:
                     resp.raise_for_status()
                     html_text = await resp.text()
                 
-                # Парсинг BeautifulSoup можно выполнить в потоке, чтобы не блочить луп
-                # Но для 5 страниц это быстро, оставим как есть или вынесем в поток
+                # Парсинг BeautifulSoup выполняется в потоке, чтобы не блокировать event loop
                 soup = await asyncio.to_thread(BeautifulSoup, html_text, 'html.parser')
                 pdf_path = self._extract_document_link(soup, page_url)
                 
                 if not pdf_path:
-                    print(f"\033[93m[Внимание]\033[0m Не удалось найти документ на странице: {page_url}")
+                    log_warning("MOEX Парсер", f"Не удалось найти документ на странице: {page_url}")
                     return False
                 
                 if pdf_path.startswith('/'):
@@ -146,10 +150,10 @@ class MoexParser:
                     absolute_url = urljoin(page_url, pdf_path)
                 
                 if absolute_url in processed_urls:
-                    print(f"\033[90m[Пропуск]\033[0m Документ уже загружен ранее: {absolute_url}")
+                    log_info("MOEX Парсер", f"Документ уже загружен ранее (пропуск): {absolute_url}")
                     return False
                 
-                print(f"\033[96m[MOEX Парсер]\033[0m Скачивание нового документа: {absolute_url}")
+                log_info("MOEX Парсер", f"Скачивание нового документа: {absolute_url}")
                 async with session.get(absolute_url, headers=self.headers, ssl=False, timeout=30) as doc_resp:
                     doc_resp.raise_for_status()
                     content = await doc_resp.read()
@@ -189,11 +193,11 @@ class MoexParser:
                 return False
                 
             except Exception as e:
-                print(f"\033[91m[Ошибка]\033[0m Не удалось обработать страницу {page_url}: {e}")
+                log_error("MOEX Парсер", f"Не удалось обработать страницу {page_url}: {e}")
                 return False
 
     async def fetch_and_download(self) -> bool:
-        print(f"\033[96m[MOEX Парсер]\033[0m Старт параллельной проверки документов ({len(self.target_urls)} страниц)...")
+        log_info("MOEX Парсер", f"Старт параллельной проверки документов ({len(self.target_urls)} страниц)...")
         tracker = self._load_tracker()
         processed_urls = set(tracker.get("processed_urls", []))
         
@@ -203,7 +207,7 @@ class MoexParser:
             tasks = [self._process_page(session, url, sem, tracker, processed_urls) for url in self.target_urls]
             results = await asyncio.gather(*tasks)
             
-        print("\033[92m[ОК]\033[0m Завершена работа парсера MOEX.")
+        log_info("MOEX Парсер", "Завершена работа парсера MOEX.")
         return any(results)
 
 def run_moex_parser(base_dir=None):
