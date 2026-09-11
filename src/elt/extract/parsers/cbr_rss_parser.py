@@ -231,12 +231,12 @@ class CbrRssParser:
             log_info("CBR Парсер", "Завершена работа парсера CBR RSS.")
             return has_new
 
-def run_cbr_parser(db_session_maker: Callable[..., AsyncSession], minio_client: Minio, base_dir: str = None) -> bool:
-    """Точка входа для запуска парсера CBR."""
+async def run_cbr_parser(db_session_maker: Callable[..., AsyncSession], minio_client: Minio, base_dir: str = None) -> bool:
+    """Обертка для запуска парсера CBR."""
     if base_dir is None:
         base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
     parser = CbrRssParser(db_session_maker, minio_client, base_dir)
-    return asyncio.run(parser.fetch_and_download())
+    return await parser.fetch_and_download()
 
 if __name__ == "__main__":
     from src.core.clients.db import get_async_session_maker
@@ -244,4 +244,4 @@ if __name__ == "__main__":
     
     db_maker = get_async_session_maker()
     minio = get_minio_client()
-    run_cbr_parser(db_maker, minio)
+    asyncio.run(run_cbr_parser(db_maker, minio))

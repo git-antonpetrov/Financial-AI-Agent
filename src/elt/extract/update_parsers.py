@@ -62,9 +62,9 @@ async def main():
     log_info("Оркестратор Парсеров", f"Запуск параллельного обновления парсеров (дата: {today_date})...")
     started_at = datetime.datetime.now()
     
-    # Парсеры запускаются параллельно через потоки, так как их точки входа используют asyncio.run()
-    moex_task = asyncio.to_thread(run_moex_parser, db_session_maker, minio_client, base_dir)
-    cbr_task = asyncio.to_thread(run_cbr_parser, db_session_maker, minio_client, base_dir)
+    # Парсеры запускаются параллельно в одном asyncio цикле
+    moex_task = run_moex_parser(db_session_maker, minio_client, base_dir)
+    cbr_task = run_cbr_parser(db_session_maker, minio_client, base_dir)
     
     results = await asyncio.gather(moex_task, cbr_task)
     
@@ -90,7 +90,6 @@ async def main():
         log_info("Оркестратор Парсеров", "Обнаружены новые загруженные файлы. Начинается цепочка обработки.")
         
         cloud_ai = get_cloud_ai_client()
-        chroma_client = get_chroma_client()
         embedder = get_embedder()
 
         # 1. Этап Load: MainPipeline
@@ -113,6 +112,7 @@ async def main():
             log_info("Оркестратор Парсеров", "Пауза 30 секунд перед запуском ChromaDBDelete...")
             await asyncio.sleep(30)
             
+            chroma_client = get_chroma_client()
             log_info("ChromaDB Delete", "Запуск ChromaDBDelete (удаление старых векторов)...")
             del_pipeline = ChromaDBDelete(db_session_maker, minio_client, chroma_client, embedder)
             await del_pipeline.run()
@@ -127,6 +127,7 @@ async def main():
             log_info("Оркестратор Парсеров", "Пауза 30 секунд перед запуском ChromaDBUpsert...")
             await asyncio.sleep(30)
             
+            chroma_client = get_chroma_client()
             log_info("ChromaDB Upsert", "Запуск ChromaDBUpsert (загрузка новых векторов)...")
             upsert_pipeline = ChromaDBUpsert(db_session_maker, minio_client, chroma_client, embedder)
             await upsert_pipeline.run()
