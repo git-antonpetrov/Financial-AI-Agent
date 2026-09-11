@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Копируем исходный код
 COPY src/ ./src/
 
-# Задаем переменные окружения, чтобы скрипт знал, где искать папки и как логироваться
+# Задаем переменные окружения
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 

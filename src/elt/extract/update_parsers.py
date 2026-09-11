@@ -97,6 +97,9 @@ async def main():
 
         # 1. Этап Load: MainPipeline
         if has_main_pipeline:
+            log_info("Оркестратор Парсеров", "Пауза 30 секунд перед запуском MainPipeline...")
+            await asyncio.sleep(30)
+            
             log_info("MainPipeline", "Запуск MainPipeline (Load Layer)...")
             pipeline = MainPipeline(db_session_maker, minio_client, content_ai, cloud_ai)
             try:
@@ -109,6 +112,9 @@ async def main():
         # 2. Этап Transform: ChromaDB Delete
         try:
             from src.elt.transform.chromadb_delete import ChromaDBDelete
+            log_info("Оркестратор Парсеров", "Пауза 30 секунд перед запуском ChromaDBDelete...")
+            await asyncio.sleep(30)
+            
             log_info("ChromaDB Delete", "Запуск ChromaDBDelete (удаление старых векторов)...")
             del_pipeline = ChromaDBDelete(db_session_maker, minio_client, chroma_client, embedder)
             await del_pipeline.run()
@@ -120,6 +126,9 @@ async def main():
         # 3. Этап Transform: ChromaDB Upsert
         try:
             from src.elt.transform.chromadb_upsert import ChromaDBUpsert
+            log_info("Оркестратор Парсеров", "Пауза 30 секунд перед запуском ChromaDBUpsert...")
+            await asyncio.sleep(30)
+            
             log_info("ChromaDB Upsert", "Запуск ChromaDBUpsert (загрузка новых векторов)...")
             upsert_pipeline = ChromaDBUpsert(db_session_maker, minio_client, chroma_client, embedder)
             await upsert_pipeline.run()
