@@ -3,13 +3,17 @@ import sys
 import json
 import asyncio
 from datetime import datetime
-from colorama import Fore, Style
 from dotenv import load_dotenv
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 from src.core.app_clients import AppClients
+from src.utils.console_logger import log_info, log_error, log_warning
 
 class ChromaDBDelete:
+    """
+    Класс для удаления устаревших векторов из ChromaDB.
+    Удаляет векторы для документов, чьи номера (short_number) числятся в файлах отмены в MinIO.
+    """
     def __init__(self):
         load_dotenv()
         self.rag_bucket = "rag-documents"
@@ -30,16 +34,6 @@ class ChromaDBDelete:
         os.makedirs(self.cache_dir, exist_ok=True)
         self.cache_file = os.path.join(self.cache_dir, "delete_cache.json")
         self.cache_lock = asyncio.Lock()
-
-    def _log(self, level: str, message: str):
-        colors = {
-            "INFO": Fore.CYAN,
-            "SUCCESS": Fore.GREEN,
-            "WARNING": Fore.YELLOW,
-            "ERROR": Fore.RED
-        }
-        color = colors.get(level, Fore.WHITE)
-        print(f"{color}[{level}]:{Style.RESET_ALL} {message}")
 
     async def _load_cache(self) -> dict:
         async with self.cache_lock:
@@ -65,14 +59,21 @@ class ChromaDBDelete:
                 json.dump(cache, f, ensure_ascii=False, indent=4)
 
     async def process_file(self, object_name: str):
+        """
+        Обрабатывает один файл со списком отмененных номеров.
+        Удаляет соответствующие векторы из базы.
+        
+        Args:
+            object_name (str): Имя объекта в MinIO (с префиксом delete/).
+        """
         async with self.semaphore:
-            self._log("INFO", f"Начало обработки удаления {object_name}")
+            log_info("ChromaDB Delete", f"Начало обработки удаления файла {object_name}")
             cache_info = {
                 "start_time": datetime.now().isoformat(),
                 "status": "processing"
             }
             try:
-                # 1. Читаем JSON со списком отмененных номеров
+                # 1. Читается JSON со списком отмененных номеров
                 response = self.minio_client.get_object(self.rag_bucket, object_name)
                 content = response.read().decode("utf-8")
                 response.close()
@@ -82,55 +83,58 @@ class ChromaDBDelete:
                 if not isinstance(repealed_list, list):
                     raise ValueError("JSON не является списком")
 
-                # 2. Удаляем векторы из ChromaDB по short_number
+                # 2. Удаляются векторы из ChromaDB по short_number
                 deleted_count = 0
                 for short_number in repealed_list:
                     if not short_number:
                         continue
                     
                     # ChromaDB поддерживает удаление по условиям (where clause)
-                    # Вызов делаем синхронно в потоке
+                    # Вызов делается синхронно в потоке
                     await asyncio.to_thread(
                         self.collection.delete,
                         where={"short_number": short_number}
                     )
-                    self._log("INFO", f"Удалены векторы для отмененного документа: {short_number}")
+                    log_info("ChromaDB Delete", f"Удалены векторы для отмененного документа: {short_number}")
                     deleted_count += 1
 
-                # 3. Удаляем JSON файл из MinIO
+                # 3. Удаляется JSON файл из MinIO
                 self.minio_client.remove_object(self.rag_bucket, object_name)
                 
-                self._log("SUCCESS", f"Файл {object_name} успешно обработан. Выполнено удалений: {deleted_count}")
+                log_info("ChromaDB Delete", f"Файл {object_name} успешно обработан. Выполнено удалений: {deleted_count}")
                 cache_info["status"] = "success"
                 cache_info["deleted_count"] = deleted_count
                 cache_info["end_time"] = datetime.now().isoformat()
                 await self._save_cache(object_name, cache_info)
                 
             except Exception as e:
-                self._log("ERROR", f"Ошибка при обработке {object_name}: {str(e)}")
+                log_error("ChromaDB Delete", f"Ошибка при обработке {object_name}: {str(e)}")
                 cache_info["status"] = "error"
                 cache_info["error"] = str(e)
                 cache_info["end_time"] = datetime.now().isoformat()
                 await self._save_cache(object_name, cache_info)
 
     async def run(self):
-        self._log("INFO", "Запуск Transform Layer (Delete)...")
+        """
+        Главная точка входа. Находит все файлы в папке delete/ и обрабатывает их.
+        """
+        log_info("ChromaDB Delete", "Запуск Transform Layer (Delete)...")
         objects = list(self.minio_client.list_objects(self.rag_bucket, prefix=self.delete_prefix, recursive=True))
         
         files_to_process = [obj.object_name for obj in objects if not obj.object_name.endswith("/")]
         
         if not files_to_process:
-            self._log("INFO", "Очередь delete пуста.")
+            log_info("ChromaDB Delete", "Очередь delete пуста.")
             return
 
-        self._log("INFO", f"Найдено {len(files_to_process)} файлов на удаление.")
+        log_info("ChromaDB Delete", f"Найдено {len(files_to_process)} файлов на удаление.")
         
         tasks = []
         for obj_name in files_to_process:
             tasks.append(self.process_file(obj_name))
             
         await asyncio.gather(*tasks)
-        self._log("SUCCESS", "Пайплайн Delete завершил работу.")
+        log_info("ChromaDB Delete", "Пайплайн Delete завершил работу.")
 
 if __name__ == "__main__":
     pipeline = ChromaDBDelete()

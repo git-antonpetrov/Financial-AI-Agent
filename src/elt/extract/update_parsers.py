@@ -4,6 +4,7 @@ import json
 import asyncio
 import datetime
 from filelock import Timeout
+from src.utils.console_logger import log_info, log_warning, log_error
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 
@@ -14,10 +15,10 @@ try:
     # pyrefly: ignore [missing-import]
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
 except ImportError:
-    print("\033[91m[Ошибка]\033[0m Библиотека apscheduler не установлена. Установите ее: pip install apscheduler")
+    log_error("Оркестратор Парсеров", "Библиотека apscheduler не установлена. Установите ее: pip install apscheduler")
     sys.exit(1)
 
-# MainPipeline импортируем для обработки загруженных данных
+# MainPipeline импортируется для обработки загруженных данных
 try:
     from src.elt.load.main_pipeline import MainPipeline
     has_main_pipeline = True
@@ -25,7 +26,12 @@ except ImportError:
     has_main_pipeline = False
 
 async def main():
-    print("\033[96m[Оркестратор]\033[0m Инициализация...")
+    """
+    Основная логика запуска всех этапов обработки данных (ELT).
+    Сначала параллельно запускает парсеры. При наличии новых файлов запускает
+    главный конвейер загрузки (Load), а затем трансформации и векторизации (Transform).
+    """
+    log_info("Оркестратор Парсеров", "Инициализация...")
     
     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
     cache_dir = os.path.join(base_dir, "data", "cache")
@@ -42,14 +48,14 @@ async def main():
                 tracker = json.load(f)
                 last_run = tracker.get("last_run_date")
                 if last_run == today_str:
-                    print(f"\033[93m[Оркестратор]\033[0m Скрипт уже запускался сегодня ({today_str}). Пропуск.")
+                    log_warning("Оркестратор Парсеров", f"Скрипт уже запускался сегодня ({today_str}). Пропуск.")
                     return
         except json.JSONDecodeError:
             pass
             
-    print(f"\033[96m[Оркестратор]\033[0m Запуск параллельного обновления парсеров (дата: {today_str})...")
+    log_info("Оркестратор Парсеров", f"Запуск параллельного обновления парсеров (дата: {today_str})...")
     
-    # Запускаем парсеры параллельно через потоки, так как их точки входа используют asyncio.run()
+    # Парсеры запускаются параллельно через потоки, так как их точки входа используют asyncio.run()
     moex_task = asyncio.to_thread(run_moex_parser, base_dir)
     cbr_task = asyncio.to_thread(run_cbr_parser, base_dir)
     
@@ -58,61 +64,65 @@ async def main():
     moex_has_new = results[0]
     cbr_has_new = results[1]
     
-    # Обновляем трекер после успешного запуска
+    # Трекер обновляется после успешного запуска
     with open(tracker_path, "w", encoding="utf-8") as f:
         json.dump({"last_run_date": today_str}, f, indent=4)
     
     if moex_has_new or cbr_has_new:
-        print("\033[92m[Оркестратор]\033[0m Обнаружены новые загруженные файлы. Начинаем цепочку обработки.")
+        log_info("Оркестратор Парсеров", "Обнаружены новые загруженные файлы. Начинается цепочка обработки.")
         
         # 1. Этап Load: MainPipeline
         if has_main_pipeline:
-            print("\033[96m[Оркестратор]\033[0m Запуск MainPipeline (Load Layer)...")
+            log_info("MainPipeline", "Запуск MainPipeline (Load Layer)...")
             pipeline = MainPipeline()
             try:
                 await pipeline.run()
-                print("\033[92m[Оркестратор]\033[0m MainPipeline успешно завершил работу.")
+                log_info("MainPipeline", "MainPipeline успешно завершил работу.")
             except Exception as e:
-                print(f"\033[91m[Ошибка]\033[0m Ошибка при выполнении MainPipeline: {e}\033[0m")
-                return # Если упал Load, дальше не идем
+                log_error("MainPipeline", f"Ошибка при выполнении MainPipeline (этап Load): {e}")
+                return # Если произошел сбой на этапе Load, обработка останавливается
                 
         # 2. Этап Transform: ChromaDB Delete
         try:
             from src.elt.transform.chromadb_delete import ChromaDBDelete
-            print("\033[96m[Оркестратор]\033[0m Запуск ChromaDBDelete (удаление старых векторов)...")
+            log_info("ChromaDB Delete", "Запуск ChromaDBDelete (удаление старых векторов)...")
             del_pipeline = ChromaDBDelete()
             await del_pipeline.run()
-            print("\033[92m[Оркестратор]\033[0m ChromaDBDelete успешно завершил работу.")
+            log_info("ChromaDB Delete", "ChromaDBDelete успешно завершил работу.")
         except Exception as e:
-            print(f"\033[91m[Ошибка]\033[0m Ошибка при выполнении ChromaDBDelete: {e}\033[0m")
-            return # Если упал Delete, Upsert делать нельзя во избежание дублей
-
+            log_error("ChromaDB Delete", f"Ошибка при выполнении ChromaDBDelete: {e}")
+            return # Если произошел сбой на этапе Delete, Upsert запускать нельзя во избежание дублей
+            
         # 3. Этап Transform: ChromaDB Upsert
         try:
             from src.elt.transform.chromadb_upsert import ChromaDBUpsert
-            print("\033[96m[Оркестратор]\033[0m Запуск ChromaDBUpsert (загрузка новых векторов)...")
+            log_info("ChromaDB Upsert", "Запуск ChromaDBUpsert (загрузка новых векторов)...")
             upsert_pipeline = ChromaDBUpsert()
             await upsert_pipeline.run()
-            print("\033[92m[Оркестратор]\033[0m ChromaDBUpsert успешно завершил работу.")
+            log_info("ChromaDB Upsert", "ChromaDBUpsert успешно завершил работу.")
         except Exception as e:
-            print(f"\033[91m[Ошибка]\033[0m Ошибка при выполнении ChromaDBUpsert: {e}\033[0m")
+            log_error("ChromaDB Upsert", f"Ошибка при выполнении ChromaDBUpsert: {e}")
     else:
-        print("\033[96m[Оркестратор]\033[0m Нет новых файлов ни в одном из источников.")
+        log_info("Оркестратор Парсеров", "Нет новых файлов ни в одном из источников.")
 
 async def start_service():
-    print("\033[96m[Оркестратор]\033[0m Запуск фонового сервиса (APScheduler)...")
+    """
+    Запускает фоновый сервис планировщика APScheduler.
+    Гарантирует выполнение пайплайна сразу при запуске и далее раз в сутки по расписанию.
+    """
+    log_info("Оркестратор Парсеров", "Запуск фонового сервиса (APScheduler)...")
     
-    # Настраиваем планировщик
+    # Настраивается планировщик
     scheduler = AsyncIOScheduler()
-    # Планируем задачу на каждый день в 00:05
+    # Задача планируется на каждый день в 00:05
     scheduler.add_job(main, 'cron', hour=0, minute=5)
     scheduler.start()
-    print("\033[96m[Оркестратор]\033[0m Задача запланирована на ежедневное выполнение в 00:05.")
+    log_info("Оркестратор Парсеров", "Задача запланирована на ежедневное выполнение в 00:05.")
     
-    # Обязательно делаем первый прогон при самом запуске контейнера
+    # Обязательный первый прогон при самом запуске контейнера
     await main()
     
-    # Оставляем процесс запущенным навсегда, без while True
+    # Процесс остается запущенным навсегда
     await asyncio.Event().wait()
 
 if __name__ == "__main__":

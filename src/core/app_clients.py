@@ -3,7 +3,7 @@ from typing import Any
 from dotenv import load_dotenv
 import litellm
 
-# Load environment variables
+# Загружает переменные окружения
 load_dotenv()
 # pyrefly: ignore [missing-import]
 import chromadb
@@ -14,15 +14,31 @@ from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
 # pyrefly: ignore [missing-import]
 from minio import Minio
 from src.services.content_ai_recognizer import ContentCaptureRecognizer
+from src.utils.console_logger import log_info
 
 def get_chroma_client():
-    """Инициализирует и возвращает клиент векторной базы данных."""
+    """
+    Инициализирует и возвращает клиент векторной базы данных ChromaDB.
+    Берет хост и порт из переменных окружения.
+    """
     host = os.getenv("CHROMA_HOST", "localhost")
     port = int(os.getenv("CHROMA_PORT", "8000"))
     return chromadb.HttpClient(host=host, port=port)
 
 class LiteLLMVertexEmbeddingFunction(EmbeddingFunction):
+    """
+    Класс для работы с эмбеддингами Vertex AI через библиотеку LiteLLM.
+    """
     def __call__(self, input: list[str]):
+        """
+        Преобразует список текстов в список векторных эмбеддингов.
+        
+        Args:
+            input (list[str]): Список текстовых строк для векторизации.
+            
+        Returns:
+            list: Список полученных эмбеддингов.
+        """
         BATCH_SIZE = 200
         all_embeddings = []
         for i in range(0, len(input), BATCH_SIZE):
@@ -35,7 +51,15 @@ class LiteLLMVertexEmbeddingFunction(EmbeddingFunction):
         return all_embeddings
 
 def get_embedder():
-    """Создает функцию эмбеддинга в зависимости от настроек."""
+    """
+    Создает и возвращает функцию эмбеддинга в зависимости от настроек окружения.
+    
+    Returns:
+        EmbeddingFunction: Функция для векторизации текста.
+        
+    Raises:
+        ValueError: Если указан неизвестный провайдер.
+    """
     provider = os.getenv("EMBEDDING_PROVIDER", "vertex").lower()
     
     if provider == "vertex":
@@ -49,9 +73,12 @@ def get_embedder():
         raise ValueError(f"Неизвестный провайдер эмбеддингов: {provider}")
 
 class CloudAIClient:
-    """Универсальная обертка над LLM-провайдером (через litellm)."""
+    """
+    Универсальная обертка над LLM-провайдером (через litellm) для работы с облачными моделями.
+    """
     
     def completion(self, *args, **kwargs):
+        """Синхронный вызов LLM с автоматической подстановкой параметров проекта."""
         if "vertex_location" not in kwargs:
             kwargs["vertex_location"] = os.getenv("VERTEX_LOCATION", "global")
         if "vertex_project" not in kwargs:
@@ -59,6 +86,7 @@ class CloudAIClient:
         return litellm.completion(*args, **kwargs)
 
     async def acompletion(self, *args, **kwargs):
+        """Асинхронный вызов LLM с автоматической подстановкой параметров проекта."""
         if "vertex_location" not in kwargs:
             kwargs["vertex_location"] = os.getenv("VERTEX_LOCATION", "global")
         if "vertex_project" not in kwargs:
@@ -75,22 +103,25 @@ class AppClients:
 
     @classmethod
     def get_embedder_client(cls) -> Any:
+        """Возвращает клиента для генерации эмбеддингов."""
         if cls._embedder is None:
-            print("System: \033[96m[Инициализация]\033[0m Загрузка эмбеддера...")
+            log_info("Инициализация", "Загрузка эмбеддера...")
             cls._embedder = get_embedder()
         return cls._embedder
 
     @classmethod
     def get_chroma_db(cls) -> Any:
+        """Возвращает клиента для работы с ChromaDB."""
         if cls._chroma_client is None:
-            print("System: \033[96m[Инициализация]\033[0m Подключение к ChromaDB...")
+            log_info("Инициализация", "Подключение к ChromaDB...")
             cls._chroma_client = get_chroma_client()
         return cls._chroma_client
 
     @classmethod
     def get_minio_client(cls) -> Any:
+        """Возвращает клиента для работы с S3-хранилищем MinIO."""
         if cls._minio_client is None:
-            print("System: \033[96m[Инициализация]\033[0m Подключение к MinIO...")
+            log_info("Инициализация", "Подключение к MinIO...")
             endpoint = os.getenv("MINIO_ENDPOINT", "localhost:9000")
             access_key = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
             secret_key = os.getenv("MINIO_SECRET_KEY", "minioadmin")
@@ -104,14 +135,16 @@ class AppClients:
 
     @classmethod
     def get_content_ai_client(cls) -> Any:
+        """Возвращает клиента для работы с Content AI (OCR)."""
         if cls._content_ai_client is None:
-            print("System: \033[96m[Инициализация]\033[0m Инициализация Content AI...")
+            log_info("Инициализация", "Инициализация Content AI...")
             cls._content_ai_client = ContentCaptureRecognizer(delete_batch_after=True)
         return cls._content_ai_client
 
     @classmethod
     def get_cloud_ai_client(cls) -> Any:
+        """Возвращает клиента для работы с LLM (Cloud AI)."""
         if cls._cloud_ai_client is None:
-            print("System: \033[96m[Инициализация]\033[0m Инициализация Cloud AI Client...")
+            log_info("Инициализация", "Инициализация Cloud AI Client...")
             cls._cloud_ai_client = CloudAIClient()
         return cls._cloud_ai_client

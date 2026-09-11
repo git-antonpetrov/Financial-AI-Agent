@@ -10,19 +10,17 @@ import re
 from datetime import datetime
 from pydantic import BaseModel, Field
 import fitz
-import colorama
-from colorama import Fore, Style
 # pyrefly: ignore [missing-import]
 from minio.error import S3Error
 
-# Fix Windows console encoding
+# Исправление кодировки консоли Windows
 sys.stdout.reconfigure(encoding='utf-8')
-colorama.init()
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 
 from src.core.app_clients import AppClients
 from src.utils.document_to_pdf import convert_to_pdf
+from src.utils.console_logger import log_info, log_error, log_warning
 
 class DocumentAnalysisResult(BaseModel):
     is_relevant: bool = Field(description="Релевантен ли этот документ для финансового агента?")
@@ -32,13 +30,16 @@ class DocumentAnalysisResult(BaseModel):
     short_number: str = Field(description="Короткий номер акта (например ФЗ-115, 153-И).")
 
 def parse_russian_date(date_str: str) -> datetime:
+    """
+    Преобразует строку с датой на русском языке в объект datetime.
+    """
     if not date_str:
         return datetime.min
-    # Try dd.mm.yyyy
+    # Проверка формата дд.мм.гггг
     match = re.search(r"(\d{1,2})\.(\d{1,2})\.(\d{4})", date_str)
     if match:
         return datetime(int(match.group(3)), int(match.group(2)), int(match.group(1)))
-    # Try text format
+    # Проверка текстового формата (например, 1 января 2024)
     months = {
         "января": 1, "февраля": 2, "марта": 3, "апреля": 4, "мая": 5, "июня": 6,
         "июля": 7, "августа": 8, "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12,
@@ -56,6 +57,11 @@ class RepealedDocumentsResult(BaseModel):
     repealed_docs_system_names: list[str] = Field(description="Список системных имен отмененных актов.")
 
 class MainPipeline:
+    """
+    Главный конвейер (Load Layer).
+    Отвечает за выгрузку сырых документов из MinIO, конвертацию, распознавание,
+    классификацию с помощью LLM и загрузку в итоговые бакеты.
+    """
     def __init__(self):
         self.raw_bucket = "raw-documents"
         self.rag_bucket = "rag-documents"
@@ -63,10 +69,10 @@ class MainPipeline:
         self.minio_client = AppClients.get_minio_client()
         self.content_ai = AppClients.get_content_ai_client()
         self.cloud_ai = AppClients.get_cloud_ai_client()
-        # Контроль одновременных задач (снижено до 1 для экономии ресурсов)
+        # Ограничение одновременных задач для экономии ресурсов
         self.semaphore = asyncio.Semaphore(1)
         
-        # Cache setup
+        # Настройка кэша
         self.cache_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "data", "cache", "main_pipeline")
         os.makedirs(self.cache_dir, exist_ok=True)
         self.cache_file = os.path.join(self.cache_dir, "pipeline_cache.json")
@@ -75,18 +81,20 @@ class MainPipeline:
         self.llm_model = os.getenv("PIPELINE_MODEL_NAME", "vertex_ai/gemini-3.5-flash")
         self.reasoning_effort = os.getenv("PIPELINE_REASONING_EFFORT", "medium")
         
-        # Prompts
+        # Промпты
         self.prompts_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "prompts"))
         self.system_prompt_path = os.path.join(self.prompts_dir, "document-relevance-system-prompt.md")
         
         self._ensure_buckets()
 
     def _ensure_buckets(self):
+        """Проверяет существование необходимых бакетов и создает их при отсутствии."""
         for bucket in [self.raw_bucket, self.rag_bucket]:
             if not self.minio_client.bucket_exists(bucket):
                 self.minio_client.make_bucket(bucket)
 
-    async def _load_cache(self):
+    async def _load_cache(self) -> dict:
+        """Загружает состояние кэша из файла."""
         async with self.cache_lock:
             if os.path.exists(self.cache_file):
                 try:
@@ -97,6 +105,7 @@ class MainPipeline:
             return {}
 
     async def _save_cache(self, file_name: str, cache_data: dict):
+        """Сохраняет состояние обработки файла в кэш."""
         async with self.cache_lock:
             current_cache = {}
             if os.path.exists(self.cache_file):
@@ -109,24 +118,18 @@ class MainPipeline:
             with open(self.cache_file, "w", encoding="utf-8") as f:
                 json.dump(current_cache, f, indent=4, ensure_ascii=False)
 
-    def _log(self, level: str, msg: str):
-        color = Fore.WHITE
-        if level == "INFO": color = Fore.CYAN
-        elif level == "SUCCESS": color = Fore.GREEN
-        elif level == "WARNING": color = Fore.YELLOW
-        elif level == "ERROR": color = Fore.RED
-        print(f"{color}[{level}]:{Style.RESET_ALL} {msg}")
-
     async def _read_system_prompt(self) -> str:
+        """Читает системный промпт из файла."""
         with open(self.system_prompt_path, "r", encoding="utf-8") as f:
             return f.read()
 
     def _validate_pdf(self, pdf_bytes: bytes) -> bool:
+        """Проверяет валидность PDF файла с помощью библиотеки PyMuPDF (fitz)."""
         try:
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
             if len(doc) == 0:
                 return False
-            # Check rendering on the first page to ensure it's not corrupt
+            # Проверка рендеринга первой страницы для убеждения в отсутствии повреждений
             page = doc[0]
             _ = page.get_pixmap()
             doc.close()
@@ -135,11 +138,12 @@ class MainPipeline:
             return False
 
     async def _convert_to_pdf_if_needed(self, file_name: str, file_bytes: bytes) -> bytes:
+        """Конвертирует документ в формат PDF, если он таковым не является."""
         ext = os.path.splitext(file_name)[1].lower()
         if ext == ".pdf":
             return file_bytes
 
-        self._log("INFO", f"Конвертация файла {file_name} в PDF...")
+        log_info("Main Pipeline", f"Конвертация файла {file_name} в PDF...")
         temp_dir = os.path.join(self.cache_dir, "temp_conversion")
         os.makedirs(temp_dir, exist_ok=True)
         
@@ -148,13 +152,13 @@ class MainPipeline:
             f.write(file_bytes)
             
         try:
-            # We call synchronously blocking sub-process logic via to_thread
+            # Вызов синхронной логики конвертации через to_thread
             pdf_path = await asyncio.to_thread(convert_to_pdf, input_path, temp_dir)
             with open(pdf_path, "rb") as f:
                 pdf_bytes = f.read()
             return pdf_bytes
         finally:
-            # Clean up
+            # Очистка временных файлов
             if os.path.exists(input_path):
                 os.remove(input_path)
             expected_pdf = os.path.join(temp_dir, f"{os.path.splitext(file_name)[0]}.pdf")
@@ -162,6 +166,14 @@ class MainPipeline:
                 os.remove(expected_pdf)
 
     async def process_file(self, file_name: str):
+        """
+        Обрабатывает отдельный файл:
+        1. Проверяет наличие дубликатов по хэшу.
+        2. Выполняет конвертацию и распознавание текста.
+        3. Запускает анализ документа через LLM (Gemini).
+        4. Находит отмененные акты.
+        5. Переносит результаты в MinIO и обновляет кэш.
+        """
         async with self.semaphore:
             start_time = datetime.now()
             cache_info = {
@@ -170,7 +182,7 @@ class MainPipeline:
                 "file_name": file_name
             }
             try:
-                # 1. Скачивание
+                # 1. Скачивание документа
                 response = self.minio_client.get_object(self.raw_bucket, file_name)
                 file_bytes = response.read()
                 response.close()
@@ -179,45 +191,45 @@ class MainPipeline:
                 file_hash = hashlib.md5(file_bytes).hexdigest()
                 cache_info["md5"] = file_hash
                 
-                # Check duplicates by hash
+                # Проверка на наличие дубликатов по хэшу
                 cache_dict = await self._load_cache()
                 for key, data in cache_dict.items():
                     if data.get("status") == "completed" and data.get("md5") == file_hash:
-                        self._log("WARNING", f"Файл {file_name} является дубликатом по MD5 хэшу. Пропуск и удаление.")
+                        log_warning("Main Pipeline", f"Файл {file_name} является дубликатом по MD5 хэшу. Пропуск и удаление.")
                         self.minio_client.remove_object(self.raw_bucket, file_name)
                         return
                 
                 ext = os.path.splitext(file_name)[1].lower()
                 
                 if ext == ".md":
-                    self._log("INFO", f"Файл {file_name} уже в формате Markdown. Пропуск Content AI.")
+                    log_info("Main Pipeline", f"Файл {file_name} уже в формате Markdown. Пропуск Content AI.")
                     markdown_content = file_bytes.decode("utf-8")
                 else:
                     # 2. Конвертация в PDF
                     pdf_bytes = await self._convert_to_pdf_if_needed(file_name, file_bytes)
                     
-                    # 3. Валидация PDF
+                    # 3. Валидация PDF документа
                     if not self._validate_pdf(pdf_bytes):
-                        self._log("ERROR", f"Файл {file_name} является битым PDF. Удаление.")
+                        log_error("Main Pipeline", f"Файл {file_name} является битым PDF. Удаление.")
                         self.minio_client.remove_object(self.raw_bucket, file_name)
                         cache_info["status"] = "failed_validation"
                         await self._save_cache(file_name, cache_info)
                         return
     
-                    # 4. Content AI (Распознавание)
-                    self._log("INFO", f"Отправка {file_name} в Content AI...")
+                    # 4. Распознавание текста с помощью Content AI
+                    log_info("Main Pipeline", f"Отправка {file_name} в Content AI...")
                     temp_pdf_path = os.path.join(self.cache_dir, "temp_recognition.pdf")
                     with open(temp_pdf_path, "wb") as f:
                         f.write(pdf_bytes)
                         
-                    # Content AI can take time, run in thread
+                    # Распознавание может занять время, запуск в отдельном потоке
                     rec_result = await asyncio.to_thread(self.content_ai.recognize, temp_pdf_path)
                     if os.path.exists(temp_pdf_path):
                         os.remove(temp_pdf_path)
                     
-                    # Since Content Capture might return multiple documents, we take the first available
+                    # Content Capture может вернуть несколько документов, берется первый
                     if not rec_result:
-                        self._log("WARNING", f"Content AI не вернул результатов для {file_name}")
+                        log_warning("Main Pipeline", f"Content AI не вернул результатов для {file_name}")
                         cache_info["status"] = "no_recognition_result"
                         self.minio_client.remove_object(self.raw_bucket, file_name)
                         await self._save_cache(file_name, cache_info)
@@ -227,7 +239,7 @@ class MainPipeline:
                     markdown_content = doc_data.get("raw_xml", "")
                     
                     if not markdown_content.strip():
-                        self._log("WARNING", f"Content AI вернул пустой текст для {file_name}")
+                        log_warning("Main Pipeline", f"Content AI вернул пустой текст для {file_name}")
                         cache_info["status"] = "empty_text"
                         self.minio_client.remove_object(self.raw_bucket, file_name)
                         await self._save_cache(file_name, cache_info)
@@ -333,7 +345,7 @@ class MainPipeline:
                 
                 repealed_docs = []
                 if repeal_snippets:
-                    self._log("INFO", f"Поиск отмененных актов в {file_name}...")
+                    log_info("Main Pipeline", f"Поиск отмененных актов в {file_name}...")
                     snippets_text = "\n\n---\n\n".join(repeal_snippets)
                     user_prompt2 = (
                         "В данном документе упоминаются возможные отмены правовых актов. "
@@ -359,13 +371,13 @@ class MainPipeline:
                 if is_new_version and short_number:
                     repealed_docs.append(short_number)
                     repealed_docs = list(set(repealed_docs))
-                    self._log("INFO", f"В список отмен добавлена предыдущая версия: {short_number}")
+                    log_info("Main Pipeline", f"В список отмен добавлена предыдущая версия: {short_number}")
                     
                 cache_info["repealed_docs"] = repealed_docs
                 
                 # 7. Маршрутизация в rag-documents
                 if is_relevant:
-                    self._log("SUCCESS", f"Документ {file_name} признан релевантным. Сохранение в upsert...")
+                    log_info("Main Pipeline", f"Документ {file_name} признан релевантным. Сохранение в upsert...")
                     md_bytes = markdown_content.encode("utf-8")
                     metadata = {
                         "official-name": base64.b64encode(official_name.encode('utf-8')).decode('ascii'),
@@ -382,7 +394,7 @@ class MainPipeline:
                     )
                     
                 if repealed_docs:
-                    self._log("SUCCESS", f"В {file_name} найдены отмененные акты: {len(repealed_docs)} шт. Сохранение в delete...")
+                    log_info("Main Pipeline", f"В {file_name} найдены отмененные акты: {len(repealed_docs)} шт. Сохранение в delete...")
                     del_data = json.dumps(repealed_docs, ensure_ascii=False).encode("utf-8")
                     self.minio_client.put_object(
                         self.rag_bucket,
@@ -398,31 +410,34 @@ class MainPipeline:
                 cache_info["status"] = "completed"
                 cache_info["end_time"] = datetime.now().isoformat()
                 await self._save_cache(file_name, cache_info)
-                self._log("SUCCESS", f"Успешно обработан {file_name}")
+                log_info("Main Pipeline", f"Успешно обработан {file_name}")
 
             except Exception as e:
-                self._log("ERROR", f"Ошибка при обработке {file_name}: {str(e)}")
+                log_error("Main Pipeline", f"Ошибка при обработке {file_name}: {str(e)}")
                 cache_info["status"] = "error"
                 cache_info["error"] = str(e)
                 cache_info["end_time"] = datetime.now().isoformat()
                 await self._save_cache(file_name, cache_info)
 
     async def run(self):
-        self._log("INFO", "Запуск Main Pipeline Load Layer...")
+        """
+        Запускает цикл обработки для всех документов в бакете сырых файлов.
+        """
+        log_info("Main Pipeline", "Запуск Main Pipeline Load Layer...")
         objects = list(self.minio_client.list_objects(self.raw_bucket, recursive=True))
         
         if not objects:
-            self._log("INFO", "Очередь raw-documents пуста.")
+            log_info("Main Pipeline", "Очередь raw-documents пуста.")
             return
 
-        self._log("INFO", f"Найдено {len(objects)} файлов для обработки.")
+        log_info("Main Pipeline", f"Найдено {len(objects)} файлов для обработки.")
         
         tasks = []
         for obj in objects:
             tasks.append(self.process_file(obj.object_name))
             
         await asyncio.gather(*tasks)
-        self._log("SUCCESS", "Пайплайн завершил работу.")
+        log_info("Main Pipeline", "Пайплайн завершил работу.")
 
 def start_pipeline():
     pipeline = MainPipeline()

@@ -6,15 +6,20 @@ import asyncio
 import base64
 import io
 from datetime import datetime
-from colorama import Fore, Style
 from dotenv import load_dotenv
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 from src.core.app_clients import AppClients
 # pyrefly: ignore [missing-import]
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from src.utils.console_logger import log_info, log_error, log_warning
 
 class ChromaDBUpsert:
+    """
+    Класс для добавления новых векторов в ChromaDB.
+    Берет размеченные Markdown файлы из MinIO, нарезает их на чанки (TextSplitter)
+    и отправляет в ChromaDB для векторизации и сохранения.
+    """
     def __init__(self):
         load_dotenv()
         self.rag_bucket = "rag-documents"
@@ -43,16 +48,6 @@ class ChromaDBUpsert:
         self.cache_file = os.path.join(self.cache_dir, "upsert_cache.json")
         self.cache_lock = asyncio.Lock()
 
-    def _log(self, level: str, message: str):
-        colors = {
-            "INFO": Fore.CYAN,
-            "SUCCESS": Fore.GREEN,
-            "WARNING": Fore.YELLOW,
-            "ERROR": Fore.RED
-        }
-        color = colors.get(level, Fore.WHITE)
-        print(f"{color}[{level}]:{Style.RESET_ALL} {message}")
-
     async def _load_cache(self) -> dict:
         async with self.cache_lock:
             if not os.path.exists(self.cache_file):
@@ -77,8 +72,15 @@ class ChromaDBUpsert:
                 json.dump(cache, f, ensure_ascii=False, indent=4)
 
     async def process_file(self, object_name: str):
+        """
+        Обрабатывает один файл для загрузки в базу.
+        Скачивает его, извлекает метаданные, нарезает на чанки и батчами отправляет в БД.
+        
+        Args:
+            object_name (str): Имя объекта в MinIO (с префиксом upsert/).
+        """
         async with self.semaphore:
-            self._log("INFO", f"Начало обработки {object_name}")
+            log_info("ChromaDB Upsert", f"Начало обработки {object_name}")
             cache_info = {
                 "start_time": datetime.now().isoformat(),
                 "status": "processing"
@@ -91,7 +93,7 @@ class ChromaDBUpsert:
                 stat = self.minio_client.stat_object(self.rag_bucket, object_name)
                 minio_meta = stat.metadata or {}
                 
-                # Извлекаем наши метаданные (MinIO добавляет префикс X-Amz-Meta-)
+                # Извлекаются наши метаданные (MinIO добавляет префикс X-Amz-Meta-)
                 def safe_b64decode(val: str, default: str) -> str:
                     try:
                         return base64.b64decode(val).decode('utf-8')
@@ -105,10 +107,10 @@ class ChromaDBUpsert:
                 response.close()
                 response.release_conn()
 
-                # 2. Нарезаем на чанки
+                # 2. Нарезка на чанки
                 chunks = self.text_splitter.split_text(content)
                 if not chunks:
-                    self._log("WARNING", f"Файл {object_name} пустой после чанкинга.")
+                    log_warning("ChromaDB Upsert", f"Файл {object_name} пустой после чанкинга.")
                     self.minio_client.remove_object(self.rag_bucket, object_name)
                     cache_info["status"] = "empty"
                     await self._save_cache(object_name, cache_info)
@@ -134,7 +136,7 @@ class ChromaDBUpsert:
                     batch_ids = ids[i:i + self.embedding_batch_size]
                     batch_metas = metadatas[i:i + self.embedding_batch_size]
                     
-                    # Делаем паузу для соблюдения лимитов API
+                    # Делается пауза для соблюдения лимитов API
                     await asyncio.sleep(2.0)
                     
                     # Upsert 
@@ -145,40 +147,43 @@ class ChromaDBUpsert:
                         metadatas=batch_metas
                     )
                 
-                # 5. Удаляем файл из MinIO
+                # 5. Удаляется файл из MinIO
                 self.minio_client.remove_object(self.rag_bucket, object_name)
                 
-                self._log("SUCCESS", f"Файл {object_name} ({len(chunks)} чанков) успешно загружен в ChromaDB.")
+                log_info("ChromaDB Upsert", f"Файл {object_name} ({len(chunks)} чанков) успешно загружен в ChromaDB.")
                 cache_info["status"] = "success"
                 cache_info["chunks"] = len(chunks)
                 cache_info["end_time"] = datetime.now().isoformat()
                 await self._save_cache(object_name, cache_info)
                 
             except Exception as e:
-                self._log("ERROR", f"Ошибка при обработке {object_name}: {str(e)}")
+                log_error("ChromaDB Upsert", f"Ошибка при обработке {object_name}: {str(e)}")
                 cache_info["status"] = "error"
                 cache_info["error"] = str(e)
                 cache_info["end_time"] = datetime.now().isoformat()
                 await self._save_cache(object_name, cache_info)
 
     async def run(self):
-        self._log("INFO", "Запуск Transform Layer (Upsert)...")
+        """
+        Главная точка входа. Находит все файлы в папке upsert/ и обрабатывает их.
+        """
+        log_info("ChromaDB Upsert", "Запуск Transform Layer (Upsert)...")
         objects = list(self.minio_client.list_objects(self.rag_bucket, prefix=self.upsert_prefix, recursive=True))
         
         files_to_process = [obj.object_name for obj in objects if not obj.object_name.endswith("/")]
         
         if not files_to_process:
-            self._log("INFO", "Очередь upsert пуста.")
+            log_info("ChromaDB Upsert", "Очередь upsert пуста.")
             return
 
-        self._log("INFO", f"Найдено {len(files_to_process)} файлов для загрузки.")
+        log_info("ChromaDB Upsert", f"Найдено {len(files_to_process)} файлов для загрузки.")
         
         tasks = []
         for obj_name in files_to_process:
             tasks.append(self.process_file(obj_name))
             
         await asyncio.gather(*tasks)
-        self._log("SUCCESS", "Пайплайн Upsert завершил работу.")
+        log_info("ChromaDB Upsert", "Пайплайн Upsert завершил работу.")
 
 if __name__ == "__main__":
     pipeline = ChromaDBUpsert()
