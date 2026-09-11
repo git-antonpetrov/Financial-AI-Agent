@@ -22,11 +22,11 @@ services:
       - chroma_gold_data:/chroma/chroma
     restart: unless-stopped
 
-  extract-parsers:
+  elt:
     build:
       context: .
       dockerfile: src/elt/Dockerfile
-    container_name: extract-parsers
+    container_name: elt
     depends_on:
       - s3-minio
       - postgres-db
