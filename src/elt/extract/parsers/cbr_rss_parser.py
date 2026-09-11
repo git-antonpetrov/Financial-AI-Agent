@@ -1,11 +1,11 @@
 import os
 import sys
-import json
 import uuid
 import urllib3
 import re
 import asyncio
 import aiohttp
+from datetime import datetime, date
 from io import BytesIO
 from urllib.parse import unquote
 import xml.etree.ElementTree as ET
@@ -18,9 +18,12 @@ try:
     # pyrefly: ignore [missing-import]
     from src.core.app_clients import AppClients
     # pyrefly: ignore [missing-import]
+    from src.core.models import ExtractState
+    from sqlalchemy import select
+    # pyrefly: ignore [missing-import]
     from minio.error import S3Error
 except ImportError:
-    log_error("CBR Парсер", "Библиотека 'minio' не найдена. Установите ее: pip install minio")
+    log_error("CBR Парсер", "Отсутствуют необходимые библиотеки. Проверьте requirements.txt")
     sys.exit(1)
 
 # Добавление корня проекта в sys.path
@@ -31,13 +34,10 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 class CbrRssParser:
     """
     Парсер для загрузки документов из RSS-ленты Центрального Банка РФ.
-    Скачивает файлы и сохраняет их в бакет MinIO.
+    Скачивает файлы и сохраняет их в бакет MinIO, а также логирует состояние в базу данных PostgreSQL.
     """
     def __init__(self, base_dir: str):
         self.base_dir = base_dir
-        self.cache_dir = os.path.join(base_dir, "data", "cache", "cbr_rss_parser")
-        os.makedirs(self.cache_dir, exist_ok=True)
-        self.tracker_path = os.path.join(self.cache_dir, "cbr_state_tracker.json")
         
         self.rss_url = "https://www.cbr.ru/rss/navr"
         
@@ -49,6 +49,7 @@ class CbrRssParser:
         
         self.minio_bucket = "raw-documents"
         self.minio_client = AppClients.get_minio_client()
+        self.db_session_maker = AppClients.get_async_session()
         
         self._ensure_bucket_exists()
 
@@ -59,22 +60,6 @@ class CbrRssParser:
                 log_info("CBR Парсер", f"Создан бакет: {self.minio_bucket}")
         except Exception as e:
             log_error("MinIO", f"Не удалось проверить или создать бакет: {e}")
-
-    def _load_tracker(self) -> dict:
-        if os.path.exists(self.tracker_path):
-            try:
-                with open(self.tracker_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if isinstance(data, list):
-                        return {"processed_guids": data}
-                    return data
-            except json.JSONDecodeError:
-                pass
-        return {"processed_guids": []}
-
-    def _save_tracker(self, data: dict):
-        with open(self.tracker_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
 
     def upload_to_minio(self, content: bytes, original_filename: str) -> bool:
         """Синхронная функция загрузки в MinIO. Должна вызываться через asyncio.to_thread."""
@@ -108,10 +93,30 @@ class CbrRssParser:
             log_error("MinIO", f"Неожиданная ошибка MinIO: {e}")
             return False
 
-    async def _process_item(self, session, item, sem, tracker, processed_guids):
+    async def _process_item(self, session, item, sem):
         url = item['url']
+        guid = item['guid']
+        pub_date_str = item.get('pubDate', '')
+        
+        # Попытка распарсить дату из RSS (пример формата: Thu, 01 Sep 2024 10:00:00 +0300)
+        pub_date_obj = date.today()
+        if pub_date_str:
+            try:
+                # Отбрасываем таймзону для простоты парсинга
+                date_part = " ".join(pub_date_str.split(" ")[:4])
+                pub_date_obj = datetime.strptime(date_part, "%a, %d %b %Y").date()
+            except Exception:
+                pass
+
         async with sem:
+            # Проверка наличия документа в БД
+            async with self.db_session_maker() as db:
+                result = await db.execute(select(ExtractState).where(ExtractState.source_url == guid))
+                if result.scalar_one_or_none():
+                    return False
+
             log_info("CBR Парсер", f"Скачивание документа: {url}")
+            download_start_time = datetime.now().time()
             try:
                 async with session.get(url, headers=self.headers, ssl=False, timeout=30) as doc_resp:
                     doc_resp.raise_for_status()
@@ -142,17 +147,29 @@ class CbrRssParser:
                     
                     if not filename.endswith(".pdf") and not filename.endswith(".doc") and not filename.endswith(".docx"):
                         filename += ".pdf"
+                        
+                download_end_time = datetime.now().time()
 
-                    # Запускается синхронная загрузка в MinIO в отдельном потоке
-                    upload_success = await asyncio.to_thread(self.upload_to_minio, content, filename)
-                    
-                    if upload_success:
-                        processed_guids.add(item['guid'])
-                        tracker["processed_guids"] = list(processed_guids)
-                        # Синхронная запись в файл
-                        self._save_tracker(tracker)
-                        return True
-                    return False
+                # Запускается синхронная загрузка в MinIO в отдельном потоке
+                upload_success = await asyncio.to_thread(self.upload_to_minio, content, filename)
+                
+                if upload_success:
+                    # Сохранение в базу данных
+                    async with self.db_session_maker() as db:
+                        new_state = ExtractState(
+                            source="CBR",
+                            source_url=guid,
+                            file_name=filename,
+                            pub_date=pub_date_obj,
+                            download_date=date.today(),
+                            download_start_time=download_start_time,
+                            download_end_time=download_end_time,
+                            status="downloaded"
+                        )
+                        db.add(new_state)
+                        await db.commit()
+                    return True
+                return False
             except Exception as e:
                 log_error("CBR Парсер", f"Не удалось обработать документ {url}: {e}")
                 return False
@@ -177,19 +194,27 @@ class CbrRssParser:
                         title_elem = item.find('title')
                         link_elem = item.find('link')
                         guid_elem = item.find('guid')
+                        pubdate_elem = item.find('pubDate')
                         
                         if title_elem is not None and link_elem is not None and guid_elem is not None:
                             items.append({
                                 'title': title_elem.text.strip(),
                                 'url': link_elem.text.strip(),
-                                'guid': guid_elem.text.strip()
+                                'guid': guid_elem.text.strip(),
+                                'pubDate': pubdate_elem.text.strip() if pubdate_elem is not None else ""
                             })
             except Exception as e:
                 log_error("CBR Парсер", f"Исключение при парсинге XML: {e}")
                 return False
 
-            tracker = self._load_tracker()
-            processed_guids = set(tracker.get("processed_guids", []))
+            # Вытаскиваем все известные GUID из БД для быстрой фильтрации
+            processed_guids = set()
+            try:
+                async with self.db_session_maker() as db:
+                    result = await db.execute(select(ExtractState.source_url).where(ExtractState.source == "CBR"))
+                    processed_guids = set(result.scalars().all())
+            except Exception as e:
+                log_error("CBR Парсер", f"Ошибка получения состояния из БД: {e}")
             
             has_new = False
             new_items = [item for item in items if item['guid'] not in processed_guids]
@@ -201,7 +226,7 @@ class CbrRssParser:
             log_info("CBR Парсер", f"Найдено новых документов: {len(new_items)}")
             
             sem = asyncio.Semaphore(3) # Ограничение: максимум 3 одновременных задачи
-            tasks = [self._process_item(session, item, sem, tracker, processed_guids) for item in new_items]
+            tasks = [self._process_item(session, item, sem) for item in new_items]
             
             results = await asyncio.gather(*tasks)
             if any(results):

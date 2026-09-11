@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 from src.core.app_clients import AppClients
+from src.core.models import TransformState
+from sqlalchemy import select
 # pyrefly: ignore [missing-import]
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from src.utils.console_logger import log_info, log_error, log_warning
@@ -27,6 +29,7 @@ class ChromaDBUpsert:
         self.minio_client = AppClients.get_minio_client()
         self.chroma_client = AppClients.get_chroma_db()
         self.embedder = AppClients.get_embedder_client()
+        self.db_session_maker = AppClients.get_async_session()
         
         self.collection = self.chroma_client.get_or_create_collection(
             name="global_rules",
@@ -42,34 +45,16 @@ class ChromaDBUpsert:
         self.max_concurrency = 3
         self.semaphore = asyncio.Semaphore(self.max_concurrency)
         self.embedding_batch_size = 200
-        
-        self.cache_dir = "data/cache/transform"
-        os.makedirs(self.cache_dir, exist_ok=True)
-        self.cache_file = os.path.join(self.cache_dir, "upsert_cache.json")
-        self.cache_lock = asyncio.Lock()
 
-    async def _load_cache(self) -> dict:
-        async with self.cache_lock:
-            if not os.path.exists(self.cache_file):
-                return {}
-            try:
-                with open(self.cache_file, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except json.JSONDecodeError:
-                return {}
-
-    async def _save_cache(self, file_name: str, data: dict):
-        async with self.cache_lock:
-            cache = {}
-            if os.path.exists(self.cache_file):
-                try:
-                    with open(self.cache_file, "r", encoding="utf-8") as f:
-                        cache = json.load(f)
-                except json.JSONDecodeError:
-                    pass
-            cache[file_name] = data
-            with open(self.cache_file, "w", encoding="utf-8") as f:
-                json.dump(cache, f, ensure_ascii=False, indent=4)
+    async def _update_db_state(self, state_id: str, **kwargs):
+        """Обновляет запись о состоянии трансформации в БД."""
+        async with self.db_session_maker() as db:
+            result = await db.execute(select(TransformState).where(TransformState.id == state_id))
+            state = result.scalar_one_or_none()
+            if state:
+                for key, value in kwargs.items():
+                    setattr(state, key, value)
+                await db.commit()
 
     async def process_file(self, object_name: str):
         """
@@ -81,10 +66,19 @@ class ChromaDBUpsert:
         """
         async with self.semaphore:
             log_info("ChromaDB Upsert", f"Начало обработки {object_name}")
-            cache_info = {
-                "start_time": datetime.now().isoformat(),
-                "status": "processing"
-            }
+            
+            async with self.db_session_maker() as db:
+                new_state = TransformState(
+                    file_name=object_name,
+                    transform_type="upsert",
+                    started_at=datetime.now(),
+                    status="processing"
+                )
+                db.add(new_state)
+                await db.commit()
+                await db.refresh(new_state)
+                state_id = new_state.id
+                
             try:
                 # 1. Скачивание файла и метаданных
                 response = self.minio_client.get_object(self.rag_bucket, object_name)
@@ -112,8 +106,7 @@ class ChromaDBUpsert:
                 if not chunks:
                     log_warning("ChromaDB Upsert", f"Файл {object_name} пустой после чанкинга.")
                     self.minio_client.remove_object(self.rag_bucket, object_name)
-                    cache_info["status"] = "empty"
-                    await self._save_cache(object_name, cache_info)
+                    await self._update_db_state(state_id, status="empty", completed_at=datetime.now())
                     return
 
                 # 3. Подготовка данных для Chroma
@@ -151,17 +144,11 @@ class ChromaDBUpsert:
                 self.minio_client.remove_object(self.rag_bucket, object_name)
                 
                 log_info("ChromaDB Upsert", f"Файл {object_name} ({len(chunks)} чанков) успешно загружен в ChromaDB.")
-                cache_info["status"] = "success"
-                cache_info["chunks"] = len(chunks)
-                cache_info["end_time"] = datetime.now().isoformat()
-                await self._save_cache(object_name, cache_info)
+                await self._update_db_state(state_id, status="completed", chunks_count=len(chunks), completed_at=datetime.now())
                 
             except Exception as e:
                 log_error("ChromaDB Upsert", f"Ошибка при обработке {object_name}: {str(e)}")
-                cache_info["status"] = "error"
-                cache_info["error"] = str(e)
-                cache_info["end_time"] = datetime.now().isoformat()
-                await self._save_cache(object_name, cache_info)
+                await self._update_db_state(state_id, status="error", error_message=str(e)[:500], completed_at=datetime.now())
 
     async def run(self):
         """
