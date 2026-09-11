@@ -11,6 +11,12 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
 from src.elt.extract.parsers.cbr_rss_parser import run_cbr_parser
 from src.elt.extract.parsers.moex_parser import run_moex_parser
 
+from src.core.clients.db import get_async_session_maker, init_db
+from src.core.clients.storage import get_minio_client
+from src.core.clients.ocr import get_content_ai_client
+from src.core.clients.llm import get_cloud_ai_client, get_embedder
+from src.core.clients.vector_db import get_chroma_client
+
 try:
     # pyrefly: ignore [missing-import]
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -34,16 +40,17 @@ async def main():
     log_info("Оркестратор Парсеров", "Инициализация...")
     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
     
+    db_session_maker = get_async_session_maker()
+    minio_client = get_minio_client()
+    
     # Проверка даты последнего запуска
     today_date = datetime.date.today()
     
     try:
-        from src.core.app_clients import AppClients
         from src.core.models import OrchestratorRun
         from sqlalchemy import select
         
-        session_maker = AppClients.get_async_session()
-        async with session_maker() as session:
+        async with db_session_maker() as session:
             result = await session.execute(select(OrchestratorRun).where(OrchestratorRun.run_date == today_date))
             existing_run = result.scalar_one_or_none()
             if existing_run:
@@ -57,8 +64,8 @@ async def main():
     started_at = datetime.datetime.now()
     
     # Парсеры запускаются параллельно через потоки, так как их точки входа используют asyncio.run()
-    moex_task = asyncio.to_thread(run_moex_parser, base_dir)
-    cbr_task = asyncio.to_thread(run_cbr_parser, base_dir)
+    moex_task = asyncio.to_thread(run_moex_parser, db_session_maker, minio_client, base_dir)
+    cbr_task = asyncio.to_thread(run_cbr_parser, db_session_maker, minio_client, base_dir)
     
     results = await asyncio.gather(moex_task, cbr_task)
     
@@ -68,7 +75,7 @@ async def main():
     
     # Трекер обновляется после успешного запуска
     try:
-        async with session_maker() as session:
+        async with db_session_maker() as session:
             new_run = OrchestratorRun(
                 run_date=today_date,
                 started_at=started_at,
@@ -83,10 +90,15 @@ async def main():
     if moex_has_new or cbr_has_new:
         log_info("Оркестратор Парсеров", "Обнаружены новые загруженные файлы. Начинается цепочка обработки.")
         
+        content_ai = get_content_ai_client()
+        cloud_ai = get_cloud_ai_client()
+        chroma_client = get_chroma_client()
+        embedder = get_embedder()
+
         # 1. Этап Load: MainPipeline
         if has_main_pipeline:
             log_info("MainPipeline", "Запуск MainPipeline (Load Layer)...")
-            pipeline = MainPipeline()
+            pipeline = MainPipeline(db_session_maker, minio_client, content_ai, cloud_ai)
             try:
                 await pipeline.run()
                 log_info("MainPipeline", "MainPipeline успешно завершил работу.")
@@ -98,7 +110,7 @@ async def main():
         try:
             from src.elt.transform.chromadb_delete import ChromaDBDelete
             log_info("ChromaDB Delete", "Запуск ChromaDBDelete (удаление старых векторов)...")
-            del_pipeline = ChromaDBDelete()
+            del_pipeline = ChromaDBDelete(db_session_maker, minio_client, chroma_client, embedder)
             await del_pipeline.run()
             log_info("ChromaDB Delete", "ChromaDBDelete успешно завершил работу.")
         except Exception as e:
@@ -109,7 +121,7 @@ async def main():
         try:
             from src.elt.transform.chromadb_upsert import ChromaDBUpsert
             log_info("ChromaDB Upsert", "Запуск ChromaDBUpsert (загрузка новых векторов)...")
-            upsert_pipeline = ChromaDBUpsert()
+            upsert_pipeline = ChromaDBUpsert(db_session_maker, minio_client, chroma_client, embedder)
             await upsert_pipeline.run()
             log_info("ChromaDB Upsert", "ChromaDBUpsert успешно завершил работу.")
         except Exception as e:
@@ -122,8 +134,7 @@ async def start_service():
     Запускает фоновый сервис планировщика APScheduler.
     Гарантирует выполнение пайплайна сразу при запуске и далее раз в сутки по расписанию.
     """
-    from src.core.app_clients import AppClients
-    await AppClients.init_db()
+    await init_db()
 
     log_info("Оркестратор Парсеров", "Запуск фонового сервиса (APScheduler)...")
     

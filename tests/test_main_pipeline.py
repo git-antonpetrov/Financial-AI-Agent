@@ -4,11 +4,11 @@ import asyncio
 import io
 sys.stdout.reconfigure(encoding='utf-8')
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from src.core.app_clients import AppClients
+from src.core.clients.storage import get_minio_client
 from src.elt.load.main_pipeline import MainPipeline
 async def run_test():
     print("\n--- TEST: Main Pipeline ---\n")
-    minio_client = AppClients.get_minio_client()
+    minio_client = get_minio_client()
     raw_bucket = "raw-documents"
     if not minio_client.bucket_exists(raw_bucket):
         minio_client.make_bucket(raw_bucket)
@@ -27,7 +27,16 @@ async def run_test():
         io.BytesIO(test_content), 
         length=len(test_content)
     )
-    pipeline = MainPipeline()
+    from src.core.clients.db import get_async_session_maker
+    from src.core.clients.ocr import get_content_ai_client
+    from src.core.clients.llm import get_cloud_ai_client
+
+    db_maker = get_async_session_maker()
+    content_ai = get_content_ai_client()
+    cloud_ai = get_cloud_ai_client()
+
+    print("Initializing MainPipeline...")
+    pipeline = MainPipeline(db_maker, minio_client, content_ai, cloud_ai)
     await pipeline.run()
     print("\nCheck if file was removed from raw-documents...")
     try:

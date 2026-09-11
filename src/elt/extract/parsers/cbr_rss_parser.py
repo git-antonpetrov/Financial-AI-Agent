@@ -9,25 +9,19 @@ from datetime import datetime, date
 from io import BytesIO
 from urllib.parse import unquote
 import xml.etree.ElementTree as ET
+from typing import Callable
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")))
 from src.utils.console_logger import log_info, log_warning, log_error
+from src.core.models import ExtractState
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+# pyrefly: ignore [missing-import]
+from minio.error import S3Error
+from minio import Minio
 
 # Исправление кодировки консоли Windows
 sys.stdout.reconfigure(encoding='utf-8')
-
-try:
-    # pyrefly: ignore [missing-import]
-    from src.core.app_clients import AppClients
-    # pyrefly: ignore [missing-import]
-    from src.core.models import ExtractState
-    from sqlalchemy import select
-    # pyrefly: ignore [missing-import]
-    from minio.error import S3Error
-except ImportError:
-    log_error("CBR Парсер", "Отсутствуют необходимые библиотеки. Проверьте requirements.txt")
-    sys.exit(1)
-
-# Добавление корня проекта в sys.path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")))
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -36,8 +30,10 @@ class CbrRssParser:
     Парсер для загрузки документов из RSS-ленты Центрального Банка РФ.
     Скачивает файлы и сохраняет их в бакет MinIO, а также логирует состояние в базу данных PostgreSQL.
     """
-    def __init__(self, base_dir: str):
+    def __init__(self, db_session_maker: Callable[..., AsyncSession], minio_client: Minio, base_dir: str):
         self.base_dir = base_dir
+        self.db_session_maker = db_session_maker
+        self.minio_client = minio_client
         
         self.rss_url = "https://www.cbr.ru/rss/navr"
         
@@ -48,12 +44,10 @@ class CbrRssParser:
         }
         
         self.minio_bucket = "raw-documents"
-        self.minio_client = AppClients.get_minio_client()
-        self.db_session_maker = AppClients.get_async_session()
-        
         self._ensure_bucket_exists()
 
     def _ensure_bucket_exists(self):
+        """Проверяет существование бакета в MinIO и создает его при необходимости."""
         try:
             if not self.minio_client.bucket_exists(self.minio_bucket):
                 self.minio_client.make_bucket(self.minio_bucket)
@@ -62,7 +56,7 @@ class CbrRssParser:
             log_error("MinIO", f"Не удалось проверить или создать бакет: {e}")
 
     def upload_to_minio(self, content: bytes, original_filename: str) -> bool:
-        """Синхронная функция загрузки в MinIO. Должна вызываться через asyncio.to_thread."""
+        """Синхронная функция загрузки в MinIO. Вызывается через asyncio.to_thread."""
         try:
             self.minio_client.put_object(
                 self.minio_bucket,
@@ -93,7 +87,8 @@ class CbrRssParser:
             log_error("MinIO", f"Неожиданная ошибка MinIO: {e}")
             return False
 
-    async def _process_item(self, session, item, sem):
+    async def _process_item(self, session: aiohttp.ClientSession, item: dict, sem: asyncio.Semaphore) -> bool:
+        """Скачивает документ по ссылке из RSS, если его еще нет в БД."""
         url = item['url']
         guid = item['guid']
         pub_date_str = item.get('pubDate', '')
@@ -175,6 +170,7 @@ class CbrRssParser:
                 return False
 
     async def fetch_and_download(self) -> bool:
+        """Запускает асинхронный опрос RSS-ленты и загружает новые документы."""
         log_info("CBR Парсер", "Загрузка ленты RSS...")
         
         async with aiohttp.ClientSession() as session:
@@ -235,11 +231,17 @@ class CbrRssParser:
             log_info("CBR Парсер", "Завершена работа парсера CBR RSS.")
             return has_new
 
-def run_cbr_parser(base_dir=None):
+def run_cbr_parser(db_session_maker: Callable[..., AsyncSession], minio_client: Minio, base_dir: str = None) -> bool:
+    """Точка входа для запуска парсера CBR."""
     if base_dir is None:
         base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
-    parser = CbrRssParser(base_dir)
+    parser = CbrRssParser(db_session_maker, minio_client, base_dir)
     return asyncio.run(parser.fetch_and_download())
 
 if __name__ == "__main__":
-    run_cbr_parser()
+    from src.core.clients.db import get_async_session_maker
+    from src.core.clients.storage import get_minio_client
+    
+    db_maker = get_async_session_maker()
+    minio = get_minio_client()
+    run_cbr_parser(db_maker, minio)

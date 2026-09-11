@@ -3,8 +3,10 @@ import sys
 import asyncio
 from datetime import datetime
 
+sys.stdout.reconfigure(encoding='utf-8')
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from src.core.app_clients import AppClients
+from src.core.clients.db import get_async_session_maker, init_db
 from src.core.models import OrchestratorRun
 from sqlalchemy import select
 
@@ -16,10 +18,12 @@ async def main():
         load_dotenv()
 
         print("Initializing DB...")
-        await AppClients.init_db()
+        from src.core.config import get_settings
+        print(f"DATABASE URL: {get_settings().DATABASE_URL}")
+        await init_db()
         print("DB initialized successfully.")
 
-        session_maker = AppClients.get_async_session()
+        session_maker = get_async_session_maker()
         print("Async session maker created.")
 
         async with session_maker() as session:

@@ -30,7 +30,7 @@ class LoadState(Base):
     system_name: Mapped[Optional[str]] = mapped_column(nullable=True)
     is_relevant: Mapped[Optional[bool]] = mapped_column(nullable=True)
     official_name: Mapped[Optional[str]] = mapped_column(nullable=True)
-    sign_date: Mapped[Optional[str]] = mapped_column(nullable=True)
+    sign_date: Mapped[Optional[date]] = mapped_column(nullable=True)
     short_number: Mapped[Optional[str]] = mapped_column(nullable=True)
     repealed_docs: Mapped[Optional[str]] = mapped_column(nullable=True)
     processing_start_date: Mapped[date] = mapped_column()

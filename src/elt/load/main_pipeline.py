@@ -19,8 +19,13 @@ sys.stdout.reconfigure(encoding='utf-8')
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 
-from src.core.app_clients import AppClients
+from typing import Callable
+from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.models import LoadState
+from minio import Minio
+from src.services.content_ai_recognizer import ContentCaptureRecognizer
+# Импорт CloudAIClient пока условно, можно использовать Any
+from typing import Any
 from src.utils.document_to_pdf import convert_to_pdf
 from src.utils.console_logger import log_info, log_error, log_warning
 
@@ -65,14 +70,20 @@ class MainPipeline:
     классификацию с помощью LLM и загрузку в итоговые бакеты.
     Логирует состояние каждого документа в PostgreSQL.
     """
-    def __init__(self):
+    def __init__(
+        self,
+        db_session_maker: Callable[..., AsyncSession],
+        minio_client: Minio,
+        content_ai: ContentCaptureRecognizer,
+        cloud_ai: Any
+    ):
         self.raw_bucket = "raw-documents"
         self.rag_bucket = "rag-documents"
         
-        self.minio_client = AppClients.get_minio_client()
-        self.content_ai = AppClients.get_content_ai_client()
-        self.cloud_ai = AppClients.get_cloud_ai_client()
-        self.db_session_maker = AppClients.get_async_session()
+        self.minio_client = minio_client
+        self.content_ai = content_ai
+        self.cloud_ai = cloud_ai
+        self.db_session_maker = db_session_maker
         
         # Ограничение одновременных задач для экономии ресурсов
         self.semaphore = asyncio.Semaphore(1)
@@ -166,8 +177,10 @@ class MainPipeline:
             # Создаем начальную запись в БД
             async with self.db_session_maker() as db:
                 new_state = LoadState(
-                    file_name=file_name,
-                    started_at=processing_start_time,
+                    raw_file_name=file_name,
+                    processing_start_date=processing_start_time.date(),
+                    processing_start_time=processing_start_time.time(),
+                    md5_hash="",  # Initial empty hash
                     status="processing"
                 )
                 db.add(new_state)
@@ -190,13 +203,13 @@ class MainPipeline:
                 async with self.db_session_maker() as db:
                     result = await db.execute(
                         select(LoadState)
-                        .where(and_(LoadState.file_hash == file_hash, LoadState.status == "completed"))
+                        .where(and_(LoadState.md5_hash == file_hash, LoadState.status == "completed"))
                     )
                     duplicate = result.scalar_one_or_none()
                     if duplicate:
                         log_warning("Main Pipeline", f"Файл {file_name} является дубликатом по MD5 хэшу. Пропуск и удаление.")
                         self.minio_client.remove_object(self.raw_bucket, file_name)
-                        await self._update_db_state(state_id, status="duplicate", completed_at=datetime.now())
+                        await self._update_db_state(state_id, status="duplicate", processing_end_date=datetime.now().date(), processing_end_time=datetime.now().time())
                         return
                 
                 ext = os.path.splitext(file_name)[1].lower()
@@ -212,7 +225,7 @@ class MainPipeline:
                     if not self._validate_pdf(pdf_bytes):
                         log_error("Main Pipeline", f"Файл {file_name} является битым PDF. Удаление.")
                         self.minio_client.remove_object(self.raw_bucket, file_name)
-                        await self._update_db_state(state_id, status="failed_validation", completed_at=datetime.now())
+                        await self._update_db_state(state_id, md5_hash=file_hash, status="skipped", error_message="Дубликат по хешу", processing_end_date=datetime.now().date(), processing_end_time=datetime.now().time())
                         return
     
                     # 4. Распознавание текста с помощью Content AI
@@ -230,7 +243,7 @@ class MainPipeline:
                     if not rec_result:
                         log_warning("Main Pipeline", f"Content AI не вернул результатов для {file_name}")
                         self.minio_client.remove_object(self.raw_bucket, file_name)
-                        await self._update_db_state(state_id, status="no_recognition_result", completed_at=datetime.now())
+                        await self._update_db_state(state_id, status="no_recognition_result", processing_end_date=datetime.now().date(), processing_end_time=datetime.now().time())
                         return
                         
                     doc_data = list(rec_result.values())[0]
@@ -239,7 +252,7 @@ class MainPipeline:
                     if not markdown_content.strip():
                         log_warning("Main Pipeline", f"Content AI вернул пустой текст для {file_name}")
                         self.minio_client.remove_object(self.raw_bucket, file_name)
-                        await self._update_db_state(state_id, status="empty_text", completed_at=datetime.now())
+                        await self._update_db_state(state_id, status="empty_text", processing_end_date=datetime.now().date(), processing_end_time=datetime.now().time())
                         return
 
                 # 5. Умный Анализ (Gemini JSON)
@@ -306,7 +319,7 @@ class MainPipeline:
                     if result.scalar_one_or_none():
                         log_warning("Main Pipeline", f"Файл {file_name} является полным дубликатом (system_name). Пропуск и удаление.")
                         self.minio_client.remove_object(self.raw_bucket, file_name)
-                        await self._update_db_state(state_id, status="duplicate", completed_at=datetime.now())
+                        await self._update_db_state(state_id, status="duplicate", processing_end_date=datetime.now().date(), processing_end_time=datetime.now().time())
                         return
                         
                     # Поиск старых версий (like base_system_name% или short_number)
@@ -333,7 +346,7 @@ class MainPipeline:
                         if current_date <= max_cache_date:
                             log_warning("Main Pipeline", f"Файл {file_name} является старой версией или дубликатом (дата <= {max_cache_date.strftime('%d.%m.%Y') if max_cache_date != date.min else 'N/A'}). Пропуск и удаление.")
                             self.minio_client.remove_object(self.raw_bucket, file_name)
-                            await self._update_db_state(state_id, status="old_version", completed_at=datetime.now())
+                            await self._update_db_state(state_id, status="old_version", processing_end_date=datetime.now().date(), processing_end_time=datetime.now().time())
                             return
                         else:
                             log_info("Main Pipeline", f"Файл {file_name} является НОВОЙ редакцией. Обработка продолжается.")
@@ -379,7 +392,7 @@ class MainPipeline:
                     repealed_docs = list(set(repealed_docs))
                     log_info("Main Pipeline", f"В список отмен добавлена предыдущая версия: {short_number}")
                     
-                await self._update_db_state(state_id, repealed_docs=repealed_docs)
+                await self._update_db_state(state_id, repealed_docs=json.dumps(repealed_docs, ensure_ascii=False))
                 
                 # 7. Маршрутизация в rag-documents
                 if is_relevant:
@@ -413,12 +426,12 @@ class MainPipeline:
                 # 8. Удаление оригинала
                 self.minio_client.remove_object(self.raw_bucket, file_name)
                 
-                await self._update_db_state(state_id, status="completed", completed_at=datetime.now())
+                await self._update_db_state(state_id, status="completed", processing_end_date=datetime.now().date(), processing_end_time=datetime.now().time())
                 log_info("Main Pipeline", f"Успешно обработан {file_name}")
 
             except Exception as e:
                 log_error("Main Pipeline", f"Ошибка при обработке {file_name}: {str(e)}")
-                await self._update_db_state(state_id, status="error", error_message=str(e)[:500], completed_at=datetime.now())
+                await self._update_db_state(state_id, status="error", error_message=str(e)[:500], processing_end_date=datetime.now().date(), processing_end_time=datetime.now().time())
 
     async def run(self):
         """
@@ -440,9 +453,24 @@ class MainPipeline:
         await asyncio.gather(*tasks)
         log_info("Main Pipeline", "Пайплайн завершил работу.")
 
-def start_pipeline():
-    pipeline = MainPipeline()
+def start_pipeline(
+    db_session_maker: Callable[..., AsyncSession],
+    minio_client: Minio,
+    content_ai: ContentCaptureRecognizer,
+    cloud_ai: Any
+):
+    pipeline = MainPipeline(db_session_maker, minio_client, content_ai, cloud_ai)
     asyncio.run(pipeline.run())
 
 if __name__ == "__main__":
-    start_pipeline()
+    from src.core.clients.db import get_async_session_maker
+    from src.core.clients.storage import get_minio_client
+    from src.core.clients.ocr import get_content_ai_client
+    from src.core.clients.llm import get_cloud_ai_client
+
+    db_maker = get_async_session_maker()
+    minio = get_minio_client()
+    ocr = get_content_ai_client()
+    llm = get_cloud_ai_client()
+
+    start_pipeline(db_maker, minio, ocr, llm)

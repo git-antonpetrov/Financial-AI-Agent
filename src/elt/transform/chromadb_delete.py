@@ -4,26 +4,34 @@ import json
 import asyncio
 from datetime import datetime
 from dotenv import load_dotenv
+from typing import Callable, Any
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
-from src.core.app_clients import AppClients
 from src.core.models import TransformState
 from src.utils.console_logger import log_info, log_error, log_warning
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from minio import Minio
 
 class ChromaDBDelete:
     """
     Класс для удаления устаревших векторов из ChromaDB.
     Удаляет векторы для документов, чьи номера (short_number) числятся в файлах отмены в MinIO.
     """
-    def __init__(self):
+    def __init__(
+        self,
+        db_session_maker: Callable[..., AsyncSession],
+        minio_client: Minio,
+        chroma_client: Any,
+        embedder: Any
+    ):
         load_dotenv()
         self.rag_bucket = "rag-documents"
         self.delete_prefix = "delete/"
-        self.minio_client = AppClients.get_minio_client()
-        self.chroma_client = AppClients.get_chroma_db()
-        self.embedder = AppClients.get_embedder_client()
-        self.db_session_maker = AppClients.get_async_session()
+        self.minio_client = minio_client
+        self.chroma_client = chroma_client
+        self.embedder = embedder
+        self.db_session_maker = db_session_maker
         
         self.collection = self.chroma_client.get_or_create_collection(
             name="global_rules",
@@ -124,6 +132,19 @@ class ChromaDBDelete:
         await asyncio.gather(*tasks)
         log_info("ChromaDB Delete", "Пайплайн Delete завершил работу.")
 
-if __name__ == "__main__":
-    pipeline = ChromaDBDelete()
+def start_delete(db_session_maker: Callable[..., AsyncSession], minio_client: Minio, chroma_client: Any, embedder: Any):
+    pipeline = ChromaDBDelete(db_session_maker, minio_client, chroma_client, embedder)
     asyncio.run(pipeline.run())
+
+if __name__ == "__main__":
+    from src.core.clients.db import get_async_session_maker
+    from src.core.clients.storage import get_minio_client
+    from src.core.clients.vector_db import get_chroma_client
+    from src.core.clients.llm import get_embedder
+
+    db_maker = get_async_session_maker()
+    minio = get_minio_client()
+    chroma = get_chroma_client()
+    embedder_func = get_embedder()
+    
+    start_delete(db_maker, minio, chroma, embedder_func)

@@ -3,10 +3,10 @@ import sys
 import asyncio
 sys.stdout.reconfigure(encoding='utf-8')
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from src.core.app_clients import AppClients
+from src.core.clients.llm import get_cloud_ai_client
 async def test_gemini():
     print("Инициализация клиента Cloud AI...")
-    client = AppClients.get_cloud_ai_client()
+    client = get_cloud_ai_client()
     model_name = os.getenv("PIPELINE_MODEL_NAME", "vertex_ai/gemini-3.5-flash")
     reasoning_effort = os.getenv("PIPELINE_REASONING_EFFORT", "medium")
     print(f"Тестируем модель: {model_name} (уровень: {reasoning_effort})")
