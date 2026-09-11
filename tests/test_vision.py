@@ -1,4 +1,4 @@
-from src.services.cloud_text_extractor import extract_text_cloud
+from src.elt.utils.cloud_text_extractor import extract_text_cloud
 import sys
 try:
     print("Testing Google Vision OCR...")

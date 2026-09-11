@@ -1,7 +1,7 @@
 from functools import lru_cache
 from minio import Minio
 from src.core.config import get_settings
-from src.utils.console_logger import log_info
+from src.core.utils.console_logger import log_info
 
 @lru_cache
 def get_minio_client() -> Minio:

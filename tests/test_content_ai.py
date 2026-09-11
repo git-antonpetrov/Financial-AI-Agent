@@ -1,6 +1,6 @@
 import os
 import json
-from src.services.content_ai_recognizer import ContentCaptureRecognizer
+from src.elt.utils.content_ai_recognizer import ContentCaptureRecognizer
 def main():
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     pdf_path = os.path.join(project_root, "dummy.pdf")

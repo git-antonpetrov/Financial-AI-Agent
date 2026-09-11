@@ -1,6 +1,6 @@
 from functools import lru_cache
-from src.services.content_ai_recognizer import ContentCaptureRecognizer
-from src.utils.console_logger import log_info
+from src.elt.utils.content_ai_recognizer import ContentCaptureRecognizer
+from src.core.utils.console_logger import log_info
 
 @lru_cache
 def get_content_ai_client() -> ContentCaptureRecognizer:

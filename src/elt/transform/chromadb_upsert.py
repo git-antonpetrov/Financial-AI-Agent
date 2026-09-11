@@ -10,12 +10,12 @@ from dotenv import load_dotenv
 from typing import Callable, Any
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
-from src.core.models import TransformState
+from src.elt.db.models import TransformState
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 # pyrefly: ignore [missing-import]
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from src.utils.console_logger import log_info, log_error, log_warning
+from src.core.utils.console_logger import log_info, log_error, log_warning
 from minio import Minio
 
 class ChromaDBUpsert:

@@ -4,7 +4,7 @@ import json
 import asyncio
 import datetime
 from filelock import Timeout
-from src.utils.console_logger import log_info, log_warning, log_error
+from src.core.utils.console_logger import log_info, log_warning, log_error
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 
@@ -47,7 +47,7 @@ async def main():
     today_date = datetime.date.today()
     
     try:
-        from src.core.models import OrchestratorRun
+        from src.elt.db.models import OrchestratorRun
         from sqlalchemy import select
         
         async with db_session_maker() as session:

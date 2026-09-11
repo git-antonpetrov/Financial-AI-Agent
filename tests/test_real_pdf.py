@@ -1,7 +1,7 @@
 import os
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-from src.services.content_ai_recognizer import ContentCaptureRecognizer
+from src.elt.utils.content_ai_recognizer import ContentCaptureRecognizer
 pdf_path = r"test_3_pages.pdf"
 if os.path.exists(pdf_path):
     print("Testing Content AI API with:", pdf_path)

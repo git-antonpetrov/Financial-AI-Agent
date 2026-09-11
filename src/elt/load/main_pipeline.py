@@ -21,13 +21,13 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
 
 from typing import Callable
 from sqlalchemy.ext.asyncio import AsyncSession
-from src.core.models import LoadState
+from src.elt.db.models import LoadState
 from minio import Minio
-from src.services.content_ai_recognizer import ContentCaptureRecognizer
+from src.elt.utils.content_ai_recognizer import ContentCaptureRecognizer
 # Импорт CloudAIClient пока условно, можно использовать Any
 from typing import Any
-from src.utils.document_to_pdf import convert_to_pdf
-from src.utils.console_logger import log_info, log_error, log_warning
+from src.elt.utils.document_to_pdf import convert_to_pdf
+from src.core.utils.console_logger import log_info, log_error, log_warning
 
 class DocumentAnalysisResult(BaseModel):
     is_relevant: bool = Field(description="Релевантен ли этот документ для финансового агента?")

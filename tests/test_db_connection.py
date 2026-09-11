@@ -7,7 +7,7 @@ sys.stdout.reconfigure(encoding='utf-8')
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from src.core.clients.db import get_async_session_maker, init_db
-from src.core.models import OrchestratorRun
+from src.elt.db.models import OrchestratorRun
 from sqlalchemy import select
 
 async def main():

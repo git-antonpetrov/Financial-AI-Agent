@@ -1,4 +1,4 @@
-from src.services.content_ai_recognizer import ContentCaptureRecognizer
+from src.elt.utils.content_ai_recognizer import ContentCaptureRecognizer
 import os
 pdf_path = r"C:\Users\anton\Downloads\test_large.pdf"
 if not os.path.exists(pdf_path):
