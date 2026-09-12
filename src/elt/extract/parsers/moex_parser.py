@@ -133,66 +133,112 @@ class MoexParser:
                     absolute_url = urljoin(page_url, pdf_path)
                 
                 # Проверка наличия документа в БД
+                state = None
                 async with self.db_session_maker() as db:
                     result = await db.execute(select(ExtractState).where(ExtractState.source_url == absolute_url))
-                    if result.scalar_one_or_none():
+                    state = result.scalar_one_or_none()
+                    
+                if state:
+                    if state.status == "downloaded":
                         log_info("MOEX Парсер", f"Документ уже загружен ранее (пропуск): {absolute_url}")
                         return False
+                    if state.status == "error" and state.error_count >= 3:
+                        log_warning("MOEX Парсер", f"Превышен лимит попыток для документа (пропуск): {absolute_url}")
+                        return False
 
-                log_info("MOEX Парсер", f"Скачивание нового документа: {absolute_url}")
+                log_info("MOEX Парсер", f"Скачивание документа: {absolute_url}")
                 download_start_time = datetime.now().time()
                 
-                async with session.get(absolute_url, headers=self.headers, ssl=False, timeout=30) as doc_resp:
-                    doc_resp.raise_for_status()
-                    content = await doc_resp.read()
-                    content_disp = doc_resp.headers.get("Content-Disposition", "")
+                try:
+                    async with session.get(absolute_url, headers=self.headers, ssl=False, timeout=30) as doc_resp:
+                        doc_resp.raise_for_status()
+                        content = await doc_resp.read()
+                        content_disp = doc_resp.headers.get("Content-Disposition", "")
+                        
+                    download_end_time = datetime.now().time()
+                        
+                    filename = ""
+                    if content_disp:
+                        match_utf8 = re.search(r"filename\*=UTF-8''([^;]+)", content_disp, re.IGNORECASE)
+                        if match_utf8:
+                            filename = unquote(match_utf8.group(1))
+                        else:
+                            match_reg = re.search(r'filename="?([^";]+)"?', content_disp, re.IGNORECASE)
+                            if match_reg:
+                                filename = match_reg.group(1)
+                                base_name = filename.rsplit('.', 1)[0]
+                                cleaned = base_name.replace("_", "").replace(" ", "").replace("-", "").strip()
+                                if not cleaned:
+                                    filename = ""
+                                    
+                    if not filename or filename == "connector" or "%" in filename or "*" in filename:
+                        url_name = pdf_path.split("/")[-1].split("?")[0]
+                        if url_name and url_name != "connector" and len(url_name) > 3:
+                            filename = unquote(url_name)
+                        else:
+                            filename = f"moex_document_{uuid.uuid4().hex[:8]}.pdf"
                     
-                download_end_time = datetime.now().time()
-                    
-                filename = ""
-                if content_disp:
-                    match_utf8 = re.search(r"filename\*=UTF-8''([^;]+)", content_disp, re.IGNORECASE)
-                    if match_utf8:
-                        filename = unquote(match_utf8.group(1))
-                    else:
-                        match_reg = re.search(r'filename="?([^";]+)"?', content_disp, re.IGNORECASE)
-                        if match_reg:
-                            filename = match_reg.group(1)
-                            base_name = filename.rsplit('.', 1)[0]
-                            cleaned = base_name.replace("_", "").replace(" ", "").replace("-", "").strip()
-                            if not cleaned:
-                                filename = ""
-                                
-                if not filename or filename == "connector" or "%" in filename or "*" in filename:
-                    url_name = pdf_path.split("/")[-1].split("?")[0]
-                    if url_name and url_name != "connector" and len(url_name) > 3:
-                        filename = unquote(url_name)
-                    else:
-                        filename = f"moex_document_{uuid.uuid4().hex[:8]}.pdf"
-                
-                if not filename.endswith(".pdf") and not filename.endswith(".doc") and not filename.endswith(".docx"):
-                    filename += ".pdf"
+                    if not filename.endswith(".pdf") and not filename.endswith(".doc") and not filename.endswith(".docx"):
+                        filename += ".pdf"
 
-                upload_success = await asyncio.to_thread(self.upload_to_minio, content, filename)
-                
-                if upload_success:
-                    # Сохранение в базу данных
+                    upload_success = await asyncio.to_thread(self.upload_to_minio, content, filename)
+                    
+                    if upload_success:
+                        # Сохранение в базу данных (успех)
+                        async with self.db_session_maker() as db:
+                            if state:
+                                # Документ ранее был с ошибкой, обновляем статус через select и update
+                                res = await db.execute(select(ExtractState).where(ExtractState.source_url == absolute_url))
+                                existing_state = res.scalar_one()
+                                existing_state.status = "downloaded"
+                                existing_state.file_name = filename
+                                existing_state.download_end_time = download_end_time
+                                existing_state.error_message = None
+                                await db.commit()
+                            else:
+                                new_state = ExtractState(
+                                    source="MOEX",
+                                    source_url=absolute_url,
+                                    file_name=filename,
+                                    pub_date=date.today(),
+                                    download_date=date.today(),
+                                    download_start_time=download_start_time,
+                                    download_end_time=download_end_time,
+                                    status="downloaded"
+                                )
+                                db.add(new_state)
+                                await db.commit()
+                        return True
+                    else:
+                        raise Exception("Ошибка загрузки файла в MinIO")
+
+                except Exception as doc_e:
+                    log_error("MOEX Парсер", f"Ошибка при загрузке документа {absolute_url}: {doc_e}")
                     async with self.db_session_maker() as db:
-                        new_state = ExtractState(
-                            source="MOEX",
-                            source_url=absolute_url,
-                            file_name=filename,
-                            pub_date=date.today(), # MOEX не предоставляет дату, ставим сегодня
-                            download_date=date.today(),
-                            download_start_time=download_start_time,
-                            download_end_time=download_end_time,
-                            status="downloaded"
-                        )
-                        db.add(new_state)
-                        await db.commit()
-                    return True
-                return False
-                
+                        if state:
+                            res = await db.execute(select(ExtractState).where(ExtractState.source_url == absolute_url))
+                            existing_state = res.scalar_one()
+                            existing_state.error_count += 1
+                            existing_state.status = "error"
+                            existing_state.error_message = str(doc_e)[:500]
+                            await db.commit()
+                        else:
+                            new_state = ExtractState(
+                                source="MOEX",
+                                source_url=absolute_url,
+                                file_name="unknown",
+                                pub_date=date.today(),
+                                download_date=date.today(),
+                                download_start_time=download_start_time,
+                                download_end_time=datetime.now().time(),
+                                status="error",
+                                error_count=1,
+                                error_message=str(doc_e)[:500]
+                            )
+                            db.add(new_state)
+                            await db.commit()
+                    return False
+
             except Exception as e:
                 log_error("MOEX Парсер", f"Не удалось обработать страницу {page_url}: {e}")
                 return False
