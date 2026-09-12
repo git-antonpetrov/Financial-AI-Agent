@@ -169,20 +169,38 @@ class MainPipeline:
         async with self.semaphore:
             processing_start_time = datetime.now()
             
-            # Создаем начальную запись в БД
+            state_id = None
             async with self.db_session_maker() as db:
-                new_state = LoadState(
-                    raw_file_name=file_name,
-                    processing_start_date=processing_start_time.date(),
-                    processing_start_time=processing_start_time.time(),
-                    md5_hash="",  # Initial empty hash
-                    status="processing"
-                )
-                db.add(new_state)
-                await db.commit()
-                # Получаем присвоенный UUID
-                await db.refresh(new_state)
-                state_id = new_state.id
+                result = await db.execute(select(LoadState).where(LoadState.raw_file_name == file_name))
+                existing_state = result.scalar_one_or_none()
+                
+                if existing_state:
+                    if existing_state.status in ["completed", "duplicate", "old_version", "skipped", "empty_text", "error", "ocr_error"]:
+                        log_info("Main Pipeline", f"Документ {file_name} уже обработан (статус: {existing_state.status}). Удаление из очереди.")
+                        try:
+                            self.minio_client.remove_object(self.raw_bucket, file_name)
+                        except Exception:
+                            pass
+                        return
+
+                    existing_state.status = "processing"
+                    existing_state.processing_start_date = processing_start_time.date()
+                    existing_state.processing_start_time = processing_start_time.time()
+                    await db.commit()
+                    state_id = existing_state.id
+                else:
+                    new_state = LoadState(
+                        raw_file_name=file_name,
+                        processing_start_date=processing_start_time.date(),
+                        processing_start_time=processing_start_time.time(),
+                        md5_hash="",  # Initial empty hash
+                        status="processing",
+                        error_count=0
+                    )
+                    db.add(new_state)
+                    await db.commit()
+                    await db.refresh(new_state)
+                    state_id = new_state.id
                 
             try:
                 # 1. Скачивание документа
@@ -192,7 +210,7 @@ class MainPipeline:
                 response.release_conn()
                 
                 file_hash = hashlib.md5(file_bytes).hexdigest()
-                await self._update_db_state(state_id, file_hash=file_hash)
+                await self._update_db_state(state_id, md5_hash=file_hash)
                 
                 # Проверка на наличие дубликатов по хэшу в БД
                 async with self.db_session_maker() as db:
@@ -221,7 +239,7 @@ class MainPipeline:
                         if not self._validate_pdf(pdf_bytes):
                             log_error("Main Pipeline", f"Файл {file_name} является битым PDF. Удаление.")
                             self.minio_client.remove_object(self.raw_bucket, file_name)
-                            await self._update_db_state(state_id, md5_hash=file_hash, status="skipped", error_message="Дубликат по хешу", processing_end_date=datetime.now().date(), processing_end_time=datetime.now().time())
+                            await self._update_db_state(state_id, md5_hash=file_hash, status="skipped", error_message="Битый PDF", processing_end_date=datetime.now().date(), processing_end_time=datetime.now().time())
                             return
         
                         # 4. Распознавание текста с помощью Google Cloud Vision
@@ -241,12 +259,12 @@ class MainPipeline:
                         
                         # Запускаем извлечение текста в отдельном потоке (блокирующий I/O)
                         try:
-                            markdown_content = await asyncio.to_thread(extract_text_cloud, temp_pdf_path, page_count)
+                            markdown_content = await asyncio.to_thread(extract_text_cloud, temp_pdf_path, None)
                         except Exception as e:
                             log_error("Main Pipeline", f"К сожалению, Google Cloud Vision не справился с {file_name}: {e}")
                             if os.path.exists(temp_pdf_path):
                                 os.remove(temp_pdf_path)
-                            self.minio_client.remove_object(self.raw_bucket, file_name)
+                            # НЕ удаляем файл из raw_bucket при ошибке OCR, даем возможность переповтора
                             await self._update_db_state(state_id, status="ocr_error", error_message=str(e)[:500], processing_end_date=datetime.now().date(), processing_end_time=datetime.now().time())
                             return
     
@@ -435,6 +453,7 @@ class MainPipeline:
 
             except Exception as e:
                 log_error("Main Pipeline", f"Ошибка при обработке {file_name}: {str(e)}")
+                # НЕ удаляем файл при неожиданной ошибке (скорее всего LLM или сеть)
                 await self._update_db_state(state_id, status="error", error_message=str(e)[:500], processing_end_date=datetime.now().date(), processing_end_time=datetime.now().time())
 
     async def run(self):

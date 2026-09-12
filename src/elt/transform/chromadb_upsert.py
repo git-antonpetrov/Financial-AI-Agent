@@ -75,17 +75,45 @@ class ChromaDBUpsert:
         async with self.semaphore:
             log_info("ChromaDB Upsert", f"Начало обработки {object_name}")
             
+            state_id = None
             async with self.db_session_maker() as db:
-                new_state = TransformState(
-                    file_name=object_name,
-                    transform_type="upsert",
-                    started_at=datetime.now(),
-                    status="processing"
-                )
-                db.add(new_state)
-                await db.commit()
-                await db.refresh(new_state)
-                state_id = new_state.id
+                result = await db.execute(select(TransformState).where(TransformState.file_name == object_name))
+                existing_state = result.scalar_one_or_none()
+                
+                if existing_state:
+                    if existing_state.status == "completed":
+                        log_info("ChromaDB Upsert", f"Файл {object_name} уже успешно обработан. Удаление из очереди.")
+                        try:
+                            self.minio_client.remove_object(self.rag_bucket, object_name)
+                        except Exception:
+                            pass
+                        return
+                        
+                    if existing_state.error_count >= 3:
+                        log_warning("ChromaDB Upsert", f"Превышен лимит попыток для {object_name}. Удаление из очереди.")
+                        try:
+                            self.minio_client.remove_object(self.rag_bucket, object_name)
+                        except Exception:
+                            pass
+                        return
+
+                    existing_state.status = "processing"
+                    existing_state.error_count += 1
+                    existing_state.started_at = datetime.now()
+                    await db.commit()
+                    state_id = existing_state.id
+                else:
+                    new_state = TransformState(
+                        file_name=object_name,
+                        transform_type="upsert",
+                        started_at=datetime.now(),
+                        status="processing",
+                        error_count=0
+                    )
+                    db.add(new_state)
+                    await db.commit()
+                    await db.refresh(new_state)
+                    state_id = new_state.id
                 
             try:
                 # 1. Скачивание файла и метаданных
@@ -152,10 +180,12 @@ class ChromaDBUpsert:
                 self.minio_client.remove_object(self.rag_bucket, object_name)
                 
                 log_info("ChromaDB Upsert", f"Файл {object_name} ({len(chunks)} чанков) успешно загружен в ChromaDB.")
-                await self._update_db_state(state_id, status="completed", chunks_count=len(chunks), completed_at=datetime.now())
+                # Исправлено: в TransformState нет chunks_count, убрали его из kwargs
+                await self._update_db_state(state_id, status="completed", completed_at=datetime.now())
                 
             except Exception as e:
                 log_error("ChromaDB Upsert", f"Ошибка при обработке {object_name}: {str(e)}")
+                # НЕ удаляем файл при ошибке
                 await self._update_db_state(state_id, status="error", error_message=str(e)[:500], completed_at=datetime.now())
 
     async def run(self):

@@ -105,10 +105,22 @@ class CbrRssParser:
 
         async with sem:
             # Проверка наличия документа в БД
+            state_id = None
             async with self.db_session_maker() as db:
                 result = await db.execute(select(ExtractState).where(ExtractState.source_url == guid))
-                if result.scalar_one_or_none():
-                    return False
+                existing_state = result.scalar_one_or_none()
+                
+                if existing_state:
+                    if existing_state.status == "downloaded":
+                        return False
+                    
+                    if existing_state.error_count >= 3:
+                        log_warning("CBR Парсер", f"Превышен лимит попыток загрузки для {url}. Пропуск.")
+                        return False
+                        
+                    existing_state.error_count += 1
+                    await db.commit()
+                    state_id = existing_state.id
 
             log_info("CBR Парсер", f"Скачивание документа: {url}")
             download_start_time = datetime.now().time()
@@ -151,22 +163,70 @@ class CbrRssParser:
                 if upload_success:
                     # Сохранение в базу данных
                     async with self.db_session_maker() as db:
-                        new_state = ExtractState(
-                            source="CBR",
-                            source_url=guid,
-                            file_name=filename,
-                            pub_date=pub_date_obj,
-                            download_date=date.today(),
-                            download_start_time=download_start_time,
-                            download_end_time=download_end_time,
-                            status="downloaded"
-                        )
-                        db.add(new_state)
+                        if state_id:
+                            # Обновляем существующий
+                            result = await db.execute(select(ExtractState).where(ExtractState.id == state_id))
+                            state = result.scalar_one()
+                            state.file_name = filename
+                            state.download_date = date.today()
+                            state.download_start_time = download_start_time
+                            state.download_end_time = download_end_time
+                            state.status = "downloaded"
+                        else:
+                            # Создаем новый
+                            new_state = ExtractState(
+                                source="CBR",
+                                source_url=guid,
+                                file_name=filename,
+                                pub_date=pub_date_obj,
+                                download_date=date.today(),
+                                download_start_time=download_start_time,
+                                download_end_time=download_end_time,
+                                status="downloaded",
+                                error_count=0
+                            )
+                            db.add(new_state)
                         await db.commit()
                     return True
+                else:
+                    # Если upload_to_minio вернул False, отмечаем ошибку (если еще нет стейта, создадим)
+                    async with self.db_session_maker() as db:
+                        if not state_id:
+                            new_state = ExtractState(
+                                source="CBR",
+                                source_url=guid,
+                                file_name=filename,
+                                pub_date=pub_date_obj,
+                                download_date=date.today(),
+                                status="error",
+                                error_count=1
+                            )
+                            db.add(new_state)
+                        else:
+                            result = await db.execute(select(ExtractState).where(ExtractState.id == state_id))
+                            state = result.scalar_one()
+                            state.status = "error"
+                        await db.commit()
                 return False
             except Exception as e:
                 log_error("CBR Парсер", f"Не удалось обработать документ {url}: {e}")
+                async with self.db_session_maker() as db:
+                    if not state_id:
+                        new_state = ExtractState(
+                            source="CBR",
+                            source_url=guid,
+                            file_name="",
+                            pub_date=pub_date_obj,
+                            download_date=date.today(),
+                            status="error",
+                            error_count=1
+                        )
+                        db.add(new_state)
+                    else:
+                        result = await db.execute(select(ExtractState).where(ExtractState.id == state_id))
+                        state = result.scalar_one()
+                        state.status = "error"
+                    await db.commit()
                 return False
 
     async def fetch_and_download(self) -> bool:
