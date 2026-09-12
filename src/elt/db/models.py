@@ -20,7 +20,6 @@ class ExtractState(Base):
     download_end_time: Mapped[Optional[time]] = mapped_column(nullable=True)
     status: Mapped[str] = mapped_column()
     error_message: Mapped[Optional[str]] = mapped_column(nullable=True)
-    error_count: Mapped[int] = mapped_column(default=0)
 
 class LoadState(Base):
     __tablename__ = "load_state"
@@ -28,7 +27,7 @@ class LoadState(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     raw_file_name: Mapped[str] = mapped_column(unique=True)  # Сделаем уникальным для удобства поиска
     md5_hash: Mapped[str] = mapped_column()
-    system_name: Mapped[Optional[str]] = mapped_column(nullable=True)
+    system_name: Mapped[Optional[str]] = mapped_column(nullable=True, index=True)
     is_relevant: Mapped[Optional[bool]] = mapped_column(nullable=True)
     official_name: Mapped[Optional[str]] = mapped_column(nullable=True)
     sign_date: Mapped[Optional[date]] = mapped_column(nullable=True)
@@ -40,7 +39,6 @@ class LoadState(Base):
     processing_end_time: Mapped[Optional[time]] = mapped_column(nullable=True)
     status: Mapped[str] = mapped_column()
     error_message: Mapped[Optional[str]] = mapped_column(nullable=True)
-    error_count: Mapped[int] = mapped_column(default=0)
 
 class TransformState(Base):
     __tablename__ = "transform_state"
@@ -50,7 +48,6 @@ class TransformState(Base):
     transform_type: Mapped[str] = mapped_column() # "upsert" или "delete"
     status: Mapped[str] = mapped_column()
     error_message: Mapped[Optional[str]] = mapped_column(nullable=True)
-    error_count: Mapped[int] = mapped_column(default=0)
     started_at: Mapped[datetime] = mapped_column()
     completed_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
 

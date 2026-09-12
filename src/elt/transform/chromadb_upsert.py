@@ -89,16 +89,7 @@ class ChromaDBUpsert:
                             pass
                         return
                         
-                    if existing_state.error_count >= 3:
-                        log_warning("ChromaDB Upsert", f"Превышен лимит попыток для {object_name}. Удаление из очереди.")
-                        try:
-                            self.minio_client.remove_object(self.rag_bucket, object_name)
-                        except Exception:
-                            pass
-                        return
-
                     existing_state.status = "processing"
-                    existing_state.error_count += 1
                     existing_state.started_at = datetime.now()
                     await db.commit()
                     state_id = existing_state.id
@@ -107,8 +98,7 @@ class ChromaDBUpsert:
                         file_name=object_name,
                         transform_type="upsert",
                         started_at=datetime.now(),
-                        status="processing",
-                        error_count=0
+                        status="processing"
                     )
                     db.add(new_state)
                     await db.commit()

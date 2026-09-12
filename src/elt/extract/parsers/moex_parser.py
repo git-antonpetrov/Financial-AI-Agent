@@ -142,9 +142,6 @@ class MoexParser:
                     if state.status == "downloaded":
                         log_info("MOEX Парсер", f"Документ уже загружен ранее (пропуск): {absolute_url}")
                         return False
-                    if state.status == "error" and state.error_count >= 3:
-                        log_warning("MOEX Парсер", f"Превышен лимит попыток для документа (пропуск): {absolute_url}")
-                        return False
 
                 log_info("MOEX Парсер", f"Скачивание документа: {absolute_url}")
                 download_start_time = datetime.now().time()
@@ -218,7 +215,6 @@ class MoexParser:
                         if state:
                             res = await db.execute(select(ExtractState).where(ExtractState.source_url == absolute_url))
                             existing_state = res.scalar_one()
-                            existing_state.error_count += 1
                             existing_state.status = "error"
                             existing_state.error_message = str(doc_e)[:500]
                             await db.commit()
@@ -232,7 +228,6 @@ class MoexParser:
                                 download_start_time=download_start_time,
                                 download_end_time=datetime.now().time(),
                                 status="error",
-                                error_count=1,
                                 error_message=str(doc_e)[:500]
                             )
                             db.add(new_state)

@@ -114,11 +114,6 @@ class CbrRssParser:
                     if existing_state.status == "downloaded":
                         return False
                     
-                    if existing_state.error_count >= 3:
-                        log_warning("CBR Парсер", f"Превышен лимит попыток загрузки для {url}. Пропуск.")
-                        return False
-                        
-                    existing_state.error_count += 1
                     await db.commit()
                     state_id = existing_state.id
 
@@ -182,8 +177,7 @@ class CbrRssParser:
                                 download_date=date.today(),
                                 download_start_time=download_start_time,
                                 download_end_time=download_end_time,
-                                status="downloaded",
-                                error_count=0
+                                status="downloaded"
                             )
                             db.add(new_state)
                         await db.commit()
@@ -198,8 +192,7 @@ class CbrRssParser:
                                 file_name=filename,
                                 pub_date=pub_date_obj,
                                 download_date=date.today(),
-                                status="error",
-                                error_count=1
+                                status="error"
                             )
                             db.add(new_state)
                         else:
@@ -218,8 +211,7 @@ class CbrRssParser:
                             file_name="",
                             pub_date=pub_date_obj,
                             download_date=date.today(),
-                            status="error",
-                            error_count=1
+                            status="error"
                         )
                         db.add(new_state)
                     else:

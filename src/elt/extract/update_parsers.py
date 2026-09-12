@@ -131,7 +131,8 @@ async def main():
             await del_pipeline.run()
             log_info("ChromaDB Delete", "ChromaDBDelete успешно завершил работу.")
         except Exception as e:
-            log_error("ChromaDB Delete", f"Ошибка при выполнении ChromaDBDelete: {e}")
+            import traceback
+            log_error("ChromaDB Delete", f"Ошибка при выполнении ChromaDBDelete:\n{traceback.format_exc()}")
             return # Если произошел сбой на этапе Delete, Upsert запускать нельзя во избежание дублей
             
         # 3. Этап Transform: ChromaDB Upsert
