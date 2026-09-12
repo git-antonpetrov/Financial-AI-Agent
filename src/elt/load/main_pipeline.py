@@ -11,6 +11,15 @@ import tempfile
 from datetime import datetime, date
 from pydantic import BaseModel, Field
 import fitz
+from minio.commonconfig import CopySource
+
+def clean_json_response(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n", "", text)
+        text = re.sub(r"\n```$", "", text)
+    return text.strip()
+
 # pyrefly: ignore [missing-import]
 from minio.error import S3Error
 from sqlalchemy import select, and_
@@ -79,13 +88,14 @@ class MainPipeline:
     ):
         self.raw_bucket = "raw-documents"
         self.rag_bucket = "rag-documents"
+        self.error_bucket = "error-documents"
         
         self.minio_client = minio_client
         self.cloud_ai = cloud_ai
         self.db_session_maker = db_session_maker
         
         # Ограничение одновременных задач для экономии ресурсов
-        self.semaphore = asyncio.Semaphore(1)
+        self.semaphore = asyncio.Semaphore(3)
         
         self.llm_model = os.getenv("PIPELINE_MODEL_NAME", "vertex_ai/gemini-3.5-flash")
         self.reasoning_effort = os.getenv("PIPELINE_REASONING_EFFORT", "medium")
@@ -98,9 +108,22 @@ class MainPipeline:
 
     def _ensure_buckets(self):
         """Проверяет существование необходимых бакетов и создает их при отсутствии."""
-        for bucket in [self.raw_bucket, self.rag_bucket]:
+        for bucket in [self.raw_bucket, self.rag_bucket, self.error_bucket]:
             if not self.minio_client.bucket_exists(bucket):
                 self.minio_client.make_bucket(bucket)
+
+    def _move_to_error_bucket(self, file_name: str):
+        """Перемещает проблемный файл в бакет ошибок и удаляет из очереди."""
+        try:
+            self.minio_client.copy_object(
+                self.error_bucket,
+                file_name,
+                CopySource(self.raw_bucket, file_name)
+            )
+            self.minio_client.remove_object(self.raw_bucket, file_name)
+            log_info("Main Pipeline", f"Файл {file_name} перемещен в {self.error_bucket}")
+        except Exception as e:
+            log_error("Main Pipeline", f"Ошибка при перемещении {file_name} в {self.error_bucket}: {e}")
 
     async def _update_db_state(self, state_id: str, **kwargs):
         """Обновляет запись о состоянии загрузки в БД."""
@@ -194,8 +217,7 @@ class MainPipeline:
                         processing_start_date=processing_start_time.date(),
                         processing_start_time=processing_start_time.time(),
                         md5_hash="",  # Initial empty hash
-                        status="processing",
-                        error_count=0
+                        status="processing"
                     )
                     db.add(new_state)
                     await db.commit()
@@ -264,7 +286,7 @@ class MainPipeline:
                             log_error("Main Pipeline", f"К сожалению, Google Cloud Vision не справился с {file_name}: {e}")
                             if os.path.exists(temp_pdf_path):
                                 os.remove(temp_pdf_path)
-                            # НЕ удаляем файл из raw_bucket при ошибке OCR, даем возможность переповтора
+                            self._move_to_error_bucket(file_name)
                             await self._update_db_state(state_id, status="ocr_error", error_message=str(e)[:500], processing_end_date=datetime.now().date(), processing_end_time=datetime.now().time())
                             return
     
@@ -273,14 +295,14 @@ class MainPipeline:
                         
                         if not markdown_content or not markdown_content.strip():
                             log_warning("Main Pipeline", f"Увы, облачный сервис вернул пустой текст для {file_name}")
-                            self.minio_client.remove_object(self.raw_bucket, file_name)
+                            self._move_to_error_bucket(file_name)
                             await self._update_db_state(state_id, status="empty_text", processing_end_date=datetime.now().date(), processing_end_time=datetime.now().time())
                             return
 
                 # 5. Умный Анализ (Gemini JSON)
                 log_info("Main Pipeline", f"Анализ документа {file_name} в LLM...")
                 sys_prompt = await self._read_system_prompt()
-                text_snippet = markdown_content[:5000]
+                text_snippet = markdown_content[:20000]
                 
                 user_prompt1 = (
                     "Проанализируй шапку документа. Определи: "
@@ -305,7 +327,7 @@ class MainPipeline:
                 )
                 
                 analysis_json = response1.choices[0].message.content
-                analysis_result = json.loads(analysis_json)
+                analysis_result = json.loads(clean_json_response(analysis_json))
                 
                 messages.append(response1.choices[0].message.model_dump())
                 
@@ -406,7 +428,7 @@ class MainPipeline:
                     )
                     
                     repeal_json = response2.choices[0].message.content
-                    repeal_result = json.loads(repeal_json)
+                    repeal_result = json.loads(clean_json_response(repeal_json))
                     repealed_docs = list(set(repeal_result.get("repealed_docs_system_names", [])))
                     
                 if is_new_version and short_number:
@@ -453,7 +475,7 @@ class MainPipeline:
 
             except Exception as e:
                 log_error("Main Pipeline", f"Ошибка при обработке {file_name}: {str(e)}")
-                # НЕ удаляем файл при неожиданной ошибке (скорее всего LLM или сеть)
+                self._move_to_error_bucket(file_name)
                 await self._update_db_state(state_id, status="error", error_message=str(e)[:500], processing_end_date=datetime.now().date(), processing_end_time=datetime.now().time())
 
     async def run(self):

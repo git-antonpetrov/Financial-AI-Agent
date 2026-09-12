@@ -14,8 +14,9 @@ COPY requirements.txt .
 # Устанавливаем Python-зависимости
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Копируем исходный код
+# Копируем исходный код и промпты
 COPY src/ ./src/
+COPY prompts/ ./prompts/
 
 # Задаем переменные окружения
 ENV PYTHONPATH=/app

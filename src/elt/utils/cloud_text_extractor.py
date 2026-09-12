@@ -31,6 +31,7 @@ def extract_text_cloud(pdf_path: str, pages_count: int = None) -> str:
         doc.close()
     except Exception as e:
         log_warning("Text Extractor", f"Ошибка PyMuPDF: {e}")
+        total_pages = pages_count or 1
 
     # Если текста достаточно (не скан), возвращаем его
     if len(text_content.strip()) > total_pages * 50:  # в среднем более 50 символов на страницу
@@ -40,31 +41,36 @@ def extract_text_cloud(pdf_path: str, pages_count: int = None) -> str:
     log_info("Text Extractor", "Текст не найден (вероятно, скан). Запуск OCR (Google Cloud Vision)...")
     
     # Fallback to OCR
-    try:
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-        poppler_path = os.path.join(project_root, "poppler", "Library", "bin")
-        if not os.path.exists(poppler_path):
-            poppler_path = None
-            
-        images = convert_from_path(pdf_path, first_page=1, last_page=pages_count, poppler_path=poppler_path, timeout=30)
-    except Exception as e:
-        raise RuntimeError(f"Не удалось конвертировать PDF в изображения: {e}")
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    poppler_path = os.path.join(project_root, "poppler", "Library", "bin")
+    if not os.path.exists(poppler_path):
+        poppler_path = None
 
     client = vision.ImageAnnotatorClient()
     full_text = []
 
-    for image in images:
-        img_byte_arr = io.BytesIO()
-        image.save(img_byte_arr, format='JPEG')
-        content = img_byte_arr.getvalue()
+    batch_size = 5
+    for start_page in range(1, total_pages + 1, batch_size):
+        end_page = min(start_page + batch_size - 1, total_pages)
+        log_info("Text Extractor", f"Распознавание страниц {start_page}-{end_page} из {total_pages} (Батч)...")
         
-        vision_image = vision.Image(content=content)
-        response = client.document_text_detection(image=vision_image, timeout=30.0)
-        
-        if response.error.message:
-            raise Exception(f"Ошибка Vision API: {response.error.message}")
+        try:
+            images = convert_from_path(pdf_path, first_page=start_page, last_page=end_page, poppler_path=poppler_path, timeout=60)
+        except Exception as e:
+            raise RuntimeError(f"Не удалось конвертировать PDF в изображения (страницы {start_page}-{end_page}): {e}")
+
+        for image in images:
+            img_byte_arr = io.BytesIO()
+            image.save(img_byte_arr, format='JPEG')
+            content = img_byte_arr.getvalue()
             
-        if response.full_text_annotation:
-            full_text.append(response.full_text_annotation.text)
+            vision_image = vision.Image(content=content)
+            response = client.document_text_detection(image=vision_image, timeout=30.0)
+            
+            if response.error.message:
+                raise Exception(f"Ошибка Vision API: {response.error.message}")
+                
+            if response.full_text_annotation:
+                full_text.append(response.full_text_annotation.text)
 
     return "\n\n".join(full_text)
