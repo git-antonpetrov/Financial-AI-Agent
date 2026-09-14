@@ -198,6 +198,12 @@ class MainPipeline:
                 existing_state = result.scalar_one_or_none()
                 
                 if existing_state:
+                    # Если файл уже находится в обработке другим процессом - просто пропускаем,
+                    # чтобы не допустить состояния гонки (race condition) и ошибки NoSuchKey.
+                    if existing_state.status == "processing":
+                        log_info("Main Pipeline", f"Документ {file_name} уже обрабатывается другим процессом. Пропуск.")
+                        return
+
                     if existing_state.status in ["completed", "duplicate", "old_version", "skipped", "empty_text", "error", "ocr_error"]:
                         log_info("Main Pipeline", f"Документ {file_name} уже обработан (статус: {existing_state.status}). Удаление из очереди.")
                         try:
@@ -318,18 +324,27 @@ class MainPipeline:
                     {"role": "user", "content": f"Текст:\n{text_snippet}\n\nЗадание: {user_prompt1}"}
                 ]
                 
-                response1 = await self.cloud_ai.acompletion(
+                # Используем потоковую передачу (stream=True), чтобы поддерживать HTTP-соединение активным
+                # и предотвратить отключение со стороны Cloudflare (ошибка 524) по таймауту в 100 секунд.
+                response1_stream = await self.cloud_ai.acompletion(
                     model=self.llm_model,
                     messages=messages,
                     response_format=DocumentAnalysisResult,
                     reasoning_effort=self.reasoning_effort,
-                    temperature=0.0
+                    temperature=0.0,
+                    stream=True
                 )
                 
-                analysis_json = response1.choices[0].message.content
+                # Аккуратно собираем все части JSON-ответа, чтобы ничего не потерять
+                analysis_json = ""
+                async for chunk in response1_stream:
+                    if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                        analysis_json += chunk.choices[0].delta.content
+                
                 analysis_result = json.loads(clean_json_response(analysis_json))
                 
-                messages.append(response1.choices[0].message.model_dump())
+                # Имитируем формат сообщения для добавления в историю сообщений
+                messages.append({"role": "assistant", "content": analysis_json})
                 
                 is_relevant = analysis_result.get("is_relevant", False)
                 system_name = analysis_result.get("system_name", "unknown_doc")
@@ -419,15 +434,21 @@ class MainPipeline:
                     )
                     messages.append({"role": "user", "content": user_prompt2})
                     
-                    response2 = await self.cloud_ai.acompletion(
+                    # Применяем тот же подход со стримингом для второго запроса к LLM.
+                    response2_stream = await self.cloud_ai.acompletion(
                         model=self.llm_model,
                         messages=messages,
                         response_format=RepealedDocumentsResult,
                         reasoning_effort=self.reasoning_effort,
-                        temperature=0.0
+                        temperature=0.0,
+                        stream=True
                     )
                     
-                    repeal_json = response2.choices[0].message.content
+                    repeal_json = ""
+                    async for chunk in response2_stream:
+                        if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                            repeal_json += chunk.choices[0].delta.content
+                            
                     repeal_result = json.loads(clean_json_response(repeal_json))
                     repealed_docs = list(set(repeal_result.get("repealed_docs_system_names", [])))
                     
@@ -442,8 +463,12 @@ class MainPipeline:
                 if is_relevant:
                     log_info("Main Pipeline", f"Документ {file_name} признан релевантным. Сохранение в upsert...")
                     md_bytes = markdown_content.encode("utf-8")
+                    # Обрезаем официальное название до 300 символов перед кодированием в base64,
+                    # чтобы не превышать лимит S3 на размер заголовков метаданных (MetadataTooLarge).
+                    safe_official_name = official_name if len(official_name) <= 300 else official_name[:297] + "..."
+                    
                     metadata = {
-                        "official-name": base64.b64encode(official_name.encode('utf-8')).decode('ascii'),
+                        "official-name": base64.b64encode(safe_official_name.encode('utf-8')).decode('ascii'),
                         "sign-date": sign_date,
                         "short-number": base64.b64encode(short_number.encode('utf-8')).decode('ascii') if short_number else "unknown"
                     }
