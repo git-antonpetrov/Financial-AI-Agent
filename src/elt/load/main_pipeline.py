@@ -94,8 +94,8 @@ class MainPipeline:
         self.cloud_ai = cloud_ai
         self.db_session_maker = db_session_maker
         
-        # Ограничение одновременных задач для экономии ресурсов
-        self.semaphore = asyncio.Semaphore(3)
+        # Ограничение одновременных задач для экономии ресурсов (снижено до 1 во избежание RateLimitError)
+        self.semaphore = asyncio.Semaphore(1)
         
         self.llm_model = os.getenv("PIPELINE_MODEL_NAME", "vertex_ai/gemini-3.5-flash")
         self.reasoning_effort = os.getenv("PIPELINE_REASONING_EFFORT", "medium")
