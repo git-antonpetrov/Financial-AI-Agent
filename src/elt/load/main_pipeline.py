@@ -96,6 +96,7 @@ class MainPipeline:
         
         # Ограничение одновременных задач для экономии ресурсов (снижено до 1 во избежание RateLimitError)
         self.semaphore = asyncio.Semaphore(1)
+        self.processed_count = 0
         
         self.llm_model = os.getenv("PIPELINE_MODEL_NAME", "vertex_ai/gemini-3.5-flash")
         self.reasoning_effort = os.getenv("PIPELINE_REASONING_EFFORT", "medium")
@@ -190,6 +191,11 @@ class MainPipeline:
         5. Переносит результаты в MinIO и обновляет БД.
         """
         async with self.semaphore:
+            self.processed_count += 1
+            if self.processed_count % 5 == 0:
+                log_info("Main Pipeline", "Пауза 10 секунд для сброса лимитов Google (TPM)...")
+                await asyncio.sleep(10)
+                
             processing_start_time = datetime.now()
             
             state_id = None
