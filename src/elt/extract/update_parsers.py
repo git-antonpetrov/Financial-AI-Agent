@@ -3,7 +3,7 @@ import sys
 import json
 import asyncio
 import datetime
-from filelock import Timeout
+from filelock import FileLock, Timeout
 from src.core.utils.console_logger import log_info, log_warning, log_error
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
@@ -30,7 +30,7 @@ try:
 except ImportError:
     has_main_pipeline = False
 
-async def main():
+async def _run_main_logic():
     """
     Основная логика запуска всех этапов обработки данных (ELT).
     Сначала параллельно запускает парсеры. При наличии новых файлов запускает
@@ -150,6 +150,22 @@ async def main():
             log_error("ChromaDB Upsert", f"Ошибка при выполнении ChromaDBUpsert: {e}")
     else:
         log_info("Оркестратор Парсеров", "Нет новых файлов ни в одном из источников.")
+
+async def main():
+    """
+    Обертка для запуска основной логики с использованием файловой блокировки.
+    Предотвращает одновременный запуск нескольких пайплайнов.
+    """
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    lock_file = os.path.join(base_dir, "orchestrator.lock")
+    lock = FileLock(lock_file, timeout=0)
+    
+    try:
+        with lock:
+            await _run_main_logic()
+    except Timeout:
+        log_warning("Оркестратор Парсеров", "Пайплайн уже запущен в другом процессе. Пропуск.")
+        return
 
 async def start_service():
     """

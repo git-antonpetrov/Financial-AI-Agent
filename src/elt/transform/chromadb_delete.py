@@ -11,7 +11,9 @@ from src.elt.db.models import TransformState
 from src.core.utils.console_logger import log_info, log_error, log_warning
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
 from minio import Minio
+from minio.error import S3Error
 
 class ChromaDBDelete:
     """
@@ -88,13 +90,26 @@ class ChromaDBDelete:
                         status="processing"
                     )
                     db.add(new_state)
-                    await db.commit()
+                    try:
+                        await db.commit()
+                    except IntegrityError:
+                        await db.rollback()
+                        log_warning("ChromaDB Delete", f"Файл {object_name} уже обрабатывается другим процессом. Пропуск.")
+                        return
                     await db.refresh(new_state)
                     state_id = new_state.id
                 
             try:
                 # 1. Читается JSON со списком отмененных номеров
-                response = self.minio_client.get_object(self.rag_bucket, object_name)
+                try:
+                    response = self.minio_client.get_object(self.rag_bucket, object_name)
+                except S3Error as err:
+                    if err.code == "NoSuchKey":
+                        log_warning("ChromaDB Delete", f"Файл {object_name} не найден в MinIO (вероятно, удален). Пропуск.")
+                        await self._update_db_state(state_id, status="completed", completed_at=datetime.now())
+                        return
+                    raise
+
                 content = response.read().decode("utf-8")
                 response.close()
                 response.release_conn()
