@@ -222,8 +222,8 @@ class ChromaDBUpsert:
             await asyncio.gather(*tasks)
             
             if i + batch_size < len(files_to_process):
-                log_info("ChromaDB Upsert", f"Обработано {i + len(batch_files)} файлов. Пауза 10 секунд перед следующей пачкой...")
-                await asyncio.sleep(10)
+                log_info("ChromaDB Upsert", f"Обработано {i + len(batch_files)} файлов. Пауза 20 секунд перед следующей пачкой...")
+                await asyncio.sleep(20)
                 
         log_info("ChromaDB Upsert", "Пайплайн Upsert завершил работу.")
 
