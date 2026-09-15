@@ -176,8 +176,8 @@ class ChromaDBUpsert:
                     batch_ids = ids[i:i + self.embedding_batch_size]
                     batch_metas = metadatas[i:i + self.embedding_batch_size]
                     
-                    # Делается пауза для соблюдения лимитов API
-                    await asyncio.sleep(2.0)
+                    # Делается пауза между частями (батчами) ОДНОГО файла для соблюдения лимитов API
+                    await asyncio.sleep(10.0)
                     
                     # Upsert 
                     await asyncio.to_thread(
