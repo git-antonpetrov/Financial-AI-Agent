@@ -214,11 +214,17 @@ class ChromaDBUpsert:
 
         log_info("ChromaDB Upsert", f"Найдено {len(files_to_process)} файлов для загрузки.")
         
-        tasks = []
-        for obj_name in files_to_process:
-            tasks.append(self.process_file(obj_name))
+        batch_size = 6
+        for i in range(0, len(files_to_process), batch_size):
+            batch_files = files_to_process[i:i + batch_size]
+            tasks = [self.process_file(obj_name) for obj_name in batch_files]
             
-        await asyncio.gather(*tasks)
+            await asyncio.gather(*tasks)
+            
+            if i + batch_size < len(files_to_process):
+                log_info("ChromaDB Upsert", f"Обработано {i + len(batch_files)} файлов. Пауза 10 секунд перед следующей пачкой...")
+                await asyncio.sleep(10)
+                
         log_info("ChromaDB Upsert", "Пайплайн Upsert завершил работу.")
 
 def start_upsert(db_session_maker: Callable[..., AsyncSession], minio_client: Minio, chroma_client: Any, embedder: Any):
