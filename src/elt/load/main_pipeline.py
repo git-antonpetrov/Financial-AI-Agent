@@ -55,7 +55,11 @@ def parse_russian_date(date_str: str) -> date:
     # Проверка формата дд.мм.гггг
     match = re.search(r"(\d{1,2})\.(\d{1,2})\.(\d{4})", date_str)
     if match:
-        return date(int(match.group(3)), int(match.group(2)), int(match.group(1)))
+        try:
+            return date(int(match.group(3)), int(match.group(2)), int(match.group(1)))
+        except ValueError:
+            return date.min
+            
     # Проверка текстового формата (например, 1 января 2024)
     months = {
         "января": 1, "февраля": 2, "марта": 3, "апреля": 4, "мая": 5, "июня": 6,
@@ -67,7 +71,10 @@ def parse_russian_date(date_str: str) -> date:
         if m_name in date_str_lower:
             match = re.search(r"(\d{1,2})\s+" + m_name + r".*?(\d{4})", date_str_lower)
             if match:
-                return date(int(match.group(2)), m_num, int(match.group(1)))
+                try:
+                    return date(int(match.group(2)), m_num, int(match.group(1)))
+                except ValueError:
+                    return date.min
     return date.min
 
 class RepealedDocumentsResult(BaseModel):
@@ -210,7 +217,8 @@ class MainPipeline:
                         log_info("Main Pipeline", f"Документ {file_name} уже обрабатывается другим процессом. Пропуск.")
                         return
 
-                    if existing_state.status in ["completed", "duplicate", "old_version", "skipped", "empty_text", "error", "ocr_error"]:
+                    # Убрали "error", "ocr_error" и "empty_text", чтобы файлы, перенесенные обратно в сырой бакет, могли быть обработаны повторно.
+                    if existing_state.status in ["completed", "duplicate", "old_version", "skipped"]:
                         log_info("Main Pipeline", f"Документ {file_name} уже обработан (статус: {existing_state.status}). Удаление из очереди.")
                         try:
                             self.minio_client.remove_object(self.raw_bucket, file_name)

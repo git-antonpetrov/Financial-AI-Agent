@@ -72,5 +72,10 @@ def extract_text_cloud(pdf_path: str, pages_count: int = None) -> str:
                 
             if response.full_text_annotation:
                 full_text.append(response.full_text_annotation.text)
+                
+        if end_page < total_pages and end_page % 50 == 0:
+            import time
+            log_info("Text Extractor", f"Обработано {end_page} страниц. Пауза 10 секунд (защита от лимитов Vision API)...")
+            time.sleep(10)
 
     return "\n\n".join(full_text)
