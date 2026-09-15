@@ -13,10 +13,12 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
 from src.elt.db.models import TransformState
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
 # pyrefly: ignore [missing-import]
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from src.core.utils.console_logger import log_info, log_error, log_warning
 from minio import Minio
+from minio.error import S3Error
 
 class ChromaDBUpsert:
     """
@@ -101,17 +103,36 @@ class ChromaDBUpsert:
                         status="processing"
                     )
                     db.add(new_state)
-                    await db.commit()
+                    try:
+                        await db.commit()
+                    except IntegrityError:
+                        await db.rollback()
+                        log_warning("ChromaDB Upsert", f"Файл {object_name} уже обрабатывается другим процессом. Пропуск.")
+                        return
                     await db.refresh(new_state)
                     state_id = new_state.id
                 
             try:
                 # 1. Скачивание файла и метаданных
-                response = self.minio_client.get_object(self.rag_bucket, object_name)
+                try:
+                    response = self.minio_client.get_object(self.rag_bucket, object_name)
+                except S3Error as err:
+                    if err.code == "NoSuchKey":
+                        log_warning("ChromaDB Upsert", f"Файл {object_name} не найден в MinIO (вероятно, удален). Пропуск.")
+                        await self._update_db_state(state_id, status="completed", completed_at=datetime.now())
+                        return
+                    raise
+
                 content = response.read().decode("utf-8")
                 
-                stat = self.minio_client.stat_object(self.rag_bucket, object_name)
-                minio_meta = stat.metadata or {}
+                try:
+                    stat = self.minio_client.stat_object(self.rag_bucket, object_name)
+                    minio_meta = stat.metadata or {}
+                except S3Error as err:
+                    if err.code == "NoSuchKey":
+                        log_warning("ChromaDB Upsert", f"Файл {object_name} не найден при чтении метаданных. Пропуск.")
+                        return
+                    raise
                 
                 # Извлекаются наши метаданные (MinIO добавляет префикс X-Amz-Meta-)
                 def safe_b64decode(val: str, default: str) -> str:
