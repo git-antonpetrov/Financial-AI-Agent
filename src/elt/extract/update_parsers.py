@@ -94,8 +94,17 @@ async def _run_main_logic():
     
     # Проверка наличия недообработанных файлов (в случае падения пайплайна ранее)
     try:
-        objects = list(minio_client.list_objects("raw-documents", recursive=True))
-        has_pending_files = len(objects) > 0
+        raw_objects = list(minio_client.list_objects("raw-documents", recursive=True))
+        
+        # Проверяем также наличие файлов, застрявших на этапе Transform
+        rag_upsert_objects = list(minio_client.list_objects("rag-documents", prefix="upsert/", recursive=True))
+        rag_delete_objects = list(minio_client.list_objects("rag-documents", prefix="delete/", recursive=True))
+        
+        raw_count = len(raw_objects)
+        upsert_count = len([obj for obj in rag_upsert_objects if not obj.object_name.endswith("/")])
+        delete_count = len([obj for obj in rag_delete_objects if not obj.object_name.endswith("/")])
+        
+        has_pending_files = (raw_count > 0) or (upsert_count > 0) or (delete_count > 0)
     except Exception:
         has_pending_files = False
 
