@@ -34,7 +34,7 @@ services:
       - MINIO_ENDPOINT=s3-minio:9000
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
-      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/${POSTGRES_DB}
       - GOOGLE_APPLICATION_CREDENTIALS=/app/data/gcp-service-account.json
       - CHROMA_HOST=vector-db
     env_file:
