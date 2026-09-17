@@ -79,10 +79,13 @@ services:
       - "0.0.0.0:8001:8001"
     environment:
       - CHROMA_HOST=vector-db
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/data/gcp-service-account.json
     env_file:
       - .env
     depends_on:
       - vector-db
+    volumes:
+      - ./data:/app/data
     restart: unless-stopped
 
 volumes:
