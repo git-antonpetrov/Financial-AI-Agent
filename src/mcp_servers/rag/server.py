@@ -5,6 +5,7 @@ import sys
 if __name__ == "__main__":
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 
+# pyrefly: ignore [missing-import]
 from mcp.server.mcpserver import MCPServer
 from src.core.clients.vector_db import get_chroma_client
 from src.core.clients.llm import get_embedder
