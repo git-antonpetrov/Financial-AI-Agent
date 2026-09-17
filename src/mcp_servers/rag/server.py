@@ -136,4 +136,4 @@ def get_document_metadata(document_name: str) -> str:
 
 if __name__ == "__main__":
     log_info("RAG MCP Server", "Запуск сервера RAG MCP на порту 8001...")
-    mcp.run(transport="sse", port=8001)
+    mcp.run(transport="sse", host="0.0.0.0", port=8001)
