@@ -52,6 +52,34 @@ async def main():
                     if content.type == "text":
                         print(content.text)
                         
+                print("\n--- 🌐 Тестируем инструмент search_internet_for_regulations ---")
+                print("Делаем запрос: 'Ключевая ставка ЦБ РФ на сегодня' (max_results=2)...")
+                try:
+                    result_internet = await session.call_tool(
+                        "search_internet_for_regulations", 
+                        arguments={"query": "Ключевая ставка ЦБ РФ на сегодня", "max_results": 2}
+                    )
+                    for content in result_internet.content:
+                        if content.type == "text":
+                            print(content.text)
+                except Exception as e:
+                    print(f"Ошибка при вызове search_internet_for_regulations: {e}")
+
+                print("\n--- 📝 Тестируем инструмент recover_clean_text_from_internet ---")
+                print("Передаем фрагмент текста для восстановления...")
+                mangled_text = "Банк России принял решение повысить ключевую ставку на 100 б.п., до 19,00% годовых. Инфляционное давление остается высоким. Были рассмотрены вопросы кредитно-денежной политики."
+                try:
+                    result_recover = await session.call_tool(
+                        "recover_clean_text_from_internet", 
+                        arguments={"mangled_snippet": mangled_text}
+                    )
+                    for content in result_recover.content:
+                        if content.type == "text":
+                            # Выводим только первые 1000 символов, чтобы не засорять консоль
+                            print(content.text[:1000] + "\n\n[...остальной текст скрыт для краткости...]")
+                except Exception as e:
+                    print(f"Ошибка при вызове recover_clean_text_from_internet: {e}")
+                        
     except Exception as e:
         print(f"❌ Ошибка подключения или выполнения: {e}")
         print("Убедись, что:")

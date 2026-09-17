@@ -8,3 +8,4 @@ colorama
 pydantic-settings
 google-cloud-aiplatform
 google-auth
+tavily-python

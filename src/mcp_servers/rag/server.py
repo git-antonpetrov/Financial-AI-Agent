@@ -11,6 +11,8 @@ from src.core.clients.vector_db import get_chroma_client
 from src.core.clients.llm import get_embedder
 from src.core.utils.console_logger import log_error, log_info
 
+from tavily import TavilyClient
+
 # Инициализируем MCPServer
 mcp = MCPServer("RAG Search MCP", description="Сервер для поиска по нормативной базе знаний (ChromaDB)")
 
@@ -133,6 +135,75 @@ def get_document_metadata(document_name: str) -> str:
     except Exception as e:
         log_error("RAG MCP Metadata", f"Сбой получения метаданных: {e}") 
         return f"Ошибка при получении метаданных: {e}"
+
+@mcp.tool()
+def search_internet_for_regulations(query: str, max_results: int = 5) -> str:
+    """
+    Ищет финансовую информацию, нормативные акты и законы в интернете,
+    если их не оказалось в локальной базе знаний.
+    Агент формулирует запрос так, чтобы искать по надежным официальным источникам.
+    
+    Args:
+        query: Поисковый запрос для интернета
+        max_results: Максимальное количество результатов
+    """
+    try:
+        api_key = os.getenv("TAVILY_API_KEY")
+        if not api_key:
+            return "Ошибка: TAVILY_API_KEY не задан в переменных окружения."
+            
+        tavily_client = TavilyClient(api_key=api_key)
+        response = tavily_client.search(query, max_results=max_results, search_depth="basic")
+        results = response.get("results", [])
+        
+        if not results:
+            return "В интернете по данному запросу ничего не найдено."
+            
+        formatted_results = []
+        for r in results:
+            formatted_results.append(f"Заголовок: {r.get('title')}\nСсылка: {r.get('url')}\nТекст: {r.get('content')}\n")
+            
+        return "\n".join(formatted_results)
+    except Exception as e:
+        log_error("RAG MCP Tavily Search", f"Ошибка: {e}")
+        return f"Ошибка при поиске в интернете: {e}"
+
+@mcp.tool()
+def recover_clean_text_from_internet(mangled_snippet: str) -> str:
+    """
+    Ищет в интернете 'чистый' (нормально читаемый) вариант текста документа,
+    используя искаженный (плохо распознанный OCR) фрагмент из локальной базы.
+    Инструмент сам скачивает страницу оригинала и возвращает полный исправленный текст.
+    
+    Args:
+        mangled_snippet: Искаженный фрагмент текста из базы (достаточно первых 100-200 символов)
+    """
+    try:
+        api_key = os.getenv("TAVILY_API_KEY")
+        if not api_key:
+            return "Ошибка: TAVILY_API_KEY не задан в переменных окружения."
+            
+        tavily_client = TavilyClient(api_key=api_key)
+        # Используем первые 150 символов для поиска, запрашиваем сырой контент (include_raw_content)
+        # Tavily сам достанет чистый текст страницы!
+        response = tavily_client.search(mangled_snippet[:150], max_results=1, include_raw_content=True)
+        results = response.get("results", [])
+        
+        if not results:
+            return "Не удалось найти оригинал текста в интернете для восстановления."
+            
+        first_result = results[0]
+        url = first_result.get('url')
+        
+        # raw_content у Tavily возвращает очищенный распарсенный текст страницы без HTML
+        clean_text = first_result.get('raw_content', first_result.get('content'))
+        
+        # Ограничиваем возвращаемый текст 5000 символов, чтобы не переполнять контекст
+        return f"Найден оригинал по ссылке: {url}\n\nЧистый текст документа:\n{clean_text[:5000]}..."
+        
+    except Exception as e:
+        log_error("RAG MCP Text Recover", f"Ошибка: {e}")
+        return f"Ошибка при восстановлении текста из интернета: {e}"
 
 if __name__ == "__main__":
     log_info("RAG MCP Server", "Запуск сервера RAG MCP на порту 8001...")
