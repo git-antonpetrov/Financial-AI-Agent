@@ -154,7 +154,11 @@ def search_internet_for_regulations(query: str, max_results: int = 5) -> str:
         if not api_key:
             return "Ошибка: TAVILY_API_KEY не задан в переменных окружения."
             
-        tavily_client = TavilyClient(api_key=api_key)
+        tavily_client = TavilyClient(
+            api_key=api_key, 
+            api_base_url=os.getenv("TAVILY_BASE_URL")
+        ) if os.getenv("TAVILY_BASE_URL") else TavilyClient(api_key=api_key)
+        
         response = tavily_client.search(query, max_results=max_results, search_depth="basic")
         results = response.get("results", [])
         
@@ -186,7 +190,11 @@ def recover_clean_text_from_internet(mangled_snippet: str) -> str:
         if not api_key:
             return "Ошибка: TAVILY_API_KEY не задан в переменных окружения."
             
-        tavily_client = TavilyClient(api_key=api_key)
+        tavily_client = TavilyClient(
+            api_key=api_key, 
+            api_base_url=os.getenv("TAVILY_BASE_URL")
+        ) if os.getenv("TAVILY_BASE_URL") else TavilyClient(api_key=api_key)
+        
         # Используем первые 150 символов для поиска, запрашиваем сырой контент (include_raw_content)
         # Tavily сам достанет чистый текст страницы!
         response = tavily_client.search(mangled_snippet[:150], max_results=1, include_raw_content=True)
