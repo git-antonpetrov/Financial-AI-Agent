@@ -1,0 +1,6 @@
+mcp[cli]
+chromadb
+litellm
+uvicorn
+starlette
+python-dotenv
