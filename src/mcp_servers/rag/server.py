@@ -1,5 +1,6 @@
 import os
 import sys
+import traceback
 
 # Добавляем корень проекта в sys.path, если скрипт запущен напрямую
 if __name__ == "__main__":
@@ -11,6 +12,7 @@ from src.core.clients.vector_db import get_chroma_client
 from src.core.clients.llm import get_embedder
 from src.core.utils.console_logger import log_error, log_info
 
+# pyrefly: ignore [missing-import]
 from tavily import TavilyClient
 
 # Инициализируем MCPServer
@@ -165,8 +167,9 @@ def search_internet_for_regulations(query: str, max_results: int = 5) -> str:
             
         return "\n".join(formatted_results)
     except Exception as e:
-        log_error("RAG MCP Tavily Search", f"Ошибка: {e}")
-        return f"Ошибка при поиске в интернете: {e}"
+        error_details = traceback.format_exc()
+        log_error("RAG MCP Tavily Search", f"Ошибка: {error_details}")
+        return f"Ошибка при поиске в интернете:\n{error_details}"
 
 @mcp.tool()
 def recover_clean_text_from_internet(mangled_snippet: str) -> str:
@@ -202,8 +205,9 @@ def recover_clean_text_from_internet(mangled_snippet: str) -> str:
         return f"Найден оригинал по ссылке: {url}\n\nЧистый текст документа:\n{clean_text[:5000]}..."
         
     except Exception as e:
-        log_error("RAG MCP Text Recover", f"Ошибка: {e}")
-        return f"Ошибка при восстановлении текста из интернета: {e}"
+        error_details = traceback.format_exc()
+        log_error("RAG MCP Text Recover", f"Ошибка: {error_details}")
+        return f"Ошибка при восстановлении текста из интернета:\n{error_details}"
 
 if __name__ == "__main__":
     log_info("RAG MCP Server", "Запуск сервера RAG MCP на порту 8001...")
