@@ -4,6 +4,7 @@ litellm
 uvicorn
 starlette
 python-dotenv
-python-dotenv
 colorama
 pydantic-settings
+google-cloud-aiplatform
+google-auth
