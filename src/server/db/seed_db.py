@@ -1,6 +1,7 @@
 import os
 import asyncio
 from urllib.parse import urlparse
+# pyrefly: ignore [missing-import]
 import asyncpg
 from dotenv import load_dotenv
 
