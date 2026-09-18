@@ -9,8 +9,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# pyrefly: ignore [missing-import]
 from src.mcp_servers.bank.db.database import AsyncSessionLocal, init_db
-from src.mcp_servers.bank.db.models import Account, Card, Transaction, Tariff, AutoPayment, PaymentReminder
+# pyrefly: ignore [missing-import]
+from src.mcp_servers.bank.db.models import Account, Card, Transaction, Tariff
 
 def random_date_past_months(months=3):
     start_date = datetime.now() - timedelta(days=months*30)

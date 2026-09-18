@@ -9,8 +9,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from sqlalchemy.ext.asyncio import create_async_engine
-from src.mcp_servers.bank.db.database import Base, AsyncSessionLocal, engine, init_db
-from src.mcp_servers.bank.db.models import Client, Account, Card, Transaction, Tariff, AutoPayment, PaymentReminder
+from src.bank_simulation.bank.db.client import init_db, get_async_session_maker
+from src.bank_simulation.bank.db.models import Account, Card, Transaction, Tariff, AutoPayment, PaymentReminder
+
+AsyncSessionLocal = get_async_session_maker()
 
 def random_date_past_months(months=3):
     start_date = datetime.now() - timedelta(days=months*30)
@@ -59,14 +61,12 @@ async def seed_data():
         await session.commit()
         
         # 2. Создаем клиентов
-        print("Создаем клиентов...")
-        clients = [
-            Client(full_name="Иванов Иван Иванович", phone_number="+79991112233"),
-            Client(full_name="Петров Петр Петрович", phone_number="+79992223344"),
-            Client(full_name="Васильков Василий Васильевич", phone_number="+79993334455")
+        print("Используем фиксированные UUID для клиентов...")
+        client_ids = [
+            "11111111-1111-1111-1111-111111111111", # Иванов Иван Иванович
+            "22222222-2222-2222-2222-222222222222", # Петров Петр Петрович
+            "33333333-3333-3333-3333-333333333333"  # Васильков Василий Васильевич
         ]
-        session.add_all(clients)
-        await session.commit()
         
         # 3. Создаем счета, карты и транзакции для каждого
         print("Создаем счета, карты и транзакции...")
@@ -75,13 +75,13 @@ async def seed_data():
         operation_types_income = ['transfer_sbp', 'salary', 'cash_deposit', 'top_up']
         merchants = ["Кофемания", "Пятерочка", "Яндекс.Такси", "Аптека", "АЗС Лукойл", "ВкусВилл", "Ресторан"]
         
-        for client in clients:
+        for client_id in client_ids:
             # Даем каждому клиенту 1-2 счета
             num_accounts = random.randint(1, 2)
             for _ in range(num_accounts):
                 tariff = random.choice(tariffs_data)
                 account = Account(
-                    client_id=client.id,
+                    client_id=client_id,
                     account_number=str(random.randint(40817810000000000000, 40817810099999999999)),
                     balance=random.uniform(10000, 1500000),
                     currency="RUB",
