@@ -259,8 +259,8 @@ async def run_moex_parser(db_session_maker: Callable[..., AsyncSession], minio_c
     return await parser.fetch_and_download()
 
 if __name__ == "__main__":
-    from src.core.clients.db import get_async_session_maker
-    from src.core.clients.storage import get_minio_client
+    from src.elt.clients.db import get_async_session_maker
+    from src.elt.clients.storage import get_minio_client
     
     db_maker = get_async_session_maker()
     minio = get_minio_client()

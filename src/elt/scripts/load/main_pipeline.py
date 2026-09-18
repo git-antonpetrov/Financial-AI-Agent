@@ -546,8 +546,8 @@ def start_pipeline(
     asyncio.run(pipeline.run())
 
 if __name__ == "__main__":
-    from src.core.clients.db import get_async_session_maker
-    from src.core.clients.storage import get_minio_client
+    from src.elt.clients.db import get_async_session_maker
+    from src.elt.clients.storage import get_minio_client
     from src.core.clients.llm import get_cloud_ai_client
 
     db_maker = get_async_session_maker()

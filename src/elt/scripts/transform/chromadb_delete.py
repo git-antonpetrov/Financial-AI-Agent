@@ -171,8 +171,8 @@ def start_delete(db_session_maker: Callable[..., AsyncSession], minio_client: Mi
     asyncio.run(pipeline.run())
 
 if __name__ == "__main__":
-    from src.core.clients.db import get_async_session_maker
-    from src.core.clients.storage import get_minio_client
+    from src.elt.clients.db import get_async_session_maker
+    from src.elt.clients.storage import get_minio_client
     from src.core.clients.vector_db import get_chroma_client
     from src.core.clients.llm import get_embedder
 

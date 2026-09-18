@@ -1,6 +1,6 @@
 from functools import lru_cache
 from minio import Minio
-from src.core.config import get_settings
+from src.elt.config import get_settings
 from src.core.utils.console_logger import log_info
 
 @lru_cache

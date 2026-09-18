@@ -8,22 +8,9 @@ class Settings(BaseSettings):
     Использует Pydantic для проверки типов и обязательности полей.
     """
     
-    # Database
-    DATABASE_URL: str
-    
-    # MinIO
-    MINIO_ENDPOINT: str = "localhost:9000"
-    MINIO_ACCESS_KEY: str = "minioadmin"
-    MINIO_SECRET_KEY: str = "minioadmin"
-    
     # ChromaDB
     CHROMA_HOST: str = "localhost"
     CHROMA_PORT: int = 8000
-    
-    # Content AI
-    CONTENT_AI_API_URI: Optional[str] = None
-    CONTENTAI_USERNAME: Optional[str] = None
-    CONTENTAI_PASSWORD: Optional[str] = None
     
     # LLM Settings (Vertex)
     VERTEX_PROJECT: Optional[str] = None

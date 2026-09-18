@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libreoffice \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY src/elt/requirements.txt .
 
 # Устанавливаем Python-зависимости
 RUN pip install --no-cache-dir -r requirements.txt
@@ -23,4 +23,4 @@ ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
 # Запуск фонового скрипта оркестратора
-CMD ["python", "src/elt/extract/update_parsers.py"]
+CMD ["python", "src/elt/scripts/extract/update_parsers.py"]

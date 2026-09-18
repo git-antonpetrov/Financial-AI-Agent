@@ -1,6 +1,6 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine, async_sessionmaker, AsyncSession
 from functools import lru_cache
-from src.core.config import get_settings
+from src.elt.config import get_settings
 from src.elt.db.models import Base
 from src.core.utils.console_logger import log_info, log_error
 

@@ -8,11 +8,11 @@ from src.core.utils.console_logger import log_info, log_warning, log_error
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 
-from src.elt.extract.parsers.cbr_rss_parser import run_cbr_parser
-from src.elt.extract.parsers.moex_parser import run_moex_parser
+from src.elt.scripts.extract.parsers.cbr_rss_parser import run_cbr_parser
+from src.elt.scripts.extract.parsers.moex_parser import run_moex_parser
 
-from src.core.clients.db import get_async_session_maker, init_db
-from src.core.clients.storage import get_minio_client
+from src.elt.clients.db import get_async_session_maker, init_db
+from src.elt.clients.storage import get_minio_client
 from src.core.clients.llm import get_cloud_ai_client, get_embedder
 from src.core.clients.vector_db import get_chroma_client
 
@@ -25,7 +25,7 @@ except ImportError:
 
 # MainPipeline импортируется для обработки загруженных данных
 try:
-    from src.elt.load.main_pipeline import MainPipeline
+    from src.elt.scripts.load.main_pipeline import MainPipeline
     has_main_pipeline = True
 except ImportError:
     has_main_pipeline = False
@@ -137,7 +137,7 @@ async def _run_main_logic():
                 
         # 2. Этап Transform: ChromaDB Delete
         try:
-            from src.elt.transform.chromadb_delete import ChromaDBDelete
+            from src.elt.scripts.transform.chromadb_delete import ChromaDBDelete
             log_info("Оркестратор Парсеров", "Пауза 30 секунд перед запуском ChromaDBDelete...")
             await asyncio.sleep(30)
             
@@ -153,7 +153,7 @@ async def _run_main_logic():
             
         # 3. Этап Transform: ChromaDB Upsert
         try:
-            from src.elt.transform.chromadb_upsert import ChromaDBUpsert
+            from src.elt.scripts.transform.chromadb_upsert import ChromaDBUpsert
             log_info("Оркестратор Парсеров", "Пауза 30 секунд перед запуском ChromaDBUpsert...")
             await asyncio.sleep(30)
             
