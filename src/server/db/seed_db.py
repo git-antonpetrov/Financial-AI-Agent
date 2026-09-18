@@ -36,9 +36,9 @@ async def seed_server_data():
     async with AsyncSessionLocal() as session:
         print("[Server DB] Создаем клиентов...")
         clients = [
-            Client(id="11111111-1111-1111-1111-111111111111", full_name="Иванов Иван Иванович", phone_number="+79991112233", password_hash="$2b$12$emr2Q/RPryKNfKPxxGEyy.8q1c.0GuyEPJYygxpe0mpI.aVb1j77i"), # 22222222
-            Client(id="22222222-2222-2222-2222-222222222222", full_name="Петров Петр Петрович", phone_number="+79992223344", password_hash="$2b$12$koOzD3tZ7wt5ZvGvUS.aKuyv7FDoFldEQMtpFjp4l4m0Mq6EAT.0e"), # 11111111
-            Client(id="33333333-3333-3333-3333-333333333333", full_name="Васильков Василий Васильевич", phone_number="+79993334455", password_hash="$2b$12$1OYYTUao01BlWfPIs5flQ.mYYMOjkyc14n/v8.KSvOaabyWQlgm6.") # 33333333
+            Client(id="3f8a0d4c-21a4-4a25-9980-692a8e8f81f1", full_name="Иванов Иван Иванович", phone_number="+79991112233", password_hash="$2b$12$emr2Q/RPryKNfKPxxGEyy.8q1c.0GuyEPJYygxpe0mpI.aVb1j77i"),
+            Client(id="7d3c5f42-4211-4091-a8d2-4cf01826f09e", full_name="Петров Петр Петрович", phone_number="+79992223344", password_hash="$2b$12$koOzD3tZ7wt5ZvGvUS.aKuyv7FDoFldEQMtpFjp4l4m0Mq6EAT.0e"),
+            Client(id="b9a13d7e-91c2-401d-8f90-1c39054316a7", full_name="Васильков Василий Васильевич", phone_number="+79993334455", password_hash="$2b$12$1OYYTUao01BlWfPIs5flQ.mYYMOjkyc14n/v8.KSvOaabyWQlgm6.")
         ]
         session.add_all(clients)
         await session.commit()
