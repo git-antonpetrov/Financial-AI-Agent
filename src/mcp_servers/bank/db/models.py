@@ -22,22 +22,10 @@ class Tariff(Base):
     accounts = relationship("Account", back_populates="tariff")
 
 
-class Client(Base):
-    __tablename__ = "clients"
-    id = Column(String, primary_key=True, default=generate_uuid)
-    full_name = Column(String, nullable=False)
-    phone_number = Column(String, unique=True, nullable=False)
-    password_hash = Column(String, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-    accounts = relationship("Account", back_populates="client")
-    reminders = relationship("PaymentReminder", back_populates="client")
-
-
 class Account(Base):
     __tablename__ = "accounts"
     id = Column(String, primary_key=True, default=generate_uuid)
-    client_id = Column(String, ForeignKey("clients.id"), nullable=False)
+    client_id = Column(String, nullable=False)
     account_number = Column(String, unique=True, nullable=False)
     balance = Column(Numeric(12, 2), default=0.00)
     currency = Column(String, default="RUB")
@@ -45,7 +33,6 @@ class Account(Base):
     status = Column(String, default="active") # active, closed
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    client = relationship("Client", back_populates="accounts")
     tariff = relationship("Tariff", back_populates="accounts")
     cards = relationship("Card", back_populates="account")
     transactions = relationship("Transaction", back_populates="account")
@@ -97,9 +84,7 @@ class AutoPayment(Base):
 class PaymentReminder(Base):
     __tablename__ = "payment_reminders"
     id = Column(String, primary_key=True, default=generate_uuid)
-    client_id = Column(String, ForeignKey("clients.id"), nullable=False)
+    client_id = Column(String, nullable=False)
     message = Column(String, nullable=False)
     date = Column(Date, nullable=False)
     is_active = Column(Boolean, default=True)
-
-    client = relationship("Client", back_populates="reminders")

@@ -3,14 +3,13 @@ import asyncio
 import random
 from datetime import datetime, timedelta, date
 from urllib.parse import urlparse
-# pyrefly: ignore [missing-import]
 import asyncpg
 from dotenv import load_dotenv
+
 load_dotenv()
 
-from sqlalchemy.ext.asyncio import create_async_engine
-from src.mcp_servers.bank.db.database import Base, AsyncSessionLocal, engine, init_db
-from src.mcp_servers.bank.db.models import Client, Account, Card, Transaction, Tariff, AutoPayment, PaymentReminder
+from src.mcp_servers.bank.db.database import AsyncSessionLocal, init_db
+from src.mcp_servers.bank.db.models import Account, Card, Transaction, Tariff, AutoPayment, PaymentReminder
 
 def random_date_past_months(months=3):
     start_date = datetime.now() - timedelta(days=months*30)
@@ -25,31 +24,27 @@ async def create_database_if_not_exists():
     parsed = urlparse(url.replace("postgresql+asyncpg://", "postgresql://"))
     db_name = parsed.path.lstrip("/")
     
-    # URL для подключения к системной базе postgres
     sys_url = url.replace(f"/{db_name}", "/postgres")
     sys_url_asyncpg = sys_url.replace("postgresql+asyncpg://", "postgres://")
     
     try:
-        print(f"Подключаемся к {sys_url_asyncpg} для создания БД {db_name}...")
+        print(f"[Bank DB] Подключаемся к {sys_url_asyncpg} для создания БД {db_name}...")
         conn = await asyncpg.connect(sys_url_asyncpg)
         await conn.execute(f"CREATE DATABASE {db_name}")
         await conn.close()
-        print(f"✅ База данных {db_name} успешно создана.")
+        print(f"[Bank DB] ✅ База данных {db_name} успешно создана.")
     except asyncpg.exceptions.DuplicateDatabaseError:
-        print(f"ℹ️ База данных {db_name} уже существует.")
+        print(f"[Bank DB] ℹ️ База данных {db_name} уже существует.")
     except Exception as e:
-        print(f"⚠️ Ошибка при создании БД (возможно она уже есть или нет прав): {e}")
+        print(f"[Bank DB] ⚠️ Ошибка при создании БД: {e}")
 
-async def seed_data():
-    print("Создаем таблицы...")
+async def seed_bank_data():
+    print("[Bank DB] Создаем таблицы...")
     await init_db()
     
     async with AsyncSessionLocal() as session:
-        # Проверяем, есть ли уже данные (чтобы не дублировать)
-        # Если хотим пересоздавать — можно добавить Base.metadata.drop_all(engine) в init_db
-        
         # 1. Создаем тарифы
-        print("Создаем тарифы...")
+        print("[Bank DB] Создаем тарифы...")
         tariffs_data = [
             Tariff(name="Базовый", service_cost=100, non_sbp_limit=20000, sbp_limit=30000000, cash_withdrawal_limit=100000, cash_withdrawal_fee=100, transfer_over_limit_fee_percent=2.0, deposit_fee=0),
             Tariff(name="Зарплатный", service_cost=0, non_sbp_limit=20000, sbp_limit=30000000, cash_withdrawal_limit=100000, cash_withdrawal_fee=100, transfer_over_limit_fee_percent=2.0, deposit_fee=0),
@@ -58,30 +53,27 @@ async def seed_data():
         session.add_all(tariffs_data)
         await session.commit()
         
-        # 2. Создаем клиентов
-        print("Создаем клиентов...")
-        clients = [
-            Client(full_name="Иванов Иван Иванович", phone_number="+79991112233", password_hash="$2b$12$emr2Q/RPryKNfKPxxGEyy.8q1c.0GuyEPJYygxpe0mpI.aVb1j77i"), 
-            Client(full_name="Петров Петр Петрович", phone_number="+79992223344", password_hash="$2b$12$koOzD3tZ7wt5ZvGvUS.aKuyv7FDoFldEQMtpFjp4l4m0Mq6EAT.0e"), 
-            Client(full_name="Васильков Василий Васильевич", phone_number="+79993334455", password_hash="$2b$12$1OYYTUao01BlWfPIs5flQ.mYYMOjkyc14n/v8.KSvOaabyWQlgm6.")
+        # 2. Список UUID клиентов (соответствуют серверной базе)
+        client_ids = [
+            "11111111-1111-1111-1111-111111111111", # Иванов
+            "22222222-2222-2222-2222-222222222222", # Петров
+            "33333333-3333-3333-3333-333333333333"  # Васильков
         ]
-        session.add_all(clients)
-        await session.commit()
         
         # 3. Создаем счета, карты и транзакции для каждого
-        print("Создаем счета, карты и транзакции...")
+        print("[Bank DB] Создаем счета, карты и транзакции...")
         
         operation_types_expense = ['transfer_sbp', 'transfer_non_sbp', 'purchase']
         operation_types_income = ['transfer_sbp', 'salary', 'cash_deposit', 'top_up']
         merchants = ["Кофемания", "Пятерочка", "Яндекс.Такси", "Аптека", "АЗС Лукойл", "ВкусВилл", "Ресторан"]
         
-        for client in clients:
+        for client_id in client_ids:
             # Даем каждому клиенту 1-2 счета
             num_accounts = random.randint(1, 2)
             for _ in range(num_accounts):
                 tariff = random.choice(tariffs_data)
                 account = Account(
-                    client_id=client.id,
+                    client_id=client_id,
                     account_number=str(random.randint(40817810000000000000, 40817810099999999999)),
                     balance=random.uniform(10000, 1500000),
                     currency="RUB",
@@ -135,11 +127,11 @@ async def seed_data():
                     session.add(tx)
                     
         await session.commit()
-        print("✅ Сидирование успешно завершено! Данные сгенерированы.")
+        print("[Bank DB] ✅ Сидирование успешно завершено! Данные сгенерированы.")
 
-async def main():
+async def run_seed():
     await create_database_if_not_exists()
-    await seed_data()
+    await seed_bank_data()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(run_seed())
