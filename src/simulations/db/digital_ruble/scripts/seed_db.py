@@ -97,8 +97,10 @@ async def seed_data():
         conditions = ["приемка_квартиры", "доставка_товара", "выполнение_услуг", "наступление_даты"]
         
         dummy_code = '''
-def check_condition(context):
-    if context.current_date >= context.contract.executed_at:
+def execute(ctx):
+    # Тестовая заглушка: проверяем статус условия из контекста
+    if ctx.get_condition_status() == 'fulfilled':
+        ctx.transfer(ctx.creator_id, ctx.receiver_id, ctx.amount)
         return True
     return False
 '''
@@ -106,7 +108,11 @@ def check_condition(context):
         for _ in range(5):
             creator = random.choice(wallets)
             receiver = random.choice([w for w in wallets if w.id != creator.id])
-            amount = random.uniform(10000, 500000)
+            amount = random.uniform(10000, 50000)
+            
+            # Обеспечиваем, чтобы у создателя было достаточно денег для заморозки
+            creator.balance += amount
+            creator.frozen_balance += amount
             
             sc = SmartContract(
                 creator_wallet_id=creator.id,
@@ -116,6 +122,7 @@ def check_condition(context):
                 contract_code=dummy_code.strip(),
                 condition_status="pending",
                 status="active",
+                error_message=None,
                 created_at=random_date_past_months(1),
                 executed_at=random_date_late_2026() # Исполнение в конце 2026
             )

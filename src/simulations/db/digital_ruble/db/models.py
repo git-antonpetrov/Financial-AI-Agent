@@ -13,6 +13,7 @@ class Wallet(Base):
     client_id = Column(String, unique=True, nullable=False) # 1 кошелек = 1 гражданин
     wallet_number = Column(String, unique=True, nullable=False)
     balance = Column(Numeric(12, 2), default=0.00)
+    frozen_balance = Column(Numeric(12, 2), default=0.00)
     status = Column(String, default="active") # active, blocked
     opened_at = Column(DateTime, default=datetime.utcnow)
 
@@ -45,7 +46,8 @@ class SmartContract(Base):
     condition_type = Column(String, nullable=False) # "приемка_квартиры", "наступление_даты"
     contract_code = Column(String, nullable=True) # Python DSL код контракта
     condition_status = Column(String, default="pending") # pending, fulfilled, failed
-    status = Column(String, default="active") # active, executed, cancelled
+    status = Column(String, default="active") # active, executed, cancelled, failed
+    error_message = Column(String, nullable=True) # Полный текст ошибки, если контракт упал
     created_at = Column(DateTime, default=datetime.utcnow)
     executed_at = Column(DateTime, nullable=True)
 
