@@ -133,14 +133,20 @@ async def seed_data():
                 
             # Брокерские счета
             for _ in range(random.randint(1, 2)):
-                # С вероятностью 50% счет подписан на стратегию
-                strat_id = random.choice(strategies).id if random.random() > 0.5 else None
+                strat = random.choice(strategies) if random.random() > 0.5 else None
+                strat_id = strat.id if strat else None
+                
+                # Если подписан на стратегию, случайным образом генерируем доход
+                income = random.uniform(-5000, 20000) if strat_id else 0.0
+                next_comm = random_next_payment_date() if strat_id else None
                 
                 brk = BrokerAccount(
                     client_id=client_id,
                     account_number=str(random.randint(30601810000000000000, 30601810099999999999)),
                     balance=random.uniform(1000, 100000), # свободный кэш
+                    monthly_income=income,
                     strategy_id=strat_id,
+                    next_commission_date=next_comm,
                     opened_at=random_date_past_months(24)
                 )
                 session.add(brk)

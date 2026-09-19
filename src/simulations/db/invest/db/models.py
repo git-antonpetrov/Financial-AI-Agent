@@ -49,8 +49,10 @@ class BrokerAccount(Base):
     client_id = Column(String, nullable=False)
     account_number = Column(String, unique=True, nullable=False)
     balance = Column(Numeric(12, 2), default=0.00)
+    monthly_income = Column(Numeric(12, 2), default=0.00) # Доход за месяц (для расчета комиссии)
     strategy_id = Column(String, ForeignKey("investment_strategies.id"), nullable=True)
     status = Column(String, default="active") # active, blocked, closed
+    next_commission_date = Column(DateTime, nullable=True) # Дата списания комиссии
     opened_at = Column(DateTime, default=datetime.utcnow)
     
     strategy = relationship("InvestmentStrategy", back_populates="broker_accounts")
