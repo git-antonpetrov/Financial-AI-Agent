@@ -81,10 +81,4 @@ class AutoPayment(Base):
     account = relationship("Account", back_populates="auto_payments")
 
 
-class PaymentReminder(Base):
-    __tablename__ = "payment_reminders"
-    id = Column(String, primary_key=True, default=generate_uuid)
-    client_id = Column(String, nullable=False)
-    message = Column(String, nullable=False)
-    date = Column(Date, nullable=False)
-    is_active = Column(Boolean, default=True)
+
