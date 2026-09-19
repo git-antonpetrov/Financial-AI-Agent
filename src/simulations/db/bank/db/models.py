@@ -1,5 +1,5 @@
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from sqlalchemy import Column, String, Numeric, Boolean, Date, Time, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 from src.simulations.db.bank.db.database import Base
@@ -31,7 +31,7 @@ class Account(Base):
     currency = Column(String, default="RUB")
     tariff_id = Column(String, ForeignKey("tariffs.id"), nullable=False)
     status = Column(String, default="active") # active, closed
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     tariff = relationship("Tariff", back_populates="accounts")
     cards = relationship("Card", back_populates="account")
@@ -45,7 +45,7 @@ class Card(Base):
     account_id = Column(String, ForeignKey("accounts.id"), nullable=False)
     card_number = Column(String, unique=True, nullable=False)
     status = Column(String, default="active") # active, blocked, frozen
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     account = relationship("Account", back_populates="cards")
 

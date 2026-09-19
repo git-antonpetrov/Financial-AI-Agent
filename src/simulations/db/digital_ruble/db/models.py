@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, date, timezone
 from sqlalchemy import Column, String, Numeric, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 from src.simulations.db.digital_ruble.db.database import Base
@@ -48,7 +48,7 @@ class SmartContract(Base):
     condition_status = Column(String, default="pending") # pending, fulfilled, failed
     status = Column(String, default="active") # active, executed, cancelled, failed
     error_message = Column(String, nullable=True) # Полный текст ошибки, если контракт упал
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     executed_at = Column(DateTime, nullable=True)
 
     creator = relationship("Wallet", foreign_keys=[creator_wallet_id], back_populates="created_contracts")

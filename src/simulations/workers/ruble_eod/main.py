@@ -1,8 +1,9 @@
-import os
 import sys
 import asyncio
+from pathlib import Path
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+# Добавляем корень проекта в sys.path
+sys.path.append(str(Path(__file__).resolve().parents[4]))
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -16,11 +17,11 @@ async def main():
     
     scheduler = AsyncIOScheduler()
     
-    # Запуск по расписанию в 23:15, согласно утвержденному плану
-    scheduler.add_job(run_ruble_eod, 'cron', hour=23, minute=15)
+    # Настраиваем запуск EOD каждый день в 23:45
+    scheduler.add_job(run_ruble_eod, 'cron', hour=23, minute=45)
     
     scheduler.start()
-    log_info("Ruble EOD Worker", "Воркер цифрового рубля запущен. Ожидание 23:15...")
+    log_info("Ruble EOD Worker", "Воркер цифрового рубля запущен. Ожидание 23:45...")
     
     await asyncio.Event().wait()
 

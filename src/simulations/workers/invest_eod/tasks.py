@@ -1,8 +1,9 @@
 import random
-from datetime import timedelta, date
+from datetime import timedelta, date, datetime
 from dateutil.relativedelta import relativedelta
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
+from decimal import Decimal
 
 from src.simulations.db.invest.db.client import get_async_session_maker
 AsyncSessionLocal = get_async_session_maker()
@@ -15,11 +16,13 @@ async def process_savings_accounts(session, current_date):
     """
     log_info("Invest EOD", f"Обработка накопительных счетов на {current_date}...")
     
+    current_datetime = datetime.combine(current_date, datetime.max.time())
+
     # Берем только АКТИВНЫЕ счета, у которых наступила дата выплаты
     result = await session.execute(
         select(SavingsAccount).where(
             SavingsAccount.status == "active",
-            SavingsAccount.next_payment_date <= current_date
+            SavingsAccount.next_payment_date <= current_datetime
         )
     )
     accounts = result.scalars().all()
@@ -31,8 +34,8 @@ async def process_savings_accounts(session, current_date):
             acc.balance += acc.next_payment_amount
             
         # Считаем сумму следующей выплаты: баланс * (ставка / 100) / 12 месяцев
-        monthly_rate = (acc.interest_rate / 100) / 12
-        acc.next_payment_amount = round(acc.balance * monthly_rate, 2)
+        monthly_rate = Decimal(acc.interest_rate) / Decimal('100') / Decimal('12')
+        acc.next_payment_amount = round(Decimal(acc.balance) * monthly_rate, 2)
         
         # Сдвигаем дату на 1 месяц вперед
         acc.next_payment_date = acc.next_payment_date + relativedelta(months=1)
@@ -47,10 +50,12 @@ async def process_deposits(session, current_date):
     """
     log_info("Invest EOD", f"Обработка вкладов на {current_date}...")
     
+    current_datetime = datetime.combine(current_date, datetime.max.time())
+
     result = await session.execute(
         select(Deposit).where(
             Deposit.status == "active",
-            Deposit.next_payment_date <= current_date
+            Deposit.next_payment_date <= current_datetime
         )
     )
     deposits = result.scalars().all()
@@ -61,8 +66,8 @@ async def process_deposits(session, current_date):
         if dep.next_payment_amount > 0:
             dep.balance += dep.next_payment_amount
             
-        monthly_rate = (dep.interest_rate / 100) / 12
-        dep.next_payment_amount = round(dep.balance * monthly_rate, 2)
+        monthly_rate = Decimal(dep.interest_rate) / Decimal('100') / Decimal('12')
+        dep.next_payment_amount = round(Decimal(dep.balance) * monthly_rate, 2)
         
         dep.next_payment_date = dep.next_payment_date + relativedelta(months=1)
         processed += 1
@@ -82,10 +87,12 @@ async def process_broker_accounts(session, current_date):
     """
     log_info("Invest EOD", f"Обработка брокерских счетов на {current_date}...")
     
+    current_datetime = datetime.combine(current_date, datetime.max.time())
+
     result = await session.execute(
         select(BrokerAccount).options(selectinload(BrokerAccount.strategy)).where(
             BrokerAccount.status == "active",
-            BrokerAccount.next_commission_date <= current_date
+            BrokerAccount.next_commission_date <= current_datetime
         )
     )
     accounts = result.scalars().all()
@@ -111,7 +118,7 @@ async def process_broker_accounts(session, current_date):
         actual_monthly_yield = base_monthly_yield + random.uniform(-noise_level, noise_level)
         
         # Считаем доход за прошедший месяц
-        income = round(float(acc.balance) * (actual_monthly_yield / 100), 2)
+        income = round(Decimal(acc.balance) * Decimal(actual_monthly_yield / 100), 2)
         acc.monthly_income = income
         
         # Применяем доход к балансу (он может быть и отрицательным!)
@@ -119,7 +126,7 @@ async def process_broker_accounts(session, current_date):
         
         # Если месяц закрыт в плюс, берем комиссию за успех (Success Fee)
         if acc.monthly_income > 0:
-            fee = round(float(acc.monthly_income) * (float(strategy.commission_fee) / 100), 2)
+            fee = round(Decimal(acc.monthly_income) * (Decimal(strategy.commission_fee) / Decimal('100')), 2)
             acc.balance -= fee
             
         # Сдвигаем дату следующего расчета

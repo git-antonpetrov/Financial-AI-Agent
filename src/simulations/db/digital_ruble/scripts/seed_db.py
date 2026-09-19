@@ -9,7 +9,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from sqlalchemy.ext.asyncio import create_async_engine
 from src.simulations.db.digital_ruble.db.client import init_db, get_async_session_maker
 from src.simulations.db.digital_ruble.db.models import Wallet, RubleTransaction, SmartContract
 
@@ -36,7 +35,7 @@ async def create_database_if_not_exists():
         "postgresql+asyncpg://agent_user:agent_password@localhost:15432/ruble_db"
     )
     url = DATABASE_URL
-    parsed = urlparse(url)
+    parsed = urlparse(url.replace("postgresql+asyncpg://", "postgresql://"))
     db_name = parsed.path.lstrip('/')
     
     sys_url = url.replace(f"/{db_name}", "/postgres")
@@ -124,7 +123,7 @@ def execute(ctx):
                 status="active",
                 error_message=None,
                 created_at=random_date_past_months(1),
-                executed_at=random_date_late_2026() # Исполнение в конце 2026
+                executed_at=None # Исполняется воркером
             )
             session.add(sc)
             

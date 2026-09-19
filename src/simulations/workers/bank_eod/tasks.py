@@ -39,7 +39,7 @@ async def process_auto_payments(session, current_date):
                 account_id=account.id,
                 category="expense",
                 operation_type="auto_payment",
-                amount=ap.amount * -1,
+                amount=ap.amount,
                 description=f"Автоплатеж: {ap.recipient}",
                 status="completed",
                 date=current_date,
@@ -60,7 +60,7 @@ async def process_auto_payments(session, current_date):
                 account_id=account.id,
                 category="expense",
                 operation_type="auto_payment",
-                amount=ap.amount * -1,
+                amount=ap.amount,
                 description=f"Недостаточно средств. Автоплатеж: {ap.recipient}",
                 status="failed",
                 date=current_date,
@@ -88,19 +88,32 @@ async def process_tariff_fees(session, current_date):
     processed = 0
     for acc in accounts:
         if acc.tariff.service_cost > 0:
-            acc.balance -= acc.tariff.service_cost
-            tx = Transaction(
-                account_id=acc.id,
-                category="expense",
-                operation_type="service_fee",
-                amount=acc.tariff.service_cost * -1,
-                description=f"Плата за обслуживание тарифа '{acc.tariff.name}'",
-                status="completed",
-                date=current_date,
-                time=datetime.utcnow().time()
-            )
-            session.add(tx)
-            processed += 1
+            if acc.balance >= acc.tariff.service_cost:
+                acc.balance -= acc.tariff.service_cost
+                tx = Transaction(
+                    account_id=acc.id,
+                    category="expense",
+                    operation_type="service_fee",
+                    amount=acc.tariff.service_cost,
+                    description=f"Плата за обслуживание тарифа '{acc.tariff.name}'",
+                    status="completed",
+                    date=current_date,
+                    time=datetime.utcnow().time()
+                )
+                session.add(tx)
+                processed += 1
+            else:
+                tx = Transaction(
+                    account_id=acc.id,
+                    category="expense",
+                    operation_type="service_fee",
+                    amount=acc.tariff.service_cost,
+                    description=f"Недостаточно средств для платы за тариф '{acc.tariff.name}'",
+                    status="failed",
+                    date=current_date,
+                    time=datetime.utcnow().time()
+                )
+                session.add(tx)
             
     await session.commit()
     log_info("Bank EOD", f"Списана абонентская плата по {processed} счетам")

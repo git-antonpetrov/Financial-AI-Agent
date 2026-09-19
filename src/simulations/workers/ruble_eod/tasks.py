@@ -62,13 +62,19 @@ async def process_smart_contracts(session):
             contract.error_message = error_msg
             
             # Размораживаем средства, так как контракт упал и не будет исполнен
-            creator.frozen_balance -= contract.amount
+            if creator.frozen_balance >= contract.amount:
+                creator.frozen_balance -= contract.amount
+            else:
+                creator.frozen_balance = 0
             failed += 1
             
         elif is_completed:
             # Контракт отработал успешно и заявил о завершении своей логики
             # Размораживаем всю сумму зарезервированную контрактом
-            creator.frozen_balance -= contract.amount
+            if creator.frozen_balance >= contract.amount:
+                creator.frozen_balance -= contract.amount
+            else:
+                creator.frozen_balance = 0
             
             # Применяем все запрошенные переводы
             for tx in transfers:

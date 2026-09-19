@@ -8,7 +8,6 @@ import asyncpg
 from dotenv import load_dotenv
 load_dotenv()
 
-from sqlalchemy.ext.asyncio import create_async_engine
 from src.simulations.db.bank.db.client import init_db, get_async_session_maker
 from src.simulations.db.bank.db.models import Account, Card, Transaction, Tariff, AutoPayment
 
@@ -125,12 +124,12 @@ async def seed_data():
                     else:
                         category = "expense"
                         op_type = random.choice(operation_types_expense)
-                        amount = random.uniform(100, 15000) * -1
+                        amount = round(random.uniform(100, 15000), 2)
                         desc = f"Оплата: {random.choice(merchants)}" if op_type == "purchase" else f"Перевод: {op_type}"
                     
                     commission = 0.00
                     if category == "expense" and op_type == "transfer_non_sbp" and random.random() > 0.5:
-                        commission = amount * -0.02 # 2% комиссия
+                        commission = round(amount * 0.02, 2) # 2% комиссия
                         
                     tx = Transaction(
                         account_id=account.id,

@@ -4,9 +4,8 @@ from functools import lru_cache
 
 # Импортируем Base, чтобы при init_db все модели были привязаны к нему
 from src.simulations.db.invest.db.database import Base
-from src.core.utils.console_logger import log_info, log_error
+from src.core.utils.console_logger import log_info, log_error, log_warning
 
-@lru_cache
 def get_async_engine():
     """
     Ленивая инициализация асинхронного движка базы данных инвестиций.
@@ -17,7 +16,6 @@ def get_async_engine():
     )
     return create_async_engine(DATABASE_URL, echo=False)
 
-@lru_cache
 def get_async_session_maker():
     """
     Ленивая инициализация фабрики сессий.
@@ -34,6 +32,7 @@ async def init_db():
     """
     Создает все таблицы в базе данных invest_db. (Для симуляции)
     """
+    log_warning("Database", "Внимание: Выполняется удаление всех таблиц базы данных!")
     engine = get_async_engine()
     try:
         async with engine.begin() as conn:

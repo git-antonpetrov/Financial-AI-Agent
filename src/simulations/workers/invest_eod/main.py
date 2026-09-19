@@ -1,8 +1,9 @@
-import os
 import sys
 import asyncio
+from pathlib import Path
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+# Добавляем корень проекта в sys.path
+sys.path.append(str(Path(__file__).resolve().parents[4]))
 
 from dotenv import load_dotenv
 load_dotenv()
