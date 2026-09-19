@@ -90,6 +90,17 @@ async def seed_data():
                 session.add(account)
                 await session.flush() # Получаем account.id
                 
+                # Автоплатежи (50% шанс)
+                if random.random() > 0.5:
+                    ap = AutoPayment(
+                        account_id=account.id,
+                        amount=random.uniform(500, 5000),
+                        recipient=random.choice(merchants),
+                        schedule="monthly",
+                        next_payment_date=date.today() + timedelta(days=random.randint(1, 10))
+                    )
+                    session.add(ap)
+                
                 # Карты для счета
                 num_cards = random.randint(1, 3)
                 for _ in range(num_cards):
