@@ -38,7 +38,7 @@ async def init_db():
     try:
         async with engine.begin() as conn:
             # Импортируем модели локально, чтобы Base.metadata узнала о них до создания таблиц
-            import src.bank_simulation.db.models
+            import src.simulations.db.bank.db.models
             await conn.run_sync(Base.metadata.drop_all)
             await conn.run_sync(Base.metadata.create_all)
         log_info("Bank DB", "Таблицы успешно созданы.")
