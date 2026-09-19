@@ -96,6 +96,13 @@ async def seed_data():
         print("Создаем ожидающие смарт-контракты...")
         conditions = ["приемка_квартиры", "доставка_товара", "выполнение_услуг", "наступление_даты"]
         
+        dummy_code = '''
+def check_condition(context):
+    if context.current_date >= context.contract.executed_at:
+        return True
+    return False
+'''
+
         for _ in range(5):
             creator = random.choice(wallets)
             receiver = random.choice([w for w in wallets if w.id != creator.id])
@@ -106,6 +113,7 @@ async def seed_data():
                 receiver_wallet_id=receiver.id,
                 amount=amount,
                 condition_type=random.choice(conditions),
+                contract_code=dummy_code.strip(),
                 condition_status="pending",
                 status="active",
                 created_at=random_date_past_months(1),

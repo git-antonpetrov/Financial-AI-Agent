@@ -43,6 +43,7 @@ class SmartContract(Base):
     receiver_wallet_id = Column(String, ForeignKey("wallets.id"), nullable=False)
     amount = Column(Numeric(12, 2), nullable=False)
     condition_type = Column(String, nullable=False) # "приемка_квартиры", "наступление_даты"
+    contract_code = Column(String, nullable=True) # Python DSL код контракта
     condition_status = Column(String, default="pending") # pending, fulfilled, failed
     status = Column(String, default="active") # active, executed, cancelled
     created_at = Column(DateTime, default=datetime.utcnow)
