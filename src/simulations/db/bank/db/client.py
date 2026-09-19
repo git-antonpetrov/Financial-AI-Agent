@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from functools import lru_cache
 
 # Импортируем Base, чтобы при init_db все модели были привязаны к нему
-from src.bank_simulation.bank.db.database import Base
+from src.simulations.db.bank.db.database import Base
 from src.core.utils.console_logger import log_info, log_error
 
 @lru_cache

@@ -9,8 +9,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from sqlalchemy.ext.asyncio import create_async_engine
-from src.bank_simulation.bank.db.client import init_db, get_async_session_maker
-from src.bank_simulation.bank.db.models import Account, Card, Transaction, Tariff, AutoPayment, PaymentReminder
+from src.simulations.db.bank.db.client import init_db, get_async_session_maker
+from src.simulations.db.bank.db.models import Account, Card, Transaction, Tariff, AutoPayment, PaymentReminder
 
 AsyncSessionLocal = get_async_session_maker()
 
