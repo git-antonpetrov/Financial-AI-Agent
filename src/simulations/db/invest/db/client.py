@@ -6,6 +6,7 @@ from functools import lru_cache
 from src.simulations.db.invest.db.database import Base
 from src.core.utils.console_logger import log_info, log_error, log_warning
 
+@lru_cache()
 def get_async_engine():
     """
     Ленивая инициализация асинхронного движка базы данных инвестиций.

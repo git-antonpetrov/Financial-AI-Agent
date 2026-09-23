@@ -54,6 +54,11 @@ services:
       - "127.0.0.1:15432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
   pgadmin:
@@ -136,6 +141,24 @@ services:
     depends_on:
       - postgres-db
     environment:
+      - RUBLE_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/ruble_db
+    env_file:
+      - .env
+    restart: unless-stopped
+
+  simulation-api:
+    build:
+      context: .
+      dockerfile: src/simulations/api/Dockerfile
+    container_name: simulation-api
+    depends_on:
+      postgres-db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8002:8002"
+    environment:
+      - BANK_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/bank_db
+      - INVEST_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/invest_db
       - RUBLE_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/ruble_db
     env_file:
       - .env

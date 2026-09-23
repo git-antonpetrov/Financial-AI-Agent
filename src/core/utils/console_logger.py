@@ -20,9 +20,14 @@ def _log(level_color: str, level_name: str, process_name: str, message: str) -> 
     print(f"{level_color}[{level_name}]{reset}{process_color}[{process_name}]{reset}: {message}")
 
 def log_info(process_name: str, message: str) -> None:
-    """Выводит информационное сообщение (зеленого цвета)."""
-    # Зеленый цвет для Info
-    _log("\033[92m", "Info", process_name, message)
+    """Выводит информационное сообщение (голубого цвета)."""
+    # Голубой цвет для Info
+    _log("\033[96m", "Info", process_name, message)
+
+def log_success(process_name: str, message: str) -> None:
+    """Выводит сообщение об успехе (зеленого цвета)."""
+    # Зеленый цвет для Success
+    _log("\033[92m", "Success", process_name, message)
 
 def log_warning(process_name: str, message: str) -> None:
     """Выводит предупреждение (желтого цвета)."""
