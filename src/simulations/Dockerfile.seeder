@@ -1,0 +1,19 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Копируем зависимости
+COPY src/simulations/workers/bank_eod/requirements.txt .
+
+# Устанавливаем зависимости
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Копируем исходный код
+COPY src/ /app/src/
+
+# Добавляем корневую директорию в PYTHONPATH
+ENV PYTHONPATH=/app
+
+# Ждем 60 секунд (чтобы Postgres гарантированно проинициализировался)
+# Затем по очереди запускаем сидеры
+CMD ["sh", "-c", "sleep 60 && python src/simulations/db/bank/scripts/seed_db.py && python src/simulations/db/invest/scripts/seed_db.py && python src/simulations/db/digital_ruble/scripts/seed_db.py"]

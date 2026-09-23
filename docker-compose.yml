@@ -88,6 +88,59 @@ services:
       - ./data:/app/data
     restart: unless-stopped
 
+  simulations-seeder:
+    build:
+      context: .
+      dockerfile: src/simulations/Dockerfile.seeder
+    container_name: simulations-seeder
+    depends_on:
+      - postgres-db
+    environment:
+      - BANK_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/bank_db
+      - INVEST_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/invest_db
+      - RUBLE_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/ruble_db
+    env_file:
+      - .env
+
+  bank-worker:
+    build:
+      context: .
+      dockerfile: src/simulations/workers/bank_eod/Dockerfile
+    container_name: bank-worker
+    depends_on:
+      - postgres-db
+    environment:
+      - BANK_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/bank_db
+    env_file:
+      - .env
+    restart: unless-stopped
+
+  invest-worker:
+    build:
+      context: .
+      dockerfile: src/simulations/workers/invest_eod/Dockerfile
+    container_name: invest-worker
+    depends_on:
+      - postgres-db
+    environment:
+      - INVEST_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/invest_db
+    env_file:
+      - .env
+    restart: unless-stopped
+
+  ruble-worker:
+    build:
+      context: .
+      dockerfile: src/simulations/workers/ruble_eod/Dockerfile
+    container_name: ruble-worker
+    depends_on:
+      - postgres-db
+    environment:
+      - RUBLE_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/ruble_db
+    env_file:
+      - .env
+    restart: unless-stopped
+
 volumes:
   minio_data:
   chroma_gold_data:
