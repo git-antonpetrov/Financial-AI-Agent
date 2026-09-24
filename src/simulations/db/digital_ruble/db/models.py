@@ -34,6 +34,7 @@ class RubleTransaction(Base):
     amount = Column(Numeric(12, 2), nullable=False)
     status = Column(String, default="completed") # completed, failed
     smart_contract_id = Column(String, ForeignKey("smart_contracts.id"), nullable=True)
+    signature = Column(String, nullable=True)
     timestamp = Column(DateTime, default=get_moscow_now)
 
     sender = relationship("Wallet", foreign_keys=[sender_wallet_id], back_populates="sent_transactions")
