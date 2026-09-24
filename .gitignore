@@ -196,6 +196,7 @@ datasets/
 chroma/
 docker_volume_chroma/
 # Логи, артефакты и дампы ошибок
+data/
 !logs/errors/
 logs/errors/*
 # 4. Standard Python artifacts and IDE settings
