@@ -195,17 +195,9 @@ datasets/
 # Игнорируем базу данных векторов
 chroma/
 docker_volume_chroma/
-# Локальные системные бинарники
-poppler/
-popler/
-# Игнорируем папку data с временными файлами
-data/
-# Логи, артефакты парсеров и дампы ошибок
-# Оставляем подпапки, но игнорируем их содержимое
+# Логи, артефакты и дампы ошибок
 !logs/errors/
 logs/errors/*
-!logs/parsers/
-logs/parsers/*
 # 4. Standard Python artifacts and IDE settings
 __pycache__/
 # 4. Standard Python artifacts and IDE settings
@@ -216,4 +208,3 @@ venv/
 env/
 .idea/
 .vscode/
-certs/
