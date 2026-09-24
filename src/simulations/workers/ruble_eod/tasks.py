@@ -1,7 +1,5 @@
 from datetime import datetime, timezone, timedelta
 from sqlalchemy.future import select
-import httpx
-
 from src.simulations.db.digital_ruble.db.client import get_async_session_maker
 AsyncSessionLocal = get_async_session_maker()
 
@@ -83,28 +81,9 @@ async def process_smart_contracts(session):
                 to_w = receiver if tx["to"] == receiver.id else creator
                 amount_to_send = tx["amount"]
                 
-                # Обращение к аппаратному анклаву для криптографического подписания перевода
-                try:
-                    async with httpx.AsyncClient(verify="/certs/cert.pem", timeout=10.0) as client:
-                        enclave_payload = {
-                            "sender_wallet_id": str(from_w.id),
-                            "receiver_wallet_id": str(to_w.id),
-                            "amount": float(amount_to_send),
-                            "smart_contract_id": str(contract.id)
-                        }
-                        headers = {"X-API-Key": "test_api_key_for_digital_ruble"}
-                        enclave_response = await client.post("https://enclave-signer:8080/sign", json=enclave_payload, headers=headers)
-                        enclave_response.raise_for_status()
-                        signature = enclave_response.json().get("signature")
-                        log_info("Ruble EOD", f"Получена криптографическая подпись из анклава: {signature[:10]}...")
-                except Exception as e:
-                    log_error("Ruble EOD", f"Ошибка получения подписи из анклава: {e}. Откат транзакции.")
-                    contract.status = "failed"
-                    contract.error_message = f"Отказ анклава TEE: {str(e)}"
-                    failed += 1
-                    continue
+                signature = f"simulated_sig_{contract.id}_{datetime.utcnow().timestamp()}"
                 
-                # Применяем балансы только после успешной подписи анклавом
+                # Применяем балансы
                 from_w.balance -= amount_to_send
                 to_w.balance += amount_to_send
                 

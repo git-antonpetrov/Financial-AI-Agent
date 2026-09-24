@@ -136,14 +136,10 @@ services:
     depends_on:
       postgres-db:
         condition: service_started
-      enclave-signer:
-        condition: service_healthy
     environment:
       - RUBLE_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/ruble_db
     env_file:
       - .env
-    volumes:
-      - shared_certs:/certs
     restart: unless-stopped
 
   simulation-api:
@@ -163,31 +159,8 @@ services:
       - .env
     restart: unless-stopped
 
-  enclave-signer:
-    build:
-      context: src/simulations/enclave_signer
-      dockerfile: Dockerfile
-    container_name: enclave-signer
-    ports:
-      - "127.0.0.1:8080:8080"
-    environment:
-      - ENCLAVE_MASTER_KEY=${ENCLAVE_MASTER_KEY}
-    env_file:
-      - .env
-    volumes:
-      - shared_certs:/certs
-    healthcheck:
-      test: ["CMD", "curl", "-k", "-f", "https://localhost:8080/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-    security_opt:
-      - seccomp=seccomp-gramine.json # Кастомный профиль: дефолт Docker + personality() для Gramine
-    restart: unless-stopped
-
 volumes:
   minio_data:
   chroma_gold_data:
   postgres_data:
   pgadmin_data:
-  shared_certs:
