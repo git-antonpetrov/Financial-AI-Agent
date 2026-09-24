@@ -1,11 +1,14 @@
 import uuid
-from datetime import datetime, date, timezone
+from datetime import datetime, date, timezone, timedelta
 from sqlalchemy import Column, String, Numeric, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 from src.simulations.db.digital_ruble.db.database import Base
 
 def generate_uuid():
     return str(uuid.uuid4())
+
+def get_moscow_now():
+    return datetime.utcnow() + timedelta(hours=3)
 
 class Wallet(Base):
     __tablename__ = "wallets"
@@ -15,7 +18,7 @@ class Wallet(Base):
     balance = Column(Numeric(12, 2), default=0.00)
     frozen_balance = Column(Numeric(12, 2), default=0.00)
     status = Column(String, default="active") # active, blocked
-    opened_at = Column(DateTime, default=datetime.utcnow)
+    opened_at = Column(DateTime, default=get_moscow_now)
 
     sent_transactions = relationship("RubleTransaction", foreign_keys="[RubleTransaction.sender_wallet_id]", back_populates="sender")
     received_transactions = relationship("RubleTransaction", foreign_keys="[RubleTransaction.receiver_wallet_id]", back_populates="receiver")
@@ -31,7 +34,7 @@ class RubleTransaction(Base):
     amount = Column(Numeric(12, 2), nullable=False)
     status = Column(String, default="completed") # completed, failed
     smart_contract_id = Column(String, ForeignKey("smart_contracts.id"), nullable=True)
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    timestamp = Column(DateTime, default=get_moscow_now)
 
     sender = relationship("Wallet", foreign_keys=[sender_wallet_id], back_populates="sent_transactions")
     receiver = relationship("Wallet", foreign_keys=[receiver_wallet_id], back_populates="received_transactions")
@@ -48,7 +51,7 @@ class SmartContract(Base):
     condition_status = Column(String, default="pending") # pending, fulfilled, failed
     status = Column(String, default="active") # active, executed, cancelled, failed
     error_message = Column(String, nullable=True) # Полный текст ошибки, если контракт упал
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=get_moscow_now)
     executed_at = Column(DateTime, nullable=True)
 
     creator = relationship("Wallet", foreign_keys=[creator_wallet_id], back_populates="created_contracts")

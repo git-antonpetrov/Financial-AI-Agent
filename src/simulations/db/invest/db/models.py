@@ -1,11 +1,14 @@
 import uuid
-from datetime import datetime, date, timezone
+from datetime import datetime, date, timezone, timedelta
 from sqlalchemy import Column, String, Numeric, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 from src.simulations.db.invest.db.database import Base
 
 def generate_uuid():
     return str(uuid.uuid4())
+
+def get_moscow_now():
+    return datetime.utcnow() + timedelta(hours=3)
 
 class InvestmentStrategy(Base):
     __tablename__ = "investment_strategies"
@@ -28,7 +31,7 @@ class SavingsAccount(Base):
     status = Column(String, default="active") # active, closed
     next_payment_date = Column(DateTime, nullable=True)
     next_payment_amount = Column(Numeric(12, 2), default=0.00)
-    opened_at = Column(DateTime, default=datetime.utcnow)
+    opened_at = Column(DateTime, default=get_moscow_now)
 
 class Deposit(Base):
     __tablename__ = "deposits"
@@ -41,7 +44,7 @@ class Deposit(Base):
     status = Column(String, default="active") # active, closed
     next_payment_date = Column(DateTime, nullable=True)
     next_payment_amount = Column(Numeric(12, 2), default=0.00)
-    opened_at = Column(DateTime, default=datetime.utcnow)
+    opened_at = Column(DateTime, default=get_moscow_now)
 
 class BrokerAccount(Base):
     __tablename__ = "broker_accounts"
@@ -53,6 +56,6 @@ class BrokerAccount(Base):
     strategy_id = Column(String, ForeignKey("investment_strategies.id"), nullable=True)
     status = Column(String, default="active") # active, blocked, closed
     next_commission_date = Column(DateTime, nullable=True) # Дата списания комиссии
-    opened_at = Column(DateTime, default=datetime.utcnow)
+    opened_at = Column(DateTime, default=get_moscow_now)
     
     strategy = relationship("InvestmentStrategy", back_populates="broker_accounts")
