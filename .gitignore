@@ -216,3 +216,4 @@ venv/
 env/
 .idea/
 .vscode/
+certs/
