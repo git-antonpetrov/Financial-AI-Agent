@@ -111,12 +111,12 @@ def get_embeddings_google(texts: list[str]) -> list[list[float]]:
         
     return embeddings
 
-def extract_metadata_from_markdown(markdown_text: str, filename: str) -> dict:
+def extract_metadata_from_markdown(markdown_text: str) -> dict:
     """
-    Извлекает метаданные из начала Markdown файла.
-    Если не найдено, пытается вытащить short_name из имени файла (например, 115-fz.md).
+    Извлекает метаданные из начала Markdown файла (YAML frontmatter).
+    Возвращает словарь метаданных. Не делает фоллбэк на имя файла.
     """
-    meta = {"short_name": filename.replace(".md", "").split("/")[-1]}
+    meta = {}
     
     # Пытаемся найти YAML frontmatter
     lines = markdown_text.split('\n')
@@ -154,32 +154,50 @@ def process_task(task: dict):
         if 'response' in locals():
             response.close()
             
-    # 2. Парсинг метаданных (чтобы достать short_name)
-    metadata = extract_metadata_from_markdown(markdown_text, file_path)
-    short_name = metadata.get("short_name")
-    
-    if not short_name:
-        print("❌ Ошибка: не удалось определить short_name для документа.")
-        return
-        
-    print(f"📄 Документ распознан. short_name: '{short_name}'")
-    
     # Получаем/создаем коллекцию для конкретного агента
     collection_name = f"knowledge-{agent}"
     collection = chroma_client.get_or_create_collection(name=collection_name)
     
-    # 3. Очистка (Удаление старых векторов с таким же short_name)
-    try:
-        collection.delete(where={"short_name": short_name})
-        print(f"🗑 Удалены старые записи с short_name='{short_name}' из коллекции {collection_name}")
-    except Exception as e:
-        print(f"Предупреждение при удалении старых векторов: {e}")
-
     if action == "delete":
-        print("✅ Задача delete выполнена.")
-    
-    # 4-7. Нарезка и Векторизация (upsert)
+        # Для action=delete ожидаем файл, где каждая строка - это short_name документа для удаления
+        lines = markdown_text.split("\n")
+        deleted_count = 0
+        for line in lines:
+            target_short_name = line.strip()
+            if target_short_name:
+                try:
+                    collection.delete(where={"short_name": target_short_name})
+                    print(f"🗑 Удалены вектора с short_name='{target_short_name}' из коллекции {collection_name}")
+                    deleted_count += 1
+                except Exception as e:
+                    print(f"Предупреждение при удалении '{target_short_name}': {e}")
+        
+        print(f"✅ Задача delete выполнена. Обработано имен для удаления: {deleted_count}")
+        
     elif action == "upsert":
+        # 2. Парсинг метаданных
+        metadata = extract_metadata_from_markdown(markdown_text)
+        short_name = metadata.get("short_name")
+        
+        if not short_name:
+            print("❌ Ошибка: не удалось найти 'short_name' в метаданных (YAML frontmatter) документа.")
+            # Файл всё равно удаляем из MinIO, чтобы он там не завис навсегда
+            try:
+                minio_client.remove_object(bucket, file_path)
+            except:
+                pass
+            return
+            
+        print(f"📄 Документ распознан. short_name: '{short_name}'")
+        
+        # 3. Очистка (Удаление старых векторов с таким же short_name перед добавлением новых)
+        try:
+            collection.delete(where={"short_name": short_name})
+            print(f"🗑 Удалены старые записи с short_name='{short_name}' из коллекции {collection_name} перед upsert")
+        except Exception as e:
+            print(f"Предупреждение при удалении старых векторов: {e}")
+
+        # 4-7. Нарезка и Векторизация
         clean_text = markdown_text
         if clean_text.startswith("---"):
             parts = clean_text.split("---", 2)
