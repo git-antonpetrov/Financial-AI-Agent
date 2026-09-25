@@ -1,12 +1,11 @@
 import os
 import json
 import time
-import requests
+from minio import Minio
 # pyrefly: ignore [missing-import]
 import redis
-from minio import Minio
 import chromadb
-from chromadb.config import Settings
+import litellm
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from core.utils.console_logger import log_info, log_success, log_warning, log_error
 
@@ -76,40 +75,21 @@ else:
 def get_embeddings_google(texts: list[str]) -> list[list[float]]:
     """
     Отправляет батч текстов к Vertex AI (через наш прокси) для получения эмбеддингов.
-    Формат соответствует gemini-embedding-2 (batchEmbedContents).
+    Использует библиотеку litellm.
     """
-    if not VERTEX_BASE_URL:
-        raise ValueError("VERTEX_BASE_URL не настроен в .env")
+    # litellm ожидает префикс vertex_ai/ для моделей Vertex
+    model_name = EMBEDDING_MODEL if EMBEDDING_MODEL.startswith("vertex_ai/") else f"vertex_ai/{EMBEDDING_MODEL}"
 
-    url = f"{VERTEX_BASE_URL}/v1beta1/projects/{VERTEX_PROJECT}/locations/{VERTEX_LOCATION}/publishers/google/models/{EMBEDDING_MODEL}:batchEmbedContents"
+    response = litellm.embedding(
+        model=model_name,
+        input=texts,
+        api_base=VERTEX_BASE_URL if VERTEX_BASE_URL else None,
+        vertex_project=VERTEX_PROJECT if VERTEX_PROJECT else None,
+        vertex_location=VERTEX_LOCATION if VERTEX_LOCATION else None
+    )
     
-    # Формируем тело запроса по стандарту Vertex AI batchEmbedContents
-    requests_payload = [
-        {
-            "content": {"parts": [{"text": text}]},
-            "taskType": "RETRIEVAL_DOCUMENT",
-            "model": f"models/{EMBEDDING_MODEL}"
-        }
-        for text in texts
-    ]
-    
-    payload = {"requests": requests_payload}
-    
-    response = requests.post(url, json=payload, headers={"Content-Type": "application/json"})
-    response.raise_for_status()
-    
-    data = response.json()
-    embeddings = []
-    
-    if "embeddings" in data:
-        for emb in data["embeddings"]:
-            if "values" in emb:
-                embeddings.append(emb["values"])
-            else:
-                raise ValueError("Неверный формат ответа от Google API: отсутствует поле 'values'")
-    else:
-        raise ValueError(f"Неверный формат ответа от Google API (нет 'embeddings'): {data}")
-        
+    # LiteLLM возвращает стандартизированный ответ, аналогичный OpenAI
+    embeddings = [item["embedding"] for item in response.data]
     return embeddings
 
 def extract_metadata_from_markdown(markdown_text: str) -> dict:

@@ -38,7 +38,7 @@ services:
     environment:
       - BANK_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/bank_db
       - INVEST_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/invest_db
-      - RUBLE_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/ruble_db
+      - DIGITAL_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/digital_db
     env_file:
       - .env
 
@@ -68,16 +68,16 @@ services:
       - .env
     restart: unless-stopped
 
-  ruble-worker:
+  digital-worker:
     build:
       context: .
-      dockerfile: src/simulations/workers/ruble_eod/Dockerfile
-    container_name: ruble-worker
+      dockerfile: src/simulations/workers/digital_eod/Dockerfile
+    container_name: digital-worker
     depends_on:
       postgres-db:
         condition: service_started
     environment:
-      - RUBLE_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/ruble_db
+      - DIGITAL_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/digital_db
     env_file:
       - .env
     restart: unless-stopped
@@ -94,7 +94,7 @@ services:
     environment:
       - BANK_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/bank_db
       - INVEST_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/invest_db
-      - RUBLE_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/ruble_db
+      - DIGITAL_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/digital_db
     env_file:
       - .env
     restart: unless-stopped
@@ -131,12 +131,14 @@ services:
       - MINIO_URL=minio:9000
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      - DB_HOST=postgres-db
     env_file:
       - .env
     restart: unless-stopped
     depends_on:
       - minio
       - redis
+      - postgres-db
 
   chromadb:
     image: chromadb/chroma:0.4.24

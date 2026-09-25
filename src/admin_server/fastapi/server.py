@@ -1,19 +1,24 @@
 import os
 import io
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
+import json
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form
 from fastapi.security import OAuth2PasswordRequestForm
 # pyrefly: ignore [missing-import]
 import redis
-import json
 from minio import Minio
 from contextlib import asynccontextmanager
+from sqlalchemy.ext.asyncio import AsyncSession
+import litellm
+
 from security import verify_password, create_access_token, get_current_admin, settings
+from db.database import engine, Base, get_db
+from db import schemas, crud
+from core.utils.console_logger import log_info, log_error, log_warning, log_success
 
 VALID_AGENTS = {"main", "bank", "invest", "digital"}
 VALID_ACTIONS = {"upsert", "delete"}
 
 # --- НАСТРОЙКА MINIO ---
-# Мы подключимся к MinIO при старте приложения.
 MINIO_URL = os.getenv("MINIO_URL", "minio:9000")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "")
@@ -37,45 +42,89 @@ redis_client = redis.Redis(
     decode_responses=True
 )
 
+# --- НАСТРОЙКА LLM (через LiteLLM) ---
+VERTEX_PROJECT = os.getenv("VERTEX_PROJECT")
+VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "global")
+VERTEX_BASE_URL = os.getenv("VERTEX_BASE_URL")
+
+RAG_DATA_MODEL_NAME = os.getenv("RAG_DATA_MODEL_NAME", "vertex_ai/gemini-3.8-flash")
+RAG_DATA_REASONING_EFFORT = os.getenv("RAG_DATA_REASONING_EFFORT", "low")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Убеждаемся, что все необходимые бакеты существуют при запуске."""
+    # Инициализация бакетов MinIO
     if MINIO_ACCESS_KEY and MINIO_SECRET_KEY:
         for agent in VALID_AGENTS:
             bucket_name = f"knowledge-{agent}"
             if not minio_client.bucket_exists(bucket_name):
                 minio_client.make_bucket(bucket_name)
+                log_info("MinIO", f"Created bucket: {bucket_name}")
+    
+    # Инициализация таблиц БД
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        log_info("Database", "Database tables created/verified")
+        
     yield
 
 app = FastAPI(title="Financial MAS - Admin Server", version="1.0.0", lifespan=lifespan)
 
-# Удален CORS, так как API используется только клиентом, а не браузерами
-
-# --- ROUTES ---
+# --- ROUTES: AUTH ---
 @app.post("/login")
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    # У нас только один пользователь-администратор
     if form_data.username != "admin":
+        log_warning("Auth", f"Failed login attempt for user: {form_data.username}")
         raise HTTPException(status_code=400, detail="Incorrect username or password")
     
     if not settings.ADMIN_PASSWORD_HASH:
+        log_error("Auth", "Server not configured: ADMIN_PASSWORD_HASH missing")
         raise HTTPException(status_code=500, detail="Server not configured: ADMIN_PASSWORD_HASH missing")
 
     if not verify_password(form_data.password, settings.ADMIN_PASSWORD_HASH):
+        log_warning("Auth", "Failed login attempt (bad password)")
         raise HTTPException(status_code=400, detail="Incorrect username or password")
 
     access_token = create_access_token(data={"sub": "admin"})
+    log_success("Auth", "Successful login")
     return {"access_token": access_token, "token_type": "bearer"}
 
+# --- ROUTES: DOCUMENTS CHECK ---
+@app.post("/api/documents/check/md5", response_model=schemas.CheckHashResponse)
+async def check_md5(
+    req: schemas.CheckHashRequest,
+    db: AsyncSession = Depends(get_db),
+    current_admin: str = Depends(get_current_admin)
+):
+    log_info("Check MD5", f"Checking hash for file: {req.filename}")
+    status_str = await crud.check_md5(db, req.file_hash, req.filename, req.agent_name)
+    return schemas.CheckHashResponse(status=status_str)
+
+@app.post("/api/documents/check/date", response_model=schemas.CheckDateResponse)
+async def check_date(
+    req: schemas.CheckDateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_admin: str = Depends(get_current_admin)
+):
+    log_info("Check Date", f"Checking date for system_name: {req.system_name}")
+    status_str = await crud.check_date_version(
+        db, req.system_name, req.short_name, req.file_hash, req.filename, req.agent_name
+    )
+    return schemas.CheckDateResponse(status=status_str)
+
+# --- ROUTES: UPLOAD ---
 @app.post("/api/upload/{agent_name}/{action}")
 async def upload_document(
     agent_name: str,
     action: str,
+    file_hash: str = Form(...),
+    system_name: str = Form(None),
+    short_name: str = Form(None),
     file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
     current_admin: str = Depends(get_current_admin)
 ):
     """
-    Загружает markdown документ в корзину (bucket) соответствующего агента.
+    Загружает markdown документ и ставит статус completed.
     """
     if agent_name not in VALID_AGENTS:
         raise HTTPException(status_code=400, detail=f"Invalid agent name. Must be one of {VALID_AGENTS}")
@@ -90,11 +139,8 @@ async def upload_document(
     object_name = f"{action}/{file.filename}"
 
     try:
-        # Чтение содержимого файла
         content = await file.read()
         content_stream = io.BytesIO(content)
-        
-        # Загрузка в MinIO
         minio_client.put_object(
             bucket_name=bucket_name,
             object_name=object_name,
@@ -102,11 +148,13 @@ async def upload_document(
             length=len(content),
             content_type="text/markdown"
         )
+        log_success("MinIO", f"Uploaded {file.filename} to {bucket_name}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ошибка загрузки в хранилище (MinIO): {str(e)}")
+        log_error("MinIO", f"Failed to upload {file.filename}: {str(e)}")
+        await crud.create_document(db, file_hash, file.filename, agent_name, "error", system_name, short_name, str(e))
+        raise HTTPException(status_code=500, detail=f"MinIO error: {str(e)}")
         
     try:
-        # Отправляем сообщение в очередь Redis для Воркера
         message = {
             "agent": agent_name,
             "action": action,
@@ -114,8 +162,13 @@ async def upload_document(
             "bucket": bucket_name
         }
         redis_client.lpush("document_tasks", json.dumps(message))
+        log_success("Redis", f"Task queued for {file.filename}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Файл загружен в MinIO, но ошибка отправки задачи в Redis: {str(e)}")
+        log_error("Redis", f"Failed to queue task for {file.filename}: {str(e)}")
+        await crud.create_document(db, file_hash, file.filename, agent_name, "error", system_name, short_name, str(e))
+        raise HTTPException(status_code=500, detail=f"Redis error: {str(e)}")
+
+    await crud.create_document(db, file_hash, file.filename, agent_name, "completed", system_name, short_name, "Успешно отправлено воркеру")
 
     return {
         "status": "success", 
@@ -123,3 +176,102 @@ async def upload_document(
         "agent": agent_name,
         "action": action
     }
+
+# --- ROUTES: LLM PROXY ---
+@app.post("/api/llm/analyze", response_model=schemas.LLMAnalyzeResponse)
+async def llm_analyze(
+    req: schemas.LLMAnalyzeRequest,
+    current_admin: str = Depends(get_current_admin)
+):
+    system_prompt = """
+    ТЕБЕ НУЖНО ПРОАНАЛИЗИРОВАТЬ ТЕКСТ ДОКУМЕНТА И ИЗВЛЕЧЬ ДВА ПАРАМЕТРА: system_name И short_name.
+    ИНСТРУКЦИЯ СТРОГАЯ, КАК ДЛЯ РЕБЕНКА (ОБЪЯСНЯЮ ПО ШАГАМ, ВЫПОЛНЯЙ В ТОЧНОСТИ):
+    
+    1. Что такое system_name:
+       - Это уникальное системное имя документа. 
+       - Оно должно содержать ТОЛЬКО латинские буквы (a-z), цифры (0-9) и символ подчеркивания (_). 
+       - НИКАКИХ ПРОБЕЛОВ! НИКАКИХ СЛЕШЕЙ (/) ИЛИ ТОЧЕК (.)! НИКАКИХ РУССКИХ БУКВ!
+       - Если видишь русские буквы - делай строгий транслит на английский.
+       - Формат всегда такой: [тип_документа]_[номер_документа]_[дата_без_разделителей_ddmmyyyy]
+       - Примеры как НАДО делать:
+         - Если это "Федеральный Закон №115 от 01.01.2024", то system_name = "fz_115_01012024"
+         - Если это "Письмо Банка России №123-И от 15.08.2023", то system_name = "pismo_br_123_i_15082023"
+         - Если это "Приказ №1 от 05.02.2025", то system_name = "prikaz_1_05022025"
+       
+    2. Что такое short_name:
+       - Это короткое имя документа (БЕЗ ДАТЫ на конце).
+       - То есть ты берешь system_name и просто отрезаешь от него дату.
+       - Примеры как НАДО делать:
+         - Для "fz_115_01012024" -> short_name = "fz_115"
+         - Для "pismo_br_123_i_15082023" -> short_name = "pismo_br_123_i"
+    """
+    
+    prompt = system_prompt + "\n\nТЕКСТ ДЛЯ АНАЛИЗА:\n" + req.text[:15000]
+    
+    try:
+        log_info("LLM", "Starting analyze request")
+        response = await litellm.acompletion(
+            model=RAG_DATA_MODEL_NAME,
+            messages=[{"role": "user", "content": prompt}],
+            response_format=schemas.LLMAnalyzeResponse,
+            reasoning_effort=RAG_DATA_REASONING_EFFORT,
+            temperature=0.0,
+            api_base=VERTEX_BASE_URL,
+            vertex_project=VERTEX_PROJECT,
+            vertex_location=VERTEX_LOCATION
+        )
+        
+        result_text = response.choices[0].message.content
+        clean_json = result_text.replace("```json", "").replace("```", "").strip()
+        data = json.loads(clean_json)
+        return schemas.LLMAnalyzeResponse(**data)
+        
+    except Exception as e:
+        log_error("LLM", f"Error in analyze: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"LLM Error: {str(e)}")
+
+@app.post("/api/llm/find_repealed", response_model=schemas.LLMRepealedResponse)
+async def llm_find_repealed(
+    req: schemas.LLMRepealedRequest,
+    current_admin: str = Depends(get_current_admin)
+):
+    system_prompt = """
+    В тексте могут содержаться указания на отмену (утрату силы) старых нормативных актов.
+    Твоя задача — найти все документы, которые ОТМЕНЯЮТСЯ (признаются утратившими силу) данным документом.
+    Верни их в виде массива short_name (строгий транслит, только буквы, цифры, подчеркивания, без дат — точно так же, как мы формировали short_name ранее).
+    
+    ПРАВИЛА ИЗВЛЕЧЕНИЯ:
+    1. Ищи фразы типа "Признать утратившим силу...", "Отменить..." и т.д.
+    2. Извлекай тип документа и номер, превращай в транслит и соединяй через подчеркивание.
+    3. Примеры:
+       - Текст: "Признать утратившим силу Федеральный закон от 10.07.2002 № 86-ФЗ" -> short_name = "fz_86"
+       - Текст: "Отменить Указание Банка России N 1234-У" -> short_name = "ukazanie_br_1234_u"
+       - Текст: "Приказ Минфина России №10" -> short_name = "prikaz_minfina_10"
+    4. Даты не включай в short_name! 
+    5. Если ничего не отменяется, верни пустой массив [].
+    """
+    
+    text_to_analyze = "\n\n---\n\n".join(req.snippets)
+    prompt = system_prompt + "\n\nФРАГМЕНТЫ ДЛЯ АНАЛИЗА:\n" + text_to_analyze
+    
+    try:
+        log_info("LLM", "Starting find_repealed request")
+        response = await litellm.acompletion(
+            model=RAG_DATA_MODEL_NAME,
+            messages=[{"role": "user", "content": prompt}],
+            response_format=schemas.LLMRepealedResponse,
+            reasoning_effort=RAG_DATA_REASONING_EFFORT,
+            temperature=0.0,
+            api_base=VERTEX_BASE_URL,
+            vertex_project=VERTEX_PROJECT,
+            vertex_location=VERTEX_LOCATION
+        )
+        
+        result_text = response.choices[0].message.content
+        clean_json = result_text.replace("```json", "").replace("```", "").strip()
+        data = json.loads(clean_json)
+        return schemas.LLMRepealedResponse(**data)
+        
+    except Exception as e:
+        log_error("LLM", f"Error in find_repealed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"LLM Error: {str(e)}")
