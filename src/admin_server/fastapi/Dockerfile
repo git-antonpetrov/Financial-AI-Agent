@@ -8,11 +8,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Установка Python зависимостей
-COPY requirements.txt .
+COPY fastapi/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Копирование исходного кода
-COPY . .
+COPY fastapi/ .
+COPY core/ core/
 
 # Запуск сервера
 CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]

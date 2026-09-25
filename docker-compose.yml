@@ -124,8 +124,8 @@ services:
 
   admin-server:
     build:
-      context: ./src/admin_server/fastapi
-      dockerfile: Dockerfile
+      context: ./src/admin_server
+      dockerfile: fastapi/Dockerfile
     container_name: admin-server
     environment:
       - MINIO_URL=minio:9000
@@ -149,8 +149,8 @@ services:
     
   vector-worker:
     build:
-      context: ./src/admin_server/vectors
-      dockerfile: Dockerfile
+      context: ./src/admin_server
+      dockerfile: vectors/Dockerfile
     container_name: vector-worker
     environment:
       - REDIS_HOST=redis

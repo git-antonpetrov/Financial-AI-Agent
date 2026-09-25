@@ -8,6 +8,7 @@ from minio import Minio
 import chromadb
 from chromadb.config import Settings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from core.utils.console_logger import log_info, log_success, log_warning, log_error
 
 # --- Настройки окружения ---
 # Redis
@@ -37,7 +38,7 @@ CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
 
 # --- Инициализация клиентов ---
-print("Инициализация клиентов...")
+log_info("Worker Init", "Инициализация клиентов...")
 
 redis_client = redis.Redis(
     host=REDIS_HOST,
@@ -60,16 +61,16 @@ chroma_client = chromadb.HttpClient(
 )
 
 # Ожидание готовности ChromaDB
-print("⏳ Ожидание ChromaDB...")
+log_info("Worker Init", "Ожидание ChromaDB...")
 for attempt in range(30):
     try:
         chroma_client.heartbeat()
-        print("✅ ChromaDB доступна.")
+        log_success("Worker Init", "ChromaDB доступна.")
         break
     except Exception:
         time.sleep(2)
 else:
-    print("❌ ChromaDB не отвечает после 30 попыток. Завершение.")
+    log_error("Worker Init", "ChromaDB не отвечает после 30 попыток. Завершение.")
     exit(1)
 
 def get_embeddings_google(texts: list[str]) -> list[list[float]]:
@@ -141,14 +142,14 @@ def process_task(task: dict):
     file_path = task.get("file_path")
     bucket = task.get("bucket")
     
-    print(f"\n--- Новая задача: [{action}] Агент: {agent}, Файл: {file_path}")
+    log_info("Task Processing", f"Новая задача: [{action}] Агент: {agent}, Файл: {file_path}")
     
     # 1. Скачиваем файл из MinIO
     try:
         response = minio_client.get_object(bucket, file_path)
         markdown_text = response.read().decode('utf-8')
     except Exception as e:
-        print(f"❌ Ошибка скачивания файла {file_path} из MinIO: {e}")
+        log_error("MinIO", f"Ошибка скачивания файла {file_path} из MinIO: {e}")
         return
     finally:
         if 'response' in locals():
@@ -167,12 +168,12 @@ def process_task(task: dict):
             if target_short_name:
                 try:
                     collection.delete(where={"short_name": target_short_name})
-                    print(f"🗑 Удалены вектора с short_name='{target_short_name}' из коллекции {collection_name}")
+                    log_info("ChromaDB", f"Удалены вектора с short_name='{target_short_name}' из коллекции {collection_name}")
                     deleted_count += 1
                 except Exception as e:
-                    print(f"Предупреждение при удалении '{target_short_name}': {e}")
+                    log_warning("ChromaDB", f"Предупреждение при удалении '{target_short_name}': {e}")
         
-        print(f"✅ Задача delete выполнена. Обработано имен для удаления: {deleted_count}")
+        log_success("Task Processing", f"Задача delete выполнена. Обработано имен для удаления: {deleted_count}")
         
     elif action == "upsert":
         # 2. Парсинг метаданных
@@ -180,7 +181,7 @@ def process_task(task: dict):
         short_name = metadata.get("short_name")
         
         if not short_name:
-            print("❌ Ошибка: не удалось найти 'short_name' в метаданных (YAML frontmatter) документа.")
+            log_error("Metadata", "Не удалось найти 'short_name' в метаданных (YAML frontmatter) документа.")
             # Файл всё равно удаляем из MinIO, чтобы он там не завис навсегда
             try:
                 minio_client.remove_object(bucket, file_path)
@@ -188,14 +189,14 @@ def process_task(task: dict):
                 pass
             return
             
-        print(f"📄 Документ распознан. short_name: '{short_name}'")
+        log_info("Metadata", f"Документ распознан. short_name: '{short_name}'")
         
         # 3. Очистка (Удаление старых векторов с таким же short_name перед добавлением новых)
         try:
             collection.delete(where={"short_name": short_name})
-            print(f"🗑 Удалены старые записи с short_name='{short_name}' из коллекции {collection_name} перед upsert")
+            log_info("ChromaDB", f"Удалены старые записи с short_name='{short_name}' из коллекции {collection_name} перед upsert")
         except Exception as e:
-            print(f"Предупреждение при удалении старых векторов: {e}")
+            log_warning("ChromaDB", f"Предупреждение при удалении старых векторов: {e}")
 
         # 4-7. Нарезка и Векторизация
         clean_text = markdown_text
@@ -207,17 +208,17 @@ def process_task(task: dict):
         # Режем текст на чанки
         splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
         chunks = splitter.split_text(clean_text)
-        print(f"🔪 Текст разбит на {len(chunks)} чанков.")
+        log_info("Text Splitter", f"Текст разбит на {len(chunks)} чанков.")
         
         # Батчинг (обход лимитов)
         for i in range(0, len(chunks), CHUNK_BATCH_SIZE):
             batch_chunks = chunks[i:i + CHUNK_BATCH_SIZE]
-            print(f"🔄 Обработка батча {i//CHUNK_BATCH_SIZE + 1} (чанки {i+1} - {i+len(batch_chunks)})...")
+            log_info("Batching", f"Обработка батча {i//CHUNK_BATCH_SIZE + 1} (чанки {i+1} - {i+len(batch_chunks)})...")
             
             try:
                 embeddings = get_embeddings_google(batch_chunks)
             except Exception as e:
-                print(f"❌ Ошибка получения эмбеддингов от Vertex AI: {e}")
+                log_error("Google API", f"Ошибка получения эмбеддингов от Vertex AI: {e}")
                 return
                 
             ids = [f"{short_name}_chunk_{i+j}" for j in range(len(batch_chunks))]
@@ -231,20 +232,20 @@ def process_task(task: dict):
             )
             
             if i + CHUNK_BATCH_SIZE < len(chunks):
-                print(f"⏳ Ждем {CHUNK_SLEEP_SECONDS} сек. для сброса лимитов Google...")
+                log_info("Rate Limit", f"Ждем {CHUNK_SLEEP_SECONDS} сек. для сброса лимитов Google...")
                 time.sleep(CHUNK_SLEEP_SECONDS)
                 
-        print(f"✅ Успешно записано {len(chunks)} векторов для '{short_name}' в {collection_name}")
+        log_success("ChromaDB", f"Успешно записано {len(chunks)} векторов для '{short_name}' в {collection_name}")
         
     # 8. Уборка оригинального файла из MinIO (выполняется и для upsert, и для delete)
     try:
         minio_client.remove_object(bucket, file_path)
-        print(f"🧹 Оригинальный файл {file_path} удален из MinIO.")
+        log_info("MinIO", f"Оригинальный файл {file_path} удален из MinIO.")
     except Exception as e:
-        print(f"Предупреждение при удалении из MinIO: {e}")
+        log_warning("MinIO", f"Предупреждение при удалении из MinIO: {e}")
 
 def main():
-    print("🚀 Воркер запущен и слушает Redis (document_tasks)...")
+    log_success("Worker Start", "Воркер запущен и слушает Redis (document_tasks)...")
     while True:
         try:
             # Блокирующее чтение из очереди Redis (brpop = FIFO)
@@ -254,7 +255,7 @@ def main():
                 task = json.loads(message_json)
                 process_task(task)
         except Exception as e:
-            print(f"❌ Ошибка в главном цикле воркера: {e}")
+            log_error("Worker Error", f"Ошибка в главном цикле воркера: {e}")
             time.sleep(5)
 
 if __name__ == "__main__":
