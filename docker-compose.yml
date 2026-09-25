@@ -127,6 +127,8 @@ services:
       context: ./src/admin_server
       dockerfile: fastapi/Dockerfile
     container_name: admin-server
+    ports:
+      - "127.0.0.1:8001:8000"
     environment:
       - MINIO_URL=minio:9000
       - REDIS_HOST=redis
@@ -160,6 +162,10 @@ services:
       - MINIO_URL=minio:9000
       - CHROMA_HOST=chromadb
       - CHROMA_PORT=8000
+      - DB_HOST=postgres-db
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
     env_file:
       - .env
     restart: unless-stopped

@@ -33,10 +33,6 @@ class LLMRepealedRequest(BaseModel):
 class LLMRepealedResponse(BaseModel):
     repealed_docs: List[str]
 
-class AgentRequestCreate(BaseModel):
-    agent_name: str
-    document_name: str
-    justification: str
 
 class AgentRequestResponse(BaseModel):
     id: int
@@ -48,3 +44,14 @@ class AgentRequestResponse(BaseModel):
     
     class Config:
         from_attributes = True
+
+class AgentRegisterRequest(BaseModel):
+    agent_name: str
+    public_key: str
+
+class AgentRegisterResponse(BaseModel):
+    status: str
+    message: str
+
+class AgentRequestJWT(BaseModel):
+    token: str

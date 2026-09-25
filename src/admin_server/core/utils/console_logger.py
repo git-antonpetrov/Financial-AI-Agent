@@ -16,8 +16,7 @@ def _log(level_color: str, level_name: str, process_name: str, message: str) -> 
     """
     reset = "\033[0m"
     process_color = "\033[94m" # Синий цвет для процесса
-    
-    print(f"{level_color}[{level_name}]{reset}{process_color}[{process_name}]{reset}: {message}")
+    print(f"{level_color}[{level_name}]{reset}{process_color}[{process_name}]{reset}: {message}", flush=True)
 
 def log_info(process_name: str, message: str) -> None:
     """Выводит информационное сообщение (голубого цвета)."""

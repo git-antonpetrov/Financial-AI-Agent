@@ -24,3 +24,11 @@ class AgentRequest(Base):
     justification = Column(Text, nullable=False)
     status = Column(String, default="Ожидает", nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class Agent(Base):
+    __tablename__ = "agents"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True, index=True, nullable=False)
+    public_key = Column(String, nullable=False)
+    registered_at = Column(DateTime(timezone=True), server_default=func.now())

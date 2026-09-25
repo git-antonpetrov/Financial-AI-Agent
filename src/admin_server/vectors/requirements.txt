@@ -5,3 +5,4 @@ langchain-text-splitters==0.0.1
 pydantic==2.6.4
 colorama==0.4.6
 litellm==1.83.7
+psycopg2-binary==2.9.9

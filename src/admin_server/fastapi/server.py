@@ -1,7 +1,7 @@
 import os
 import io
 import json
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form, Header
 from fastapi.security import OAuth2PasswordRequestForm
 # pyrefly: ignore [missing-import]
 import redis
@@ -9,8 +9,9 @@ from minio import Minio
 from contextlib import asynccontextmanager
 from sqlalchemy.ext.asyncio import AsyncSession
 import litellm
+from jose import jwt
 
-from security import verify_password, create_access_token, get_current_admin, settings
+from security import verify_password, create_access_token, get_current_admin, verify_agent_jwt, settings
 from db.database import engine, Base, get_db
 from db import schemas, crud
 from core.utils.console_logger import log_info, log_error, log_warning, log_success
@@ -159,7 +160,11 @@ async def upload_document(
             "agent": agent_name,
             "action": action,
             "file_path": object_name,
-            "bucket": bucket_name
+            "bucket": bucket_name,
+            "file_hash": file_hash,
+            "system_name": system_name,
+            "short_name": short_name,
+            "filename": file.filename
         }
         redis_client.lpush("document_tasks", json.dumps(message))
         log_success("Redis", f"Task queued for {file.filename}")
@@ -168,7 +173,7 @@ async def upload_document(
         await crud.create_document(db, file_hash, file.filename, agent_name, "error", system_name, short_name, str(e))
         raise HTTPException(status_code=500, detail=f"Redis error: {str(e)}")
 
-    await crud.create_document(db, file_hash, file.filename, agent_name, "completed", system_name, short_name, "Успешно отправлено воркеру")
+    await crud.create_document(db, file_hash, file.filename, agent_name, "processing", system_name, short_name, "Задача в очереди у воркера")
 
     return {
         "status": "success", 
@@ -176,6 +181,80 @@ async def upload_document(
         "agent": agent_name,
         "action": action
     }
+
+# --- ROUTES: AGENT REQUESTS ---
+@app.get("/api/agent_requests", response_model=list[schemas.AgentRequestResponse])
+async def read_agent_requests(
+    skip: int = 0,
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db),
+    current_admin: str = Depends(get_current_admin)
+):
+    """
+    Получение списка заявок от агентов. Поддерживает пагинацию через skip и limit.
+    Только для админа.
+    """
+    requests = await crud.get_agent_requests(db, skip=skip, limit=limit)
+    return requests
+
+@app.post("/api/agents/register", response_model=schemas.AgentRegisterResponse)
+async def register_agent(
+    req: schemas.AgentRegisterRequest,
+    x_bootstrap_token: str = Header(...),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Регистрация публичного ключа агента. Защищено Bootstrap токеном.
+    """
+    expected_token = settings.get_bootstrap_token(req.agent_name)
+    if not expected_token or x_bootstrap_token != expected_token:
+        log_warning("Agent Registration", f"Invalid bootstrap token for {req.agent_name}")
+        raise HTTPException(status_code=403, detail="Invalid bootstrap token")
+    
+    try:
+        await crud.register_agent(db, req.agent_name, req.public_key)
+    except ValueError as e:
+        log_warning("Agent Registration", str(e))
+        raise HTTPException(status_code=409, detail=str(e))
+        
+    log_success("Agent Registration", f"Agent {req.agent_name} registered successfully with public key")
+    return schemas.AgentRegisterResponse(status="success", message="Public key registered")
+
+@app.post("/api/agent_requests", response_model=schemas.AgentRequestResponse)
+async def create_agent_request(
+    req: schemas.AgentRequestJWT,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Создание заявки на документ от агента.
+    Эндпоинт проверяет JWT подпись (RS256) используя зарегистрированный публичный ключ агента.
+    """
+    try:
+        # Сначала декодируем без проверки подписи, чтобы узнать, от какого агента токен
+        unverified_payload = jwt.get_unverified_claims(req.token)
+        agent_name = unverified_payload.get("agent_name")
+        document_name = unverified_payload.get("document_name")
+        justification = unverified_payload.get("justification")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JWT format")
+
+    if not agent_name or not document_name or not justification:
+        raise HTTPException(status_code=400, detail="Missing required claims in JWT")
+
+    # Достаем публичный ключ агента из базы
+    agent = await crud.get_agent(db, agent_name)
+    if not agent:
+        log_warning("Agent Request", f"Agent {agent_name} is not registered")
+        raise HTTPException(status_code=404, detail="Agent not registered")
+
+    # Проверяем подпись с помощью публичного ключа агента
+    verified_payload = verify_agent_jwt(req.token, agent.public_key)
+    if not verified_payload:
+        log_warning("Agent Request", f"Invalid RSA signature from agent {agent_name}")
+        raise HTTPException(status_code=403, detail="Invalid RSA signature")
+
+    log_info("Agent Request", f"Verified request from {agent_name} for {document_name}")
+    return await crud.create_agent_request(db, agent_name, document_name, justification)
 
 # --- ROUTES: LLM PROXY ---
 @app.post("/api/llm/analyze", response_model=schemas.LLMAnalyzeResponse)

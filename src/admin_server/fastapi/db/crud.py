@@ -48,6 +48,7 @@ async def check_md5(db: AsyncSession, file_hash: str, filename: str, agent_name:
     """
     query = select(models.Document).where(
         models.Document.file_hash == file_hash,
+        models.Document.agent_name == agent_name,
         models.Document.status == 'completed'
     )
     result = await db.execute(query)
@@ -71,6 +72,7 @@ async def check_date_version(
     """
     query = select(models.Document).where(
         models.Document.short_name == short_name,
+        models.Document.agent_name == agent_name,
         models.Document.status == 'completed'
     )
     result = await db.execute(query)
@@ -94,8 +96,8 @@ async def check_date_version(
             
     return "ok"
 
-async def get_agent_requests(db: AsyncSession) -> list[models.AgentRequest]:
-    result = await db.execute(select(models.AgentRequest).order_by(models.AgentRequest.created_at.desc()))
+async def get_agent_requests(db: AsyncSession, skip: int = 0, limit: int = 50) -> list[models.AgentRequest]:
+    result = await db.execute(select(models.AgentRequest).order_by(models.AgentRequest.created_at.desc()).offset(skip).limit(limit))
     return result.scalars().all()
 
 async def create_agent_request(db: AsyncSession, agent_name: str, document_name: str, justification: str) -> models.AgentRequest:
@@ -109,3 +111,21 @@ async def create_agent_request(db: AsyncSession, agent_name: str, document_name:
     await db.commit()
     await db.refresh(db_req)
     return db_req
+
+async def get_agent(db: AsyncSession, agent_name: str) -> models.Agent:
+    result = await db.execute(select(models.Agent).where(models.Agent.name == agent_name))
+    return result.scalars().first()
+
+async def register_agent(db: AsyncSession, agent_name: str, public_key: str) -> models.Agent:
+    if not public_key.strip().startswith("-----BEGIN"):
+        raise ValueError("Public key must be in PEM format (starting with -----BEGIN...)")
+
+    agent = await get_agent(db, agent_name)
+    if agent:
+        raise ValueError("Agent already registered. Key rotation is not supported in MVP.")
+    else:
+        agent = models.Agent(name=agent_name, public_key=public_key)
+        db.add(agent)
+    await db.commit()
+    await db.refresh(agent)
+    return agent
