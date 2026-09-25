@@ -2,18 +2,21 @@ import os
 import io
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
 from fastapi.security import OAuth2PasswordRequestForm
+# pyrefly: ignore [missing-import]
+import redis
+import json
 from minio import Minio
+from contextlib import asynccontextmanager
 from security import verify_password, create_access_token, get_current_admin, settings
 
-app = FastAPI(title="Financial MAS - Admin Server", version="1.0.0", lifespan=lifespan)
-
-# Удален CORS, так как API используется только клиентом, а не браузерами
+VALID_AGENTS = {"main", "bank", "invest", "digital"}
+VALID_ACTIONS = {"upsert", "delete"}
 
 # --- НАСТРОЙКА MINIO ---
 # Мы подключимся к MinIO при старте приложения.
 MINIO_URL = os.getenv("MINIO_URL", "minio:9000")
-MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
-MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "")
+MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "")
 
 minio_client = Minio(
     MINIO_URL,
@@ -22,19 +25,31 @@ minio_client = Minio(
     secure=False
 )
 
-VALID_AGENTS = {"main", "bank", "invest", "digital"}
-VALID_ACTIONS = {"upsert", "delete"}
+# --- НАСТРОЙКА REDIS ---
+REDIS_HOST = os.getenv("REDIS_HOST", "redis")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 
-from contextlib import asynccontextmanager
+redis_client = redis.Redis(
+    host=REDIS_HOST,
+    port=REDIS_PORT,
+    password=REDIS_PASSWORD,
+    decode_responses=True
+)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Убеждаемся, что все необходимые бакеты существуют при запуске."""
-    for agent in VALID_AGENTS:
-        bucket_name = f"knowledge-{agent}"
-        if not minio_client.bucket_exists(bucket_name):
-            minio_client.make_bucket(bucket_name)
+    if MINIO_ACCESS_KEY and MINIO_SECRET_KEY:
+        for agent in VALID_AGENTS:
+            bucket_name = f"knowledge-{agent}"
+            if not minio_client.bucket_exists(bucket_name):
+                minio_client.make_bucket(bucket_name)
     yield
+
+app = FastAPI(title="Financial MAS - Admin Server", version="1.0.0", lifespan=lifespan)
+
+# Удален CORS, так как API используется только клиентом, а не браузерами
 
 # --- ROUTES ---
 @app.post("/login")
@@ -87,15 +102,24 @@ async def upload_document(
             length=len(content),
             content_type="text/markdown"
         )
-        
-        # TODO: Добавить логику публикации сообщения в Redis для Воркера,
-        # чтобы он обработал файл из MinIO и загрузил в ChromaDB.
-
-        return {
-            "status": "success", 
-            "message": f"File {file.filename} uploaded to {bucket_name}/{object_name}",
-            "agent": agent_name,
-            "action": action
-        }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to upload to storage: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Ошибка загрузки в хранилище (MinIO): {str(e)}")
+        
+    try:
+        # Отправляем сообщение в очередь Redis для Воркера
+        message = {
+            "agent": agent_name,
+            "action": action,
+            "file_path": object_name,
+            "bucket": bucket_name
+        }
+        redis_client.lpush("document_tasks", json.dumps(message))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Файл загружен в MinIO, но ошибка отправки задачи в Redis: {str(e)}")
+
+    return {
+        "status": "success", 
+        "message": f"File {file.filename} uploaded to {bucket_name}/{object_name}",
+        "agent": agent_name,
+        "action": action
+    }
