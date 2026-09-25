@@ -100,3 +100,6 @@ python-multipart==0.0.9
 bcrypt==4.1.2
 minio==7.2.4
 redis==5.0.3
+chromadb==0.4.24
+langchain-text-splitters==0.0.1
+requests==2.31.0

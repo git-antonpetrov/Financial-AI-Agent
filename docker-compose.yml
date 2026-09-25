@@ -138,6 +138,34 @@ services:
       - minio
       - redis
 
+  chromadb:
+    image: chromadb/chroma:0.4.24
+    container_name: chromadb-server
+    ports:
+      - "127.0.0.1:8100:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    restart: unless-stopped
+    
+  vector-worker:
+    build:
+      context: ./src/admin_server/vectors
+      dockerfile: Dockerfile
+    container_name: vector-worker
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - MINIO_URL=minio:9000
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+    env_file:
+      - .env
+    restart: unless-stopped
+    depends_on:
+      - redis
+      - minio
+      - chromadb
+
   caddy:
     image: caddy:2-alpine
     container_name: caddy-server
@@ -159,3 +187,4 @@ volumes:
   caddy_config:
   minio_data:
   redis_data:
+  chroma_data:
