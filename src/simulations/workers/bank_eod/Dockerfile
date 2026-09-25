@@ -10,7 +10,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Копируем исходный код
 # Мы копируем папку src целиком, так как воркеру нужны модели БД из src/simulations/db/bank
-COPY src/ /app/src/
+COPY src/simulations /app/src/simulations
 
 # Добавляем корневую директорию в PYTHONPATH
 ENV PYTHONPATH=/app

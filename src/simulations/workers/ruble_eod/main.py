@@ -10,7 +10,7 @@ load_dotenv()
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from src.simulations.workers.ruble_eod.tasks import run_ruble_eod
-from src.core.utils.console_logger import log_info
+from src.simulations.core.utils.console_logger import log_info
 
 async def main():
     log_info("Ruble EOD Worker", "Инициализация воркера смарт-контрактов...")

@@ -8,7 +8,7 @@ from decimal import Decimal
 from src.simulations.db.invest.db.client import get_async_session_maker
 AsyncSessionLocal = get_async_session_maker()
 from src.simulations.db.invest.db.models import SavingsAccount, Deposit, BrokerAccount, InvestmentStrategy
-from src.core.utils.console_logger import log_info, log_error
+from src.simulations.core.utils.console_logger import log_info, log_error
 
 async def process_savings_accounts(session, current_date):
     """

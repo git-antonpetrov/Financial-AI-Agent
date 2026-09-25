@@ -9,7 +9,7 @@ COPY src/simulations/workers/invest_eod/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Копируем исходный код
-COPY src/ /app/src/
+COPY src/simulations /app/src/simulations
 
 # Добавляем корневую директорию в PYTHONPATH
 ENV PYTHONPATH=/app

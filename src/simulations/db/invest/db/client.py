@@ -4,7 +4,7 @@ from functools import lru_cache
 
 # Импортируем Base, чтобы при init_db все модели были привязаны к нему
 from src.simulations.db.invest.db.database import Base
-from src.core.utils.console_logger import log_info, log_error, log_warning
+from src.simulations.core.utils.console_logger import log_info, log_error, log_warning
 
 @lru_cache()
 def get_async_engine():

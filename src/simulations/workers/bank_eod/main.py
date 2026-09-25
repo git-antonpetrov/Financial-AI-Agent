@@ -10,7 +10,7 @@ load_dotenv()
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from src.simulations.workers.bank_eod.tasks import run_bank_eod
-from src.core.utils.console_logger import log_info
+from src.simulations.core.utils.console_logger import log_info
 
 async def main():
     log_info("Bank EOD Worker", "Инициализация воркера...")

@@ -9,7 +9,7 @@ import uvicorn
 from fastapi import FastAPI
 # pyrefly: ignore [missing-import]
 from fastapi.middleware.cors import CORSMiddleware
-from src.core.utils.console_logger import log_info
+from src.simulations.core.utils.console_logger import log_info
 
 # Здесь будут импорты роутеров
 from src.simulations.api.routers.bank import router as bank_router

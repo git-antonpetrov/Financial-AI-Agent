@@ -7,7 +7,7 @@ from sqlalchemy.orm import selectinload
 from src.simulations.db.bank.db.client import get_async_session_maker
 AsyncSessionLocal = get_async_session_maker()
 from src.simulations.db.bank.db.models import Account, Transaction, AutoPayment
-from src.core.utils.console_logger import log_info, log_error
+from src.simulations.core.utils.console_logger import log_info, log_error
 
 async def process_auto_payments(session, current_date):
     """

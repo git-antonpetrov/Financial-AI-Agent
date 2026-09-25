@@ -8,7 +8,7 @@ from src.simulations.db.digital_ruble.db.client import get_async_session_maker a
 from src.simulations.db.bank.db.client import get_async_session_maker as get_bank_session
 from src.simulations.db.digital_ruble.db.models import Wallet, RubleTransaction, SmartContract
 from src.simulations.db.bank.db.models import Account, Transaction
-from src.core.utils.console_logger import log_info, log_error, log_success
+from src.simulations.core.utils.console_logger import log_info, log_error, log_success
 from src.simulations.api.core.utils import to_dict, to_dict_list
 
 router = APIRouter()

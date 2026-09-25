@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from src.simulations.db.bank.db.client import get_async_session_maker
 from src.simulations.db.bank.db.models import Account, Card, Transaction, Tariff, AutoPayment
-from src.core.utils.console_logger import log_info, log_error, log_success
+from src.simulations.core.utils.console_logger import log_info, log_error, log_success
 from src.simulations.api.core.utils import to_dict, to_dict_list
 
 router = APIRouter()

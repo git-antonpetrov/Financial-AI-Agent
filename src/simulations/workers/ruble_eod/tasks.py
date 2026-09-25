@@ -6,7 +6,7 @@ AsyncSessionLocal = get_async_session_maker()
 from src.simulations.db.digital_ruble.db.models import SmartContract, Wallet, RubleTransaction
 from src.simulations.smart_contracts.dsl.context import ContractContext
 from src.simulations.smart_contracts.sandbox.executor import SmartContractSandbox
-from src.core.utils.console_logger import log_info, log_error
+from src.simulations.core.utils.console_logger import log_info, log_error
 
 async def process_smart_contracts(session):
     """

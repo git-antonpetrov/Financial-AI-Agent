@@ -1,0 +1,3 @@
+admin.fin-ai-agent.ru {
+    reverse_proxy admin-server:8000
+}

@@ -99,6 +99,34 @@ services:
       - .env
     restart: unless-stopped
 
+  admin-server:
+    build:
+      context: ./src/admin_server/fastapi
+      dockerfile: Dockerfile
+    container_name: admin-server
+    environment:
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - ADMIN_PASSWORD_HASH=${ADMIN_PASSWORD_HASH}
+    env_file:
+      - .env
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: caddy-server
+    restart: unless-stopped
+    depends_on:
+      - admin-server
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./src/caddy/Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+
 volumes:
   postgres_data:
   pgadmin_data:
+  caddy_data:
+  caddy_config:
