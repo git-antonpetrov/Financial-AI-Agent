@@ -2,7 +2,6 @@ import os
 import io
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
 from fastapi.security import OAuth2PasswordRequestForm
-from fastapi.middleware.cors import CORSMiddleware
 from minio import Minio
 from security import verify_password, create_access_token, get_current_admin, settings
 
@@ -34,7 +33,7 @@ async def lifespan(app: FastAPI):
     for agent in VALID_AGENTS:
         bucket_name = f"knowledge-{agent}"
         if not minio_client.bucket_exists(bucket_name):
-            pass # minio_client.make_bucket(bucket_name)
+            minio_client.make_bucket(bucket_name)
     yield
 
 # --- ROUTES ---
