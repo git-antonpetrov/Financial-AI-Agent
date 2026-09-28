@@ -10,3 +10,4 @@ colorama==0.4.6
 sqlalchemy==2.0.27
 asyncpg==0.29.0
 litellm==1.83.7
+google-cloud-aiplatform==1.67.1
