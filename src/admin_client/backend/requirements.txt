@@ -1,2 +1,4 @@
-eel
 pywebview
+requests
+colorama
+python-dotenv

@@ -1,6 +1,7 @@
 import os
 import hashlib
 import requests
+import re
 from typing import Callable, Any
 from core.utils.console_logger import log_info, log_error, log_warning
 from core.utils.pdf_converter import convert_to_pdf
@@ -117,7 +118,8 @@ class DocumentPipeline:
             analyze_resp = requests.post(
                 analyze_url,
                 headers=self.headers,
-                json={"text": recognized_text[:15000]}
+                json={"text": recognized_text[:15000]},
+                timeout=(5, 120)
             )
             analyze_resp.raise_for_status()
             analyze_data = analyze_resp.json()
@@ -145,7 +147,7 @@ class DocumentPipeline:
                 "agent_name": agent_name
             }
             
-            date_resp = requests.post(date_url, headers=self.headers, json=date_payload)
+            date_resp = requests.post(date_url, headers=self.headers, json=date_payload, timeout=(5, 120))
             date_resp.raise_for_status()
             
             if date_resp.json().get("status") == "old_version":
@@ -171,7 +173,8 @@ class DocumentPipeline:
                 repeal_resp = requests.post(
                     repeal_url,
                     headers=self.headers,
-                    json={"paragraphs": repealed_paragraphs}
+                    json={"paragraphs": repealed_paragraphs},
+                    timeout=(5, 120)
                 )
                 
                 if repeal_resp.status_code == 200:
@@ -188,7 +191,7 @@ class DocumentPipeline:
             log_info("Pipeline", "Формирование Markdown и отправка...")
             
             # Формируем главный файл (upsert)
-            markdown_content = f"---\nshort_name: {short_name}\nsystem_name: {system_name}\n---\n\n{recognized_text}"
+            markdown_content = f'---\nshort_name: "{short_name}"\nsystem_name: "{system_name}"\n---\n\n{recognized_text}'
             
             upsert_url = f"{self.server_url}/api/upload/{agent_name}/upsert"
             upsert_data = {
@@ -202,7 +205,7 @@ class DocumentPipeline:
             }
             
             log_info("Pipeline", "Вызов ручки /upsert...")
-            upsert_resp = requests.post(upsert_url, headers=self.headers, data=upsert_data, files=upsert_files)
+            upsert_resp = requests.post(upsert_url, headers=self.headers, data=upsert_data, files=upsert_files, timeout=(5, 120))
             upsert_resp.raise_for_status()
 
             # ==========================================
@@ -224,7 +227,7 @@ class DocumentPipeline:
                 }
                 
                 log_info("Pipeline", "Вызов ручки /delete...")
-                delete_resp = requests.post(delete_url, headers=self.headers, data=delete_data, files=delete_files)
+                delete_resp = requests.post(delete_url, headers=self.headers, data=delete_data, files=delete_files, timeout=(5, 120))
                 delete_resp.raise_for_status()
 
             # Успешное завершение всего пайплайна для этого файла!
@@ -253,6 +256,14 @@ class DocumentPipeline:
             log_error("Pipeline", f"Сбой в файле {filename} -> {error_msg}")
             self.on_progress_update(filename, "error", error_msg)
             return {"status": "error", "message": str(e)}
+
+        finally:
+            # Очистка временных файлов PDF
+            if 'working_file_path' in locals() and working_file_path != file_path and os.path.exists(working_file_path):
+                try:
+                    os.remove(working_file_path)
+                except Exception as ex:
+                    log_warning("Pipeline", f"Не удалось удалить временный файл {working_file_path}: {ex}")
 
     def _calculate_md5(self, file_path: str) -> str:
         """
@@ -285,7 +296,7 @@ class DocumentPipeline:
         }
         
         # Отправляем JSON и заголовки с токеном
-        response = requests.post(url, headers=self.headers, json=payload)
+        response = requests.post(url, headers=self.headers, json=payload, timeout=(5, 120))
         
         # Если статус не 200 (например, 401 Unauthorized или 500 Internal Server Error) — выбрасываем исключение
         response.raise_for_status() 
@@ -303,6 +314,8 @@ class DocumentPipeline:
         какая структура полей настроена в проекте FlexiCapture.
         """
         texts = []
+        if parsed_data is None:
+            return ""
         if isinstance(parsed_data, dict):
             for key, value in parsed_data.items():
                 texts.append(self._extract_text_from_parsed_dict(value))
@@ -320,12 +333,11 @@ class DocumentPipeline:
         Ищет абзацы в тексте, где упоминаются слова об отмене других документов.
         Использует регулярное выражение для поиска ключевых слов.
         """
-        import re
         paragraphs = text.split('\n')
         candidates = []
         for p in paragraphs:
             # Ищем юридические формулировки отмены или признания недействительным
-            pattern = r'утративш.*?силу|отменит|отменяет|отмена|недействительн|устаревш|считать не действующ|исключить'
+            pattern = r'признать?\s+утративш\w*\s+силу|утрач\w+\s+силу|отменяет(?:ся)?|считать\s+не\s+действующ'
             if re.search(pattern, p, re.IGNORECASE):
                 cleaned_p = p.strip()
                 if cleaned_p:

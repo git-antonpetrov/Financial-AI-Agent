@@ -59,9 +59,12 @@ class ContentCaptureRecognizer:
     """
     def __init__(self, delete_batch_after=True):
         load_dotenv()
-        self.username = os.getenv('CONTENTAI_USERNAME', 'admin')
-        self.password = os.getenv('CONTENTAI_PASSWORD', 'password1!')
-        self.api_uri = os.getenv('CONTENT_AI_API_URI', 'http://localhost/ContentCapture/Server/FCAuth/API/v2/Soap')
+        self.username = os.getenv('CONTENTAI_USERNAME')
+        self.password = os.getenv('CONTENTAI_PASSWORD')
+        if not self.username or not self.password:
+            raise ValueError("Не заданы CONTENTAI_USERNAME или CONTENTAI_PASSWORD в .env")
+        
+        self.api_uri = os.getenv('CONTENT_AI_API_URI', 'https://localhost/ContentCapture/Server/FCAuth/API/v2/Soap')
         self.project_name = os.getenv('CONTENT_AI_PROJECT', 'FullText')
         
         self.delete_batch_after = delete_batch_after
@@ -182,13 +185,18 @@ class ContentCaptureRecognizer:
             self._call("#ProcessBatch", f'<ProcessBatch xmlns="urn:https://www.contentai.ru/ContentCapture"><sessionId>{session_id}</sessionId><batchId>{batch_id}</batchId></ProcessBatch>')
             
             log_info("Content AI: Распознавание", "Ожидание завершения обработки...")
-            while True:
+            max_wait = 600
+            elapsed = 0
+            while elapsed < max_wait:
                 res = self._call("#GetBatchPercentCompleted", f'<GetBatchPercentCompleted xmlns="urn:https://www.contentai.ru/ContentCapture"><batchId>{batch_id}</batchId></GetBatchPercentCompleted>')
                 percent = int(res.find('.//{urn:https://www.contentai.ru/ContentCapture}result').text)
                 log_info("Content AI: Статус", f"Прогресс распознавания... {percent}%")
                 if percent == 100:
                     break
                 time.sleep(2)
+                elapsed += 2
+            else:
+                raise TimeoutError(f"Content AI не завершил обработку за {max_wait} секунд")
                 
             log_info("Content AI: Результат", "Получение распознанных документов...")
             docs_xml_raw = self._call_raw("#GetDocuments", f'<GetDocuments xmlns="urn:https://www.contentai.ru/ContentCapture"><sessionId>{session_id}</sessionId><batchId>{batch_id}</batchId></GetDocuments>')
@@ -232,8 +240,7 @@ class ContentCaptureRecognizer:
                 
             if self.delete_batch_after:
                 log_info("Content AI: Очистка", "Удаление пакета с сервера...")
-                # self._call("#DeleteBatch", ...)
-                pass # Временно пропущено
+                self._call("#DeleteBatch", f'<DeleteBatch xmlns="urn:https://www.contentai.ru/ContentCapture"><sessionId>{session_id}</sessionId><batchId>{batch_id}</batchId></DeleteBatch>')
             
             return results
                 
