@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from src.simulations.workers.ruble_eod.tasks import run_ruble_eod
+from src.simulations.workers.digital_eod.tasks import run_ruble_eod
 from src.simulations.core.utils.console_logger import log_info
 
 async def main():
