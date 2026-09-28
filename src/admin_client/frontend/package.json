@@ -1,0 +1,6 @@
+{
+  "name": "admin-frontend",
+  "version": "1.0.0",
+  "description": "Здесь будут библиотечки (React, Tailwind и тд)",
+  "dependencies": {}
+}
