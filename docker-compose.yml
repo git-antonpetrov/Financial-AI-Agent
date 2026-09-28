@@ -134,6 +134,9 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - DB_HOST=postgres-db
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/data/gcp-service-account.json
+    volumes:
+      - ./data:/app/data:ro
     env_file:
       - .env
     restart: unless-stopped
@@ -166,6 +169,9 @@ services:
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=${POSTGRES_DB}
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/data/gcp-service-account.json
+    volumes:
+      - ./data:/app/data:ro
     env_file:
       - .env
     restart: unless-stopped

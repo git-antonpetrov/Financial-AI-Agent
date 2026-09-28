@@ -121,7 +121,12 @@ class DocumentPipeline:
                 json={"text": recognized_text[:15000]},
                 timeout=(5, 120)
             )
-            analyze_resp.raise_for_status()
+            try:
+                analyze_resp.raise_for_status()
+            except requests.exceptions.HTTPError as e:
+                error_detail = analyze_resp.text
+                raise Exception(f"HTTP Error {analyze_resp.status_code}: {error_detail}") from e
+                
             analyze_data = analyze_resp.json()
             
             system_name = analyze_data.get("system_name")
