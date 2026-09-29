@@ -114,7 +114,7 @@ async def create_agent_request(
         document_name_en=document_name_en,
         justification_ru=justification_ru,
         justification_en=justification_en,
-        status="Ожидает"
+        status="pending"
     )
     db.add(db_req)
     await db.commit()

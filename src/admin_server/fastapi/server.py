@@ -386,7 +386,7 @@ async def approve_agent_requests(
     db: AsyncSession = Depends(get_db),
     current_admin: str = Depends(get_current_admin)
 ):
-    await crud.update_agent_request_status(db, req.request_ids, "Одобрена")
+    await crud.update_agent_request_status(db, req.request_ids, "approved")
     return {"status": "ok"}
 
 @app.post("/api/agent-requests/reject")
@@ -395,7 +395,7 @@ async def reject_agent_requests(
     db: AsyncSession = Depends(get_db),
     current_admin: str = Depends(get_current_admin)
 ):
-    await crud.update_agent_request_status(db, req.request_ids, "Отклонена")
+    await crud.update_agent_request_status(db, req.request_ids, "rejected")
     return {"status": "ok"}
 
 @app.post("/api/agents/requests", response_model=schemas.AgentRequestResponse)
