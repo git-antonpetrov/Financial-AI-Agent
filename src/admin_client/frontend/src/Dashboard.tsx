@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { Users, FileText, UploadCloud, Clock, CheckCircle2, Globe, Server, Check, X } from 'lucide-react'
+import { motion, AnimatePresence } from 'framer-motion'
 
 type Tab = 'rag' | 'agents'
 
@@ -7,8 +8,11 @@ interface LocalFile {
   id: string
   file: File
   name: string
-  status: 'processing' | 'sending' | 'sent' | 'error'
+  status: 'pending' | 'processing' | 'sent' | 'error' | 'skipped'
   elapsedSeconds: number
+  agent_name?: string
+  job_id?: string
+  display_message?: string
 }
 
 // Mock agent request type
@@ -97,6 +101,7 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
   }
 
   const rejectRequests = async (ids: number[]) => {
+    setRequests(prev => prev.map(r => ids.includes(r.id) ? { ...r, status: 'rejected' } : r))
     try {
       const token = localStorage.getItem('admin_token')
       const serverUrl = localStorage.getItem('admin_server') || ''
@@ -135,6 +140,7 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
 
   const confirmApprove = async () => {
     const ids = approvingRequests.map(r => r.id)
+    setRequests(prev => prev.map(r => ids.includes(r.id) ? { ...r, status: 'approved' } : r))
     
     // First update statuses
     try {
@@ -156,12 +162,15 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
           id: Math.random().toString(36).substring(7),
           file: file,
           name: file.name,
-          status: 'processing' as const,
+          status: 'pending' as const,
           elapsedSeconds: 0,
+          agent_name: req.agent_name,
+          display_message: lang === 'en' ? 'In queue...' : 'В очереди...'
         }
       })
       
       setLocalFiles(prev => [...prev, ...newLocalFiles])
+      newLocalFiles.forEach(processFile)
       setIsApproveModalOpen(false)
       setSelectedRequests(new Set())
       fetchRequests()
@@ -177,15 +186,88 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
         id: Math.random().toString(36).substring(7),
         file: f,
         name: f.name,
-        status: 'processing' as const,
+        status: 'pending' as const,
         elapsedSeconds: 0,
+        agent_name: 'main', // Default agent for manual upload
+        display_message: lang === 'en' ? 'In queue...' : 'В очереди...'
       }))
       setLocalFiles((prev) => [...prev, ...newFiles])
+      newFiles.forEach(processFile)
     }
     if (fileInputRef.current) {
       fileInputRef.current.value = ''
     }
   }
+
+  const processFile = async (fileObj: LocalFile) => {
+    // Mark as processing immediately so we don't pick it up again
+    setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'processing', display_message: lang === 'en' ? 'Sending file...' : 'Отправка файла...' } : f))
+    
+    const formData = new FormData()
+    formData.append('file', fileObj.file)
+    formData.append('agent_name', fileObj.agent_name || 'main')
+    formData.append('server_url', localStorage.getItem('admin_server') || '')
+    formData.append('admin_token', localStorage.getItem('admin_token') || '')
+
+    try {
+      const uploadRes = await fetch('http://localhost:8001/api/local/process', {
+        method: 'POST',
+        body: formData
+      })
+      
+      if (!uploadRes.ok) throw new Error('Upload failed')
+      
+      const { job_id } = await uploadRes.json()
+      
+      setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, job_id } : f))
+      
+      // Listen to SSE for progress
+      const eventSource = new EventSource(`http://localhost:8001/api/local/progress/${job_id}`)
+      
+      eventSource.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data)
+          
+          if (data.status === 'done' || data.status === 'completed') {
+            setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'sent', display_message: data.message } : f))
+            eventSource.close()
+          } else if (data.status === 'error') {
+            setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'error', display_message: data.message } : f))
+            eventSource.close()
+          } else if (data.status === 'skipped') {
+            setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'skipped', display_message: data.message } : f))
+            eventSource.close()
+          } else {
+            setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, display_message: data.message } : f))
+          }
+        } catch (e) {
+          console.error('Failed to parse SSE', e)
+        }
+      }
+      
+      eventSource.onerror = () => {
+        setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'error', display_message: lang === 'en' ? 'Connection lost' : 'Соединение прервано' } : f))
+        eventSource.close()
+      }
+      
+    } catch (e: any) {
+      setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'error', display_message: e.message } : f))
+    }
+  }
+
+
+  // Timer for processing elapsed seconds
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setLocalFiles(prev => prev.map(f => {
+        if (f.status === 'processing') {
+          return { ...f, elapsedSeconds: f.elapsedSeconds + 1 }
+        }
+        return f
+      }))
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [])
 
   return (
     <div className="min-h-screen bg-[#0f0728] text-purple-50 flex flex-col items-center p-8 relative">
@@ -270,9 +352,9 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
 
             <div className="flex-1 overflow-auto pr-2">
               {localFiles.length === 0 ? (
-                <div className="h-full flex flex-col items-center justify-center text-purple-300/50">
+                <div key={lang} className="h-full flex flex-col items-center justify-center text-purple-300/50 animate-fade-scale">
                   <FileText className="w-16 h-16 mb-4 opacity-20" />
-                  <p>No files are currently processing.</p>
+                  <p>{lang === 'en' ? 'No files are currently processing.' : 'Нет файлов в процессе обработки.'}</p>
                 </div>
               ) : (
                 <div className="space-y-3">
@@ -282,12 +364,26 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
                       <div className="flex-none p-2 bg-purple-500/10 rounded-lg">
                         <FileText className="w-5 h-5 text-purple-400" />
                       </div>
-                      <div className="flex-1 truncate font-medium text-purple-100">
-                        {f.name}
+                      <div className="flex-1 min-w-0">
+                        <div className="truncate font-medium text-purple-100">
+                          {f.name}
+                        </div>
+                        {f.display_message && (
+                          <div className="text-xs text-purple-300/60 truncate mt-1">
+                            {f.display_message}
+                          </div>
+                        )}
                       </div>
-                      <div className="flex-none flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-sm">
-                        {f.status === 'processing' && <Clock className="w-4 h-4" />}
-                        {f.status === 'sent' && <CheckCircle2 className="w-4 h-4 text-green-400" />}
+                      <div className={`flex-none flex items-center gap-2 px-3 py-1 rounded-full text-sm border ${
+                        f.status === 'error' ? 'bg-red-500/10 border-red-500/20 text-red-400' :
+                        f.status === 'skipped' ? 'bg-yellow-500/10 border-yellow-500/20 text-yellow-400' :
+                        f.status === 'sent' ? 'bg-green-500/10 border-green-500/20 text-green-400' :
+                        f.status === 'pending' ? 'bg-gray-500/10 border-gray-500/20 text-gray-400' :
+                        'bg-indigo-500/10 border-indigo-500/20 text-indigo-300'
+                      }`}>
+                        {f.status === 'processing' && <Clock className="w-4 h-4 animate-spin" />}
+                        {f.status === 'sent' && <CheckCircle2 className="w-4 h-4" />}
+                        {f.status === 'error' && <X className="w-4 h-4" />}
                         <span className="capitalize">{f.status}</span>
                       </div>
                       <div className="flex-none w-20 text-right text-sm text-purple-400 font-mono">
@@ -314,7 +410,7 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
               <button 
                 disabled={selectedRequests.size === 0}
                 onClick={handleApproveSelected}
-                className="flex-1 py-3 px-4 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 disabled:from-purple-900/50 disabled:to-indigo-900/50 disabled:text-white/30 disabled:cursor-not-allowed text-white font-medium rounded-xl transition-all shadow-lg shadow-purple-500/25 disabled:shadow-none active:scale-[0.98]"
+                className="flex-1 py-3 px-4 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 disabled:from-purple-900/50 disabled:to-indigo-900/50 disabled:text-white/30 disabled:cursor-not-allowed text-white font-medium rounded-xl transition-all duration-300 shadow-lg shadow-purple-500/25 disabled:shadow-none active:scale-[0.98]"
               >
                 {lang === 'en' ? 'Approve Selected' : 'Одобрить выбранные'}
                 {selectedRequests.size > 0 && ` (${selectedRequests.size})`}
@@ -322,7 +418,7 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
               <button 
                 disabled={selectedRequests.size === 0}
                 onClick={handleRejectSelected}
-                className="flex-1 py-3 px-4 bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 disabled:from-red-900/30 disabled:to-rose-900/30 disabled:text-white/30 disabled:cursor-not-allowed text-white font-medium rounded-xl transition-all shadow-lg shadow-red-500/25 disabled:shadow-none active:scale-[0.98]"
+                className="flex-1 py-3 px-4 bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 disabled:from-red-900/30 disabled:to-rose-900/30 disabled:text-white/30 disabled:cursor-not-allowed text-white font-medium rounded-xl transition-all duration-300 shadow-lg shadow-red-500/25 disabled:shadow-none active:scale-[0.98]"
               >
                 {lang === 'en' ? 'Reject Selected' : 'Отклонить выбранные'}
                 {selectedRequests.size > 0 && ` (${selectedRequests.size})`}
@@ -334,18 +430,24 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
                 <div className="h-full flex items-center justify-center">
                   <div className="w-8 h-8 border-4 border-purple-500/30 border-t-purple-500 rounded-full animate-spin"></div>
                 </div>
-              ) : requests.length === 0 ? (
+              ) : requests.filter(req => req.status === 'pending').length === 0 ? (
                 <div className="h-full flex flex-col items-center justify-center text-purple-300/50">
                   <Users className="w-16 h-16 mb-4 opacity-20" />
                   <p>{lang === 'en' ? 'No pending agent requests.' : 'Нет активных заявок агентов.'}</p>
-                  <p className="text-sm mt-2 opacity-50">
-                    {lang === 'en' ? '(Database table is empty)' : '(Таблица базы данных пуста)'}
-                  </p>
                 </div>
               ) : (
                 <div className="space-y-4">
-                  {requests.map(req => (
-                    <div key={req.id} className="flex gap-4 p-5 bg-[#1a0f3c]/80 border border-purple-500/20 rounded-2xl hover:border-purple-500/40 transition-colors">
+                  <AnimatePresence>
+                  {requests.filter(req => req.status === 'pending').map(req => (
+                    <motion.div 
+                      layout
+                      initial={{ opacity: 0, scale: 0.95 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.95, height: 0, marginBottom: 0, overflow: 'hidden' }}
+                      transition={{ duration: 0.3 }}
+                      key={req.id} 
+                      className="flex gap-4 p-5 bg-[#1a0f3c]/80 border border-purple-500/20 rounded-2xl hover:border-purple-500/40 transition-colors"
+                    >
                       <div className="flex-none">
                         <div 
                           onClick={() => toggleSelection(req.id)}
@@ -385,20 +487,21 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
                         <button 
                           onClick={() => openApproveModal([req])}
                           disabled={selectedRequests.size > 0}
-                          className="flex-1 flex items-center justify-center rounded-xl bg-purple-500/10 text-purple-400 hover:bg-purple-500/20 hover:text-purple-300 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-purple-500/10 transition-colors w-full" title={lang === 'en' ? 'Approve' : 'Одобрить'}
+                          className="flex-1 flex items-center justify-center rounded-xl bg-purple-500/10 text-purple-400 hover:bg-purple-500/20 hover:text-purple-300 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-purple-500/10 transition-all duration-300 w-full" title={lang === 'en' ? 'Approve' : 'Одобрить'}
                         >
                           <Check className="w-5 h-5" />
                         </button>
                         <button 
                           onClick={() => handleRejectSingle(req.id)}
                           disabled={selectedRequests.size > 0}
-                          className="flex-1 flex items-center justify-center rounded-xl bg-red-500/10 text-red-400 hover:bg-red-500/20 hover:text-red-300 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-red-500/10 transition-colors w-full" title={lang === 'en' ? 'Reject' : 'Отклонить'}
+                          className="flex-1 flex items-center justify-center rounded-xl bg-red-500/10 text-red-400 hover:bg-red-500/20 hover:text-red-300 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-red-500/10 transition-all duration-300 w-full" title={lang === 'en' ? 'Reject' : 'Отклонить'}
                         >
                           <X className="w-5 h-5" />
                         </button>
                       </div>
-                    </div>
+                    </motion.div>
                   ))}
+                  </AnimatePresence>
                 </div>
               )}
             </div>
@@ -426,11 +529,14 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
             <div className="p-6 overflow-y-auto flex-1 space-y-4">
               {approvingRequests.map(req => (
                 <div key={req.id} className="p-4 bg-[#0f0728]/50 rounded-xl border border-purple-500/10 flex flex-col gap-3">
-                  <div className="flex justify-between">
-                    <span className="font-bold text-purple-200">{req.agent_name}</span>
-                    <span className="text-sm text-purple-400">{req.document_name}</span>
+                  <div className="mb-1">
+                    <span className="font-bold text-purple-200">
+                      {lang === 'en' ? req.document_name_en : req.document_name_ru}
+                    </span>
                   </div>
-                  <p className="text-sm text-purple-300/70">{req.justification}</p>
+                  <p className="text-sm text-purple-300/70">
+                    {lang === 'en' ? req.justification_en : req.justification_ru}
+                  </p>
                   
                   {/* File Input for this request */}
                   <div className="mt-2">

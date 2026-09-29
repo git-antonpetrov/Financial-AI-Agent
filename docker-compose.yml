@@ -148,6 +148,9 @@ services:
   chromadb:
     image: chromadb/chroma:0.4.24
     container_name: chromadb-server
+    environment:
+      - CHROMA_SERVER_AUTH_PROVIDER=chromadb.auth.basic.BasicAuthServerProvider
+      - CHROMA_SERVER_AUTH_CREDENTIALS=${CHROMA_AUTH_TOKEN}
     ports:
       - "127.0.0.1:8100:8000"
     volumes:
@@ -165,6 +168,7 @@ services:
       - MINIO_URL=minio:9000
       - CHROMA_HOST=chromadb
       - CHROMA_PORT=8000
+      - CHROMA_AUTH_TOKEN=${CHROMA_AUTH_TOKEN}
       - DB_HOST=postgres-db
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}

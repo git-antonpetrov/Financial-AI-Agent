@@ -4,6 +4,7 @@ import time
 import base64
 import requests
 import xml.etree.ElementTree as ET
+import re
 from requests.auth import HTTPBasicAuth
 from dotenv import load_dotenv
 from core.utils.console_logger import log_info, log_error, log_warning
@@ -217,7 +218,6 @@ class ContentCaptureRecognizer:
                     if xml_node is not None and xml_node.text:
                         doc_content = base64.b64decode(xml_node.text).decode('utf-8', errors='ignore')
                     else:
-                        import re
                         # Парсинг base64 через regex для обхода проблем с XML namespaces
                         bytes_match = re.search(r'<Bytes>(.*?)</Bytes>', res_xml_raw, re.DOTALL)
                         if bytes_match and bytes_match.group(1):

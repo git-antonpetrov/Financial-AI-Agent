@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-url = 'https://admin.fin-ai-agent.ru/api/agents/requests'
+url = 'https://admin.fin-ai-agent.ru/api/agent-requests/bootstrap'
 requests = [
     {
         'agent_name': 'bank',

@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime
 
@@ -21,7 +21,7 @@ class CheckDateResponse(BaseModel):
     status: str
 
 class LLMAnalyzeRequest(BaseModel):
-    text: str
+    text: str = Field(..., max_length=150000)
 
 class LLMAnalyzeResponse(BaseModel):
     system_name: str
@@ -31,7 +31,7 @@ class LLMRepealedRequest(BaseModel):
     snippets: List[str]
 
 class LLMRepealedResponse(BaseModel):
-    repealed_docs: List[str]
+    short_names: List[str]
 
 
 class AgentRequestResponse(BaseModel):

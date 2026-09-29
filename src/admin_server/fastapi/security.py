@@ -5,15 +5,15 @@ import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 class Settings:
-    SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "super-secret-key-please-change-in-env")
+    SECRET_KEY: str = os.environ["JWT_SECRET_KEY"]
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 30  # 30 дней
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 3  # 3 дня
     ADMIN_PASSWORD_HASH: str = os.getenv("ADMIN_PASSWORD_HASH", "")
     
-    AGENT_DIGITAL_BOOTSTRAP_TOKEN: str = os.getenv("AGENT_DIGITAL_BOOTSTRAP_TOKEN", "digital-secret-123")
-    AGENT_BANK_BOOTSTRAP_TOKEN: str = os.getenv("AGENT_BANK_BOOTSTRAP_TOKEN", "bank-secret-456")
-    AGENT_INVEST_BOOTSTRAP_TOKEN: str = os.getenv("AGENT_INVEST_BOOTSTRAP_TOKEN", "invest-secret-789")
-    AGENT_MAIN_BOOTSTRAP_TOKEN: str = os.getenv("AGENT_MAIN_BOOTSTRAP_TOKEN", "main-secret-000")
+    AGENT_DIGITAL_BOOTSTRAP_TOKEN: str = os.environ["AGENT_DIGITAL_BOOTSTRAP_TOKEN"]
+    AGENT_BANK_BOOTSTRAP_TOKEN: str = os.environ["AGENT_BANK_BOOTSTRAP_TOKEN"]
+    AGENT_INVEST_BOOTSTRAP_TOKEN: str = os.environ["AGENT_INVEST_BOOTSTRAP_TOKEN"]
+    AGENT_MAIN_BOOTSTRAP_TOKEN: str = os.environ["AGENT_MAIN_BOOTSTRAP_TOKEN"]
 
     def get_bootstrap_token(self, agent_name: str) -> str:
         tokens = {
