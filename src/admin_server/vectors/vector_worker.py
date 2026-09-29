@@ -9,6 +9,7 @@ import litellm
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from core.utils.console_logger import log_info, log_success, log_warning, log_error
 import psycopg2
+from psycopg2.pool import SimpleConnectionPool
 
 # --- Настройки окружения ---
 # Redis
@@ -24,6 +25,7 @@ MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "")
 # ChromaDB
 CHROMA_HOST = os.getenv("CHROMA_HOST", "chromadb")
 CHROMA_PORT = int(os.getenv("CHROMA_PORT", "8000"))
+CHROMA_AUTH_TOKEN = os.getenv("CHROMA_AUTH_TOKEN", "")
 
 # Google Vertex AI (через прокси)
 VERTEX_BASE_URL = os.getenv("VERTEX_BASE_URL", "").rstrip('/')
@@ -70,7 +72,11 @@ minio_client = Minio(
 # Подключаемся к запущенному контейнеру Chroma
 chroma_client = chromadb.HttpClient(
     host=CHROMA_HOST, 
-    port=CHROMA_PORT
+    port=CHROMA_PORT,
+    settings=chromadb.config.Settings(
+        chroma_client_auth_provider="chromadb.auth.basic.BasicAuthClientProvider",
+        chroma_client_auth_credentials=CHROMA_AUTH_TOKEN
+    )
 )
 
 # Ожидание готовности ChromaDB
@@ -86,28 +92,37 @@ else:
     log_error("Worker Init", "ChromaDB не отвечает после 30 попыток. Завершение.")
     exit(1)
 
-def update_document_status(file_hash: str, new_status: str, message: str = ""):
-    """Обновляет статус документа в Postgres через сырой psycopg2"""
-    if not file_hash:
+try:
+    db_pool = SimpleConnectionPool(
+        1, 10,
+        host=DB_HOST,
+        user=POSTGRES_USER,
+        password=POSTGRES_PASSWORD,
+        dbname=POSTGRES_DB
+    )
+except Exception as e:
+    log_error("Worker Init", f"Failed to initialize database pool: {e}")
+    exit(1)
+
+def update_document_status(file_hash: str, agent_name: str, new_status: str, message: str = ""):
+    """Обновляет статус документа в Postgres через пул соединений"""
+    if not file_hash or not agent_name:
         return
     try:
-        conn = psycopg2.connect(
-            host=DB_HOST,
-            user=POSTGRES_USER,
-            password=POSTGRES_PASSWORD,
-            dbname=POSTGRES_DB
-        )
+        conn = db_pool.getconn()
         cur = conn.cursor()
         cur.execute(
-            "UPDATE documents SET status = %s, message = %s WHERE file_hash = %s",
-            (new_status, message, file_hash)
+            "UPDATE documents SET status = %s, message = %s WHERE file_hash = %s AND agent_name = %s",
+            (new_status, message, file_hash, agent_name)
         )
         conn.commit()
         cur.close()
-        conn.close()
-        log_info("DB Update", f"Document status for {file_hash} set to {new_status}")
+        db_pool.putconn(conn)
+        log_info("DB Update", f"Document status for {file_hash} ({agent_name}) set to {new_status}")
     except Exception as e:
         log_error("DB Update", f"Failed to update status in DB: {e}")
+        if 'conn' in locals():
+            db_pool.putconn(conn, close=True)
 
 def get_embeddings_google(texts: list[str]) -> list[list[float]]:
     """
@@ -146,7 +161,7 @@ def extract_metadata_from_markdown(markdown_text: str) -> dict:
             for line in lines[1:end_idx]:
                 if ':' in line:
                     k, v = line.split(':', 1)
-                    meta[k.strip()] = v.strip()
+                    meta[k.strip()] = v.strip().strip('"').strip("'")
                     
     return meta
 
@@ -164,7 +179,7 @@ def process_task(task: dict):
         markdown_text = response.read().decode('utf-8')
     except Exception as e:
         log_error("MinIO", f"Ошибка скачивания файла {file_path} из MinIO: {e}")
-        update_document_status(task.get("file_hash"), "error", f"MinIO error: {e}")
+        update_document_status(task.get("file_hash"), agent, "error", f"MinIO error: {e}")
         return
     finally:
         if 'response' in locals():
@@ -189,7 +204,7 @@ def process_task(task: dict):
                     log_warning("ChromaDB", f"Предупреждение при удалении '{target_short_name}': {e}")
         
         log_success("Task Processing", f"Задача delete выполнена. Обработано имен для удаления: {deleted_count}")
-        update_document_status(task.get("file_hash"), "completed", f"Успешно удалено {deleted_count} документов")
+        update_document_status(task.get("file_hash"), agent, "completed", f"Успешно удалено {deleted_count} документов")
         
     elif action == "upsert":
         # 2. Парсинг метаданных
@@ -203,7 +218,7 @@ def process_task(task: dict):
                 minio_client.remove_object(bucket, file_path)
             except:
                 pass
-            update_document_status(task.get("file_hash"), "error", "Отсутствует short_name в метаданных")
+            update_document_status(task.get("file_hash"), agent, "error", "Отсутствует short_name в метаданных")
             return
             
         log_info("Metadata", f"Документ распознан. short_name: '{short_name}'")
@@ -236,7 +251,7 @@ def process_task(task: dict):
                 embeddings = get_embeddings_google(batch_chunks)
             except Exception as e:
                 log_error("Google API", f"Ошибка получения эмбеддингов от Vertex AI: {e}")
-                update_document_status(task.get("file_hash"), "error", f"LLM error: {e}")
+                update_document_status(task.get("file_hash"), agent, "error", f"LLM error: {e}")
                 return
                 
             ids = [f"{short_name}_chunk_{i+j}" for j in range(len(batch_chunks))]
@@ -254,7 +269,7 @@ def process_task(task: dict):
                 time.sleep(CHUNK_SLEEP_SECONDS)
                 
         log_success("ChromaDB", f"Успешно записано {len(chunks)} векторов для '{short_name}' в {collection_name}")
-        update_document_status(task.get("file_hash"), "completed", "Успешно обработано воркером")
+        update_document_status(task.get("file_hash"), agent, "completed", "Успешно обработано воркером")
         
     # 8. Уборка оригинального файла из MinIO (выполняется и для upsert, и для delete)
     try:

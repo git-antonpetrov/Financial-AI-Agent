@@ -2,6 +2,8 @@ import os
 import io
 import json
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form, Header
+# pyrefly: ignore [missing-import]
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 # pyrefly: ignore [missing-import]
 import redis
@@ -15,6 +17,7 @@ from security import verify_password, create_access_token, get_current_admin, ve
 from db.database import engine, Base, get_db
 from db import schemas, crud
 from core.utils.console_logger import log_info, log_error, log_warning, log_success
+from urllib.parse import quote_plus
 
 VALID_AGENTS = {"main", "bank", "invest", "digital"}
 VALID_ACTIONS = {"upsert", "delete"}
@@ -73,17 +76,21 @@ async def lifespan(app: FastAPI):
         
     yield
 
-from fastapi.middleware.cors import CORSMiddleware
-
 app = FastAPI(title="Financial MAS - Admin Server", version="1.0.0", lifespan=lifespan)
 
+# Ограничиваем CORS только необходимыми origin, так как работаем из WebView
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:8001", "http://localhost:5173", "tauri://localhost", "https://tauri.localhost"],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "x-bootstrap-token"],
 )
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
+
 
 # --- ROUTES: AUTH ---
 @app.post("/login")
@@ -151,11 +158,18 @@ async def upload_document(
     if not file.filename.endswith(".md"):
         raise HTTPException(status_code=400, detail="Only markdown (.md) files are allowed")
 
+    # Limit file size to 1GB (1024 * 1024 * 1024 bytes)
+    MAX_SIZE = 1024 * 1024 * 1024
+    content = await file.read()
+    if len(content) > MAX_SIZE:
+        raise HTTPException(status_code=413, detail="File too large. Maximum size is 1GB.")
+
+    # Sanitize filename to prevent path traversal
+    safe_filename = os.path.basename(file.filename)
     bucket_name = f"knowledge-{agent_name}"
-    object_name = f"{action}/{file.filename}"
+    object_name = f"{action}/{safe_filename}"
 
     try:
-        content = await file.read()
         content_stream = io.BytesIO(content)
         minio_client.put_object(
             bucket_name=bucket_name,
@@ -198,7 +212,7 @@ async def upload_document(
     }
 
 # --- ROUTES: AGENT REQUESTS ---
-@app.get("/api/agent_requests", response_model=list[schemas.AgentRequestResponse])
+@app.get("/api/agent-requests", response_model=list[schemas.AgentRequestResponse])
 async def read_agent_requests(
     skip: int = 0,
     limit: int = 50,
@@ -248,12 +262,14 @@ async def create_agent_request(
         # Сначала декодируем без проверки подписи, чтобы узнать, от какого агента токен
         unverified_payload = jwt.get_unverified_claims(req.token)
         agent_name = unverified_payload.get("agent_name")
-        document_name = unverified_payload.get("document_name")
-        justification = unverified_payload.get("justification")
+        document_name_ru = unverified_payload.get("document_name_ru")
+        document_name_en = unverified_payload.get("document_name_en")
+        justification_ru = unverified_payload.get("justification_ru")
+        justification_en = unverified_payload.get("justification_en")
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JWT format")
 
-    if not agent_name or not document_name or not justification:
+    if not agent_name or not document_name_ru or not justification_ru:
         raise HTTPException(status_code=400, detail="Missing required claims in JWT")
 
     # Достаем публичный ключ агента из базы
@@ -268,8 +284,10 @@ async def create_agent_request(
         log_warning("Agent Request", f"Invalid RSA signature from agent {agent_name}")
         raise HTTPException(status_code=403, detail="Invalid RSA signature")
 
-    log_info("Agent Request", f"Verified request from {agent_name} for {document_name}")
-    return await crud.create_agent_request(db, agent_name, document_name, justification)
+    log_info("Agent Request", f"Verified request from {agent_name} for {document_name_ru}")
+    return await crud.create_agent_request(
+        db, agent_name, document_name_ru, document_name_en, justification_ru, justification_en
+    )
 
 # --- ROUTES: LLM PROXY ---
 @app.post("/api/llm/analyze", response_model=schemas.LLMAnalyzeResponse)
@@ -398,7 +416,7 @@ async def reject_agent_requests(
     await crud.update_agent_request_status(db, req.request_ids, "rejected")
     return {"status": "ok"}
 
-@app.post("/api/agents/requests", response_model=schemas.AgentRequestResponse)
+@app.post("/api/agent-requests/bootstrap", response_model=schemas.AgentRequestResponse)
 async def create_agent_request_endpoint(
     req: schemas.AgentRequestCreate,
     db: AsyncSession = Depends(get_db),
