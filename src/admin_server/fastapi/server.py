@@ -1,7 +1,7 @@
 import os
 import io
 import json
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form, Header
+from fastapi import FastAPI, Depends, HTTPException, Request, status, UploadFile, File, Form, Header
 # pyrefly: ignore [missing-import]
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
@@ -100,9 +100,12 @@ async def health_check():
     return {"status": "ok"}
 
 
-# --- ROUTES: AUTH ---
+# --- МАРШРУТЫ: АВТОРИЗАЦИЯ ---
 @app.post("/login")
-async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
+    # Логируем Origin для отладки CORS в Tauri-сборке
+    origin = request.headers.get("origin")
+    log_info("Auth", f"Запрос на логин, Origin: {origin}")
     if form_data.username != "admin":
         log_warning("Auth", f"Failed login attempt for user: {form_data.username}")
         raise HTTPException(status_code=400, detail="Incorrect username or password")
