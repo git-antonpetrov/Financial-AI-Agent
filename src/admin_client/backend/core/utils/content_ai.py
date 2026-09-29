@@ -8,6 +8,7 @@ import re
 from requests.auth import HTTPBasicAuth
 from dotenv import load_dotenv
 from core.utils.console_logger import log_info, log_error, log_warning
+from xml.sax.saxutils import escape
 
 def parse_result_xml(xml_str):
     """
@@ -101,7 +102,7 @@ class ContentCaptureRecognizer:
             log_error("Content AI: Ошибка", f"Файл не найден: {file_path}")
             raise FileNotFoundError(f"Файл не найден: {file_path}")
             
-        file_name = os.path.basename(file_path)
+        file_name = escape(os.path.basename(file_path))
         with open(file_path, "rb") as f:
             raw_file_bytes = f.read()
             file_bytes = base64.b64encode(raw_file_bytes).decode("ascii")

@@ -158,11 +158,23 @@ async def upload_document(
     if not file.filename.endswith(".md"):
         raise HTTPException(status_code=400, detail="Only markdown (.md) files are allowed")
 
-    # Limit file size to 1GB (1024 * 1024 * 1024 bytes)
-    MAX_SIZE = 1024 * 1024 * 1024
-    content = await file.read()
-    if len(content) > MAX_SIZE:
-        raise HTTPException(status_code=413, detail="File too large. Maximum size is 1GB.")
+    # Ограничение размера до 50 МБ для Markdown файлов (защита от OOM DoS)
+    MAX_SIZE = 50 * 1024 * 1024
+    
+    # Читаем частями, чтобы не забить память сразу
+    content_stream = io.BytesIO()
+    bytes_read = 0
+    while True:
+        chunk = await file.read(1024 * 1024) # читаем по 1 МБ
+        if not chunk:
+            break
+        bytes_read += len(chunk)
+        if bytes_read > MAX_SIZE:
+            raise HTTPException(status_code=413, detail="File too large. Maximum size for markdown is 50MB.")
+        content_stream.write(chunk)
+        
+    content = content_stream.getvalue()
+    content_stream.seek(0)
 
     # Sanitize filename to prevent path traversal
     safe_filename = os.path.basename(file.filename)
@@ -170,7 +182,6 @@ async def upload_document(
     object_name = f"{action}/{safe_filename}"
 
     try:
-        content_stream = io.BytesIO(content)
         minio_client.put_object(
             bucket_name=bucket_name,
             object_name=object_name,
