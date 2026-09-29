@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import litellm
 from jose import jwt
 
-from security import verify_password, create_access_token, get_current_admin, verify_agent_jwt, settings
+from security import verify_password, create_access_token, get_current_admin, verify_agent_jwt, settings, oauth2_scheme
 from db.database import engine, Base, get_db
 from db import schemas, crud
 from core.utils.console_logger import log_info, log_error, log_warning, log_success
@@ -81,7 +81,13 @@ app = FastAPI(title="Financial MAS - Admin Server", version="1.0.0", lifespan=li
 # Ограничиваем CORS только необходимыми origin, так как работаем из WebView
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8001", "http://localhost:5173", "tauri://localhost", "https://tauri.localhost"],
+    allow_origins=[
+        "http://localhost:8001", 
+        "http://localhost:5173", 
+        "tauri://localhost", 
+        "https://tauri.localhost",
+        "https://admin.fin-ai-agent.ru" # Разрешаем CORS для production домена
+    ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "x-bootstrap-token"],
@@ -110,6 +116,27 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     access_token = create_access_token(data={"sub": "admin"})
     log_success("Auth", "Successful login")
     return {"access_token": access_token, "token_type": "bearer"}
+
+@app.post("/api/auth/logout")
+async def logout(
+    token: str = Depends(oauth2_scheme),
+    current_admin: str = Depends(get_current_admin)
+):
+    """
+    Отзыв токена. Добавляет текущий токен в Redis Blacklist.
+    """
+    from security import redis_blacklist, settings
+    if redis_blacklist:
+        try:
+            # Время жизни ключа в Redis равно оставшемуся времени жизни токена
+            # Для простоты ставим полное время жизни токена
+            expires_in = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+            redis_blacklist.setex(f"blacklist:{token}", expires_in, "revoked")
+        except Exception as e:
+            log_error("Auth", f"Failed to blacklist token in Redis: {str(e)}")
+            
+    log_success("Auth", "Successful logout, token revoked in Redis")
+    return {"status": "ok", "message": "Token revoked successfully"}
 
 # --- ROUTES: DOCUMENTS CHECK ---
 @app.post("/api/documents/check/md5", response_model=schemas.CheckHashResponse)
@@ -400,14 +427,6 @@ async def llm_find_repealed(
         raise HTTPException(status_code=500, detail=f"LLM Error: {str(e)}")
 
 # --- ROUTES: ADMIN - AGENT REQUESTS ---
-@app.get("/api/agent-requests", response_model=list[schemas.AgentRequestResponse])
-async def list_agent_requests(
-    skip: int = 0, limit: int = 50,
-    db: AsyncSession = Depends(get_db),
-    current_admin: str = Depends(get_current_admin)
-):
-    requests = await crud.get_agent_requests(db, skip=skip, limit=limit)
-    return requests
 
 @app.post("/api/agent-requests/approve")
 async def approve_agent_requests(

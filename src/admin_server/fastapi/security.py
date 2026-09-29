@@ -4,10 +4,12 @@ from jose import JWTError, jwt
 import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
+import redis  # type: ignore
+
 class Settings:
     SECRET_KEY: str = os.environ["JWT_SECRET_KEY"]
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 3  # 3 дня
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 12 * 60  # 12 часов для десктопного приложения
     ADMIN_PASSWORD_HASH: str = os.getenv("ADMIN_PASSWORD_HASH", "")
     
     AGENT_DIGITAL_BOOTSTRAP_TOKEN: str = os.environ["AGENT_DIGITAL_BOOTSTRAP_TOKEN"]
@@ -24,7 +26,23 @@ class Settings:
         }
         return tokens.get(agent_name)
 
+
 settings = Settings()
+
+# Настройка Redis для JWT Blacklist
+REDIS_HOST = os.getenv("REDIS_HOST", "redis")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
+
+try:
+    redis_blacklist = redis.Redis(
+        host=REDIS_HOST,
+        port=REDIS_PORT,
+        password=REDIS_PASSWORD,
+        decode_responses=True
+    )
+except Exception:
+    redis_blacklist = None
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
@@ -50,6 +68,21 @@ async def get_current_admin(token: str = Depends(oauth2_scheme)):
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
+    # Проверяем токен в Redis
+    is_revoked = False
+    if redis_blacklist:
+        try:
+            if redis_blacklist.exists(f"blacklist:{token}"):
+                is_revoked = True
+        except Exception:
+            pass
+            
+    if is_revoked:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has been revoked",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
         username: str = payload.get("sub")
