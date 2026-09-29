@@ -80,7 +80,8 @@ async def process_document(
     # Ограничение размера в 1 ГБ через чтение частями
     MAX_SIZE = 1024 * 1024 * 1024
     bytes_read = 0
-    file_path = os.path.join(TEMP_DIR, f"{job_id}_{file.filename}")
+    safe_filename = os.path.basename(file.filename)
+    file_path = os.path.join(TEMP_DIR, f"{job_id}_{safe_filename}")
     try:
         with open(file_path, "wb") as buffer:
             while True:
