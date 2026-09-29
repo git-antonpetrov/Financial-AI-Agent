@@ -74,7 +74,7 @@ chroma_client = chromadb.HttpClient(
     host=CHROMA_HOST, 
     port=CHROMA_PORT,
     settings=chromadb.config.Settings(
-        chroma_client_auth_provider="chromadb.auth.basic.BasicAuthClientProvider",
+        chroma_client_auth_provider="chromadb.auth.token.TokenAuthClientProvider",
         chroma_client_auth_credentials=CHROMA_AUTH_TOKEN
     )
 )
