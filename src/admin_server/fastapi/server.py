@@ -409,4 +409,11 @@ async def create_agent_request_endpoint(
         log_warning("API", f"Invalid bootstrap token for agent {req.agent_name}")
         raise HTTPException(status_code=401, detail="Invalid token")
         
-    return await crud.create_agent_request(db, req.agent_name, req.document_name, req.justification)
+    return await crud.create_agent_request(
+        db, 
+        req.agent_name, 
+        req.document_name_ru, 
+        req.document_name_en, 
+        req.justification_ru, 
+        req.justification_en
+    )

@@ -100,11 +100,20 @@ async def get_agent_requests(db: AsyncSession, skip: int = 0, limit: int = 50) -
     result = await db.execute(select(models.AgentRequest).order_by(models.AgentRequest.created_at.desc()).offset(skip).limit(limit))
     return result.scalars().all()
 
-async def create_agent_request(db: AsyncSession, agent_name: str, document_name: str, justification: str) -> models.AgentRequest:
+async def create_agent_request(
+    db: AsyncSession, 
+    agent_name: str, 
+    document_name_ru: str, 
+    document_name_en: str, 
+    justification_ru: str,
+    justification_en: str
+) -> models.AgentRequest:
     db_req = models.AgentRequest(
         agent_name=agent_name,
-        document_name=document_name,
-        justification=justification,
+        document_name_ru=document_name_ru,
+        document_name_en=document_name_en,
+        justification_ru=justification_ru,
+        justification_en=justification_en,
         status="Ожидает"
     )
     db.add(db_req)
