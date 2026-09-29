@@ -209,3 +209,14 @@ venv/
 env/
 .idea/
 .vscode/
+
+# Frontend (Vite)
+node_modules
+dist
+dist-ssr
+*.local
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
