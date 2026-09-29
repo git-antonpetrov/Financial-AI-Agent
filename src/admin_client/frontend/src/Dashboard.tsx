@@ -50,6 +50,51 @@ const formatAgentName = (name: string, lang: 'en' | 'ru') => {
   return `${capitalized} ${lang === 'en' ? 'agent' : 'агент'}`;
 };
 
+const translateStatusMessage = (msg: string | undefined, lang: 'en' | 'ru') => {
+  if (!msg) return '';
+  if (lang === 'ru') return msg;
+
+  let translatedMsg = msg;
+
+  // Handle dynamic regex translations first
+  const successRegex = /^Успешно! Документ (.*) отправлен в очередь на обработку\.$/;
+  const match = translatedMsg.match(successRegex);
+  if (match) {
+    translatedMsg = `Success! Document ${match[1]} sent to processing queue.`;
+    return translatedMsg; // Early return since it's fully translated
+  }
+
+  const translations: Record<string, string> = {
+    'В очереди...': 'In queue...',
+    'Отправка файла...': 'Sending file...',
+    'Запуск...': 'Starting...',
+    'Соединение прервано': 'Connection lost',
+    'Ошибка загрузки': 'Upload Failed',
+    'Успешно! Документ отправлен в очередь на обработку.': 'Success! Document sent to processing queue.',
+    'Пропущен: Точная копия файла уже загружена (дубликат)': 'Skipped: Exact copy already loaded (duplicate)',
+    'Пропущен: У нас уже загружена более новая версия этого документа': 'Skipped: A newer version is already loaded',
+    'Ошибка сети при связи с сервером': 'Network error communicating with server',
+    'Критическая ошибка:': 'Critical error:',
+    'Шаг 1: Вычисление MD5 и проверка дубликатов...': 'Step 1: MD5 hash and duplicate check...',
+    'Шаг 2: Извлечение текста (PyMuPDF)...': 'Step 2: Text extraction (PyMuPDF)...',
+    'Шаг 3: Распознавание текста (Content AI)...': 'Step 3: OCR (Content AI)...',
+    'Шаг 4: Анализ названия и типа документа (Gemini)...': 'Step 4: Title and type analysis (Gemini)...',
+    'Шаг 5: Проверка актуальности версии...': 'Step 5: Version validation...',
+    'Шаг 6: Поиск отмененных актов (Gemini)...': 'Step 6: Searching for repealed acts (Gemini)...',
+    'Шаг 6: Поиск отмененных документов...': 'Step 6: Searching for repealed acts (Gemini)...', // added fallback
+    'Шаг 7: Подготовка и загрузка на сервер (Векторизация)...': 'Step 7: Preparation and upload (Vectorization)...',
+    'Шаг 8: Отправка списка устаревших актов на удаление...': 'Step 8: Sending repealed acts for deletion...'
+  };
+  
+  for (const [ru, en] of Object.entries(translations)) {
+    if (translatedMsg.includes(ru)) {
+      translatedMsg = translatedMsg.replace(ru, en);
+      break;
+    }
+  }
+  return translatedMsg;
+};
+
 export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
   const [activeTab, setActiveTab] = useState<Tab>('rag')
   const [localFiles, setLocalFiles] = useState<LocalFile[]>([])
@@ -69,19 +114,6 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
   useEffect(() => {
     langRef.current = lang;
   }, [lang]);
-
-  const generateTestRequest = () => {
-    const testReq: AgentRequest = {
-      id: Date.now(),
-      agent_name: 'bank',
-      document_name_ru: 'Отчет_по_рискам_2026.pdf',
-      document_name_en: 'Risk_Report_2026.pdf',
-      justification_ru: 'Для анализа квартальных рисков и составления прогноза',
-      justification_en: 'To analyze quarterly risks and create a forecast',
-      status: 'pending'
-    }
-    setRequests(prev => [testReq, ...prev])
-  }
 
   const fetchRequests = async () => {
     setIsLoadingRequests(true)
@@ -173,7 +205,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
           status: 'pending' as const,
           elapsedSeconds: 0,
           agent_name: req.agent_name,
-          display_message: lang === 'en' ? 'In queue...' : 'В очереди...'
+          display_message: 'В очереди...'
         }
       }).filter(f => f.file !== undefined)
       
@@ -211,7 +243,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
           status: 'pending' as const,
           elapsedSeconds: 0,
           agent_name: selectedAgent || 'main', // Default agent for manual upload
-          display_message: lang === 'en' ? 'In queue...' : 'В очереди...'
+          display_message: 'В очереди...'
         }))
         setLocalFiles((prev) => [...prev, ...newFiles])
         // Removed newFiles.forEach(processFile) to let the queue handle it
@@ -227,7 +259,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
   const processFile = async (fileObj: LocalFile) => {
     try {
       // Mark as processing immediately so we don't pick it up again
-      setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'processing', display_message: lang === 'en' ? 'Sending file...' : 'Отправка файла...' } : f))
+      setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'processing', display_message: 'Отправка файла...' } : f))
       
       const formData = new FormData()
       formData.append('file', fileObj.file)
@@ -252,46 +284,19 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
       eventSource.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data)
-          
-          let translatedMsg = data.message;
-          const currentLang = langRef.current;
-          
-          if (currentLang === 'en') {
-            const translations: Record<string, string> = {
-              'Успешно! Документ отправлен в очередь на обработку.': 'Success! Document sent to processing queue.',
-              'Пропущен: Точная копия файла уже загружена (дубликат)': 'Skipped: Exact copy already loaded (duplicate)',
-              'Пропущен: У нас уже загружена более новая версия этого документа': 'Skipped: A newer version is already loaded',
-              'Ошибка сети при связи с сервером': 'Network error communicating with server',
-              'Критическая ошибка:': 'Critical error:',
-              'Шаг 1: Вычисление MD5 и проверка дубликатов...': 'Step 1: MD5 hash and duplicate check...',
-              'Шаг 2: Извлечение текста (PyMuPDF)...': 'Step 2: Text extraction (PyMuPDF)...',
-              'Шаг 3: Распознавание текста (Content AI)...': 'Step 3: OCR (Content AI)...',
-              'Шаг 4: Анализ названия и типа документа (Gemini)...': 'Step 4: Title and type analysis (Gemini)...',
-              'Шаг 5: Проверка актуальности версии...': 'Step 5: Version validation...',
-              'Шаг 6: Поиск отмененных актов (Gemini)...': 'Step 6: Searching for repealed acts (Gemini)...',
-              'Шаг 7: Подготовка и загрузка на сервер (Векторизация)...': 'Step 7: Preparation and upload (Vectorization)...',
-              'Шаг 8: Отправка списка устаревших актов на удаление...': 'Step 8: Sending repealed acts for deletion...'
-            };
-            
-            for (const [ru, en] of Object.entries(translations)) {
-              if (translatedMsg.includes(ru)) {
-                translatedMsg = translatedMsg.replace(ru, en);
-                break;
-              }
-            }
-          }
+          const msg = data.message;
 
           if (data.status === 'done' || data.status === 'completed') {
-            setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'sent', display_message: translatedMsg } : f))
+            setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'sent', display_message: msg } : f))
             eventSource.close()
           } else if (data.status === 'error') {
-            setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'error', display_message: translatedMsg } : f))
+            setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'error', display_message: msg } : f))
             eventSource.close()
           } else if (data.status === 'skipped') {
-            setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'skipped', display_message: translatedMsg } : f))
+            setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'skipped', display_message: msg } : f))
             eventSource.close()
           } else {
-            setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, display_message: translatedMsg } : f))
+            setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, display_message: msg } : f))
           }
         } catch (e) {
           console.error('Failed to parse SSE', e)
@@ -299,13 +304,13 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
       }
       
       eventSource.onerror = () => {
-        setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'error', display_message: langRef.current === 'en' ? 'Connection lost' : 'Соединение прервано' } : f))
+        setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'error', display_message: 'Соединение прервано' } : f))
         eventSource.close()
       }
       
     } catch (e: any) {
       console.error('Error in processFile:', e)
-      setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'error', display_message: langRef.current === 'en' ? 'Upload Failed' : 'Ошибка загрузки' } : f))
+      setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'error', display_message: 'Ошибка загрузки' } : f))
     }
   }
 
@@ -325,7 +330,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
       
       const newFiles = prevFiles.map(f => 
         idsToStart.includes(f.id) 
-          ? { ...f, status: 'processing' as const, display_message: langRef.current === 'en' ? 'Starting...' : 'Запуск...' } 
+          ? { ...f, status: 'processing' as const, display_message: 'Запуск...' } 
           : f
       );
 
@@ -494,7 +499,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
                         </div>
                         {f.display_message && (
                           <div className="text-xs text-purple-300/60 truncate mt-1">
-                            {f.display_message}
+                            {translateStatusMessage(f.display_message, lang)}
                           </div>
                         )}
                       </div>
@@ -552,12 +557,6 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
               >
                 {lang === 'en' ? 'Reject Selected' : 'Отклонить выбранные'}
                 {selectedRequests.size > 0 && ` (${selectedRequests.size})`}
-              </button>
-              <button
-                onClick={generateTestRequest}
-                className="py-3 px-4 bg-purple-900/40 hover:bg-purple-900/60 text-purple-300 font-medium rounded-xl transition-all duration-300 shadow-lg shadow-purple-500/10 border border-purple-500/20 active:scale-[0.98]"
-              >
-                {lang === 'en' ? 'Test Request' : 'Тест. заявка'}
               </button>
             </div>
             

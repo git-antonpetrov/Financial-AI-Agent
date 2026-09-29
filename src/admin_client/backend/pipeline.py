@@ -166,7 +166,7 @@ class DocumentPipeline:
             # ==========================================
             # ШАГ 6: ПОИСК ОТМЕНЕННЫХ ДОКУМЕНТОВ
             # ==========================================
-            self.on_progress_update(filename, "processing", "Шаг 6: Поиск отмененных документов...")
+            self.on_progress_update(filename, "processing", "Шаг 6: Поиск отмененных актов (Gemini)...")
             log_info("Pipeline", "Поиск абзацев об отмене...")
             
             repealed_paragraphs = self._extract_repeal_paragraphs(recognized_text)
@@ -236,7 +236,7 @@ class DocumentPipeline:
                 delete_resp.raise_for_status()
 
             # Успешное завершение всего пайплайна для этого файла!
-            success_msg = f"Успешно! Документ {system_name} отправлен в очередь на обработку."
+            success_msg = "Успешно! Документ отправлен в очередь на обработку."
             log_info("Pipeline", success_msg)
             self.on_progress_update(filename, "completed", success_msg)
             
