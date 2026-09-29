@@ -112,6 +112,14 @@ async def create_agent_request(db: AsyncSession, agent_name: str, document_name:
     await db.refresh(db_req)
     return db_req
 
+async def update_agent_request_status(db: AsyncSession, request_ids: list[int], status: str):
+    query = select(models.AgentRequest).where(models.AgentRequest.id.in_(request_ids))
+    result = await db.execute(query)
+    requests = result.scalars().all()
+    for req in requests:
+        req.status = status
+    await db.commit()
+
 async def get_agent(db: AsyncSession, agent_name: str) -> models.Agent:
     result = await db.execute(select(models.Agent).where(models.Agent.name == agent_name))
     return result.scalars().first()

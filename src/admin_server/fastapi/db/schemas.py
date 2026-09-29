@@ -45,6 +45,14 @@ class AgentRequestResponse(BaseModel):
     class Config:
         from_attributes = True
 
+class AgentRequestCreate(BaseModel):
+    agent_name: str
+    document_name: str
+    justification: str
+
+class AgentRequestBatchAction(BaseModel):
+    request_ids: List[int]
+
 class AgentRegisterRequest(BaseModel):
     agent_name: str
     public_key: str

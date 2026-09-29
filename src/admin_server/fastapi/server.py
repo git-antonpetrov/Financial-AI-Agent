@@ -359,3 +359,44 @@ async def llm_find_repealed(
     except Exception as e:
         log_error("LLM", f"Error in find_repealed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"LLM Error: {str(e)}")
+
+# --- ROUTES: ADMIN - AGENT REQUESTS ---
+@app.get("/api/agent-requests", response_model=list[schemas.AgentRequestResponse])
+async def list_agent_requests(
+    skip: int = 0, limit: int = 50,
+    db: AsyncSession = Depends(get_db),
+    current_admin: str = Depends(get_current_admin)
+):
+    requests = await crud.get_agent_requests(db, skip=skip, limit=limit)
+    return requests
+
+@app.post("/api/agent-requests/approve")
+async def approve_agent_requests(
+    req: schemas.AgentRequestBatchAction,
+    db: AsyncSession = Depends(get_db),
+    current_admin: str = Depends(get_current_admin)
+):
+    await crud.update_agent_request_status(db, req.request_ids, "Одобрена")
+    return {"status": "ok"}
+
+@app.post("/api/agent-requests/reject")
+async def reject_agent_requests(
+    req: schemas.AgentRequestBatchAction,
+    db: AsyncSession = Depends(get_db),
+    current_admin: str = Depends(get_current_admin)
+):
+    await crud.update_agent_request_status(db, req.request_ids, "Отклонена")
+    return {"status": "ok"}
+
+@app.post("/api/agents/requests", response_model=schemas.AgentRequestResponse)
+async def create_agent_request_endpoint(
+    req: schemas.AgentRequestCreate,
+    db: AsyncSession = Depends(get_db),
+    authorization: str = Header(...)
+):
+    expected_token = settings.get_bootstrap_token(req.agent_name)
+    if not expected_token or authorization != f"Bearer {expected_token}":
+        log_warning("API", f"Invalid bootstrap token for agent {req.agent_name}")
+        raise HTTPException(status_code=401, detail="Invalid token")
+        
+    return await crud.create_agent_request(db, req.agent_name, req.document_name, req.justification)

@@ -1,5 +1,5 @@
-import { useState, useRef } from 'react'
-import { Users, FileText, UploadCloud, Clock, CheckCircle2, Globe } from 'lucide-react'
+import { useState, useRef, useEffect } from 'react'
+import { Users, FileText, UploadCloud, Clock, CheckCircle2, Globe, Server, Check, X } from 'lucide-react'
 
 type Tab = 'rag' | 'agents'
 
@@ -30,8 +30,126 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
   const [localFiles, setLocalFiles] = useState<LocalFile[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  // Mock data for requests
-  const [requests] = useState<AgentRequest[]>([])
+  const [requests, setRequests] = useState<AgentRequest[]>([])
+  const [selectedRequests, setSelectedRequests] = useState<Set<number>>(new Set())
+  const [isLoadingRequests, setIsLoadingRequests] = useState(false)
+
+  // Approve Modal State
+  const [isApproveModalOpen, setIsApproveModalOpen] = useState(false)
+  const [approvingRequests, setApprovingRequests] = useState<AgentRequest[]>([])
+  const [requestFiles, setRequestFiles] = useState<Record<number, File>>({})
+
+  const fetchRequests = async () => {
+    setIsLoadingRequests(true)
+    try {
+      const token = localStorage.getItem('admin_token')
+      const serverUrl = localStorage.getItem('admin_server') || ''
+      const res = await fetch(`${serverUrl}/api/agent-requests`, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      })
+      if (res.ok) {
+        const data = await res.json()
+        setRequests(data)
+      }
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setIsLoadingRequests(false)
+    }
+  }
+
+  useEffect(() => {
+    if (activeTab === 'agents') {
+      fetchRequests()
+    }
+  }, [activeTab])
+
+  const toggleSelection = (id: number) => {
+    const newSet = new Set(selectedRequests)
+    if (newSet.has(id)) {
+      newSet.delete(id)
+    } else {
+      newSet.add(id)
+    }
+    setSelectedRequests(newSet)
+  }
+
+  const rejectRequests = async (ids: number[]) => {
+    try {
+      const token = localStorage.getItem('admin_token')
+      const serverUrl = localStorage.getItem('admin_server') || ''
+      await fetch(`${serverUrl}/api/agent-requests/reject`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ request_ids: ids })
+      })
+      setSelectedRequests(new Set())
+      fetchRequests()
+    } catch (e) {
+      console.error(e)
+    }
+  }
+
+  const handleRejectSelected = () => rejectRequests(Array.from(selectedRequests))
+  const handleRejectSingle = (id: number) => rejectRequests([id])
+
+  const openApproveModal = (reqs: AgentRequest[]) => {
+    setApprovingRequests(reqs)
+    setRequestFiles({})
+    setIsApproveModalOpen(true)
+  }
+
+  const handleApproveSelected = () => {
+    const reqs = requests.filter(r => selectedRequests.has(r.id))
+    openApproveModal(reqs)
+  }
+
+  const handleFileForRequest = (reqId: number, file: File) => {
+    setRequestFiles(prev => ({ ...prev, [reqId]: file }))
+  }
+
+  const confirmApprove = async () => {
+    const ids = approvingRequests.map(r => r.id)
+    
+    // First update statuses
+    try {
+      const token = localStorage.getItem('admin_token')
+      const serverUrl = localStorage.getItem('admin_server') || ''
+      await fetch(`${serverUrl}/api/agent-requests/approve`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ request_ids: ids })
+      })
+      
+      // Then add files to RAG tab queue
+      const newLocalFiles = approvingRequests.map(req => {
+        const file = requestFiles[req.id]
+        return {
+          id: Math.random().toString(36).substring(7),
+          file: file,
+          name: file.name,
+          status: 'processing' as const,
+          elapsedSeconds: 0,
+        }
+      })
+      
+      setLocalFiles(prev => [...prev, ...newLocalFiles])
+      setIsApproveModalOpen(false)
+      setSelectedRequests(new Set())
+      fetchRequests()
+      setActiveTab('rag')
+    } catch (e) {
+      console.error(e)
+    }
+  }
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
@@ -174,21 +292,29 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
           <div className="flex flex-col h-full">
             <div className="flex items-center gap-4 mb-6">
               <button 
-                disabled={requests.length === 0}
+                disabled={selectedRequests.size === 0}
+                onClick={handleApproveSelected}
                 className="flex-1 py-3 px-4 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 disabled:from-purple-900/50 disabled:to-indigo-900/50 disabled:text-white/30 disabled:cursor-not-allowed text-white font-medium rounded-xl transition-all shadow-lg shadow-purple-500/25 disabled:shadow-none active:scale-[0.98]"
               >
                 {lang === 'en' ? 'Approve Selected' : 'Одобрить выбранные'}
+                {selectedRequests.size > 0 && ` (${selectedRequests.size})`}
               </button>
               <button 
-                disabled={requests.length === 0}
+                disabled={selectedRequests.size === 0}
+                onClick={handleRejectSelected}
                 className="flex-1 py-3 px-4 bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 disabled:from-red-900/30 disabled:to-rose-900/30 disabled:text-white/30 disabled:cursor-not-allowed text-white font-medium rounded-xl transition-all shadow-lg shadow-red-500/25 disabled:shadow-none active:scale-[0.98]"
               >
                 {lang === 'en' ? 'Reject Selected' : 'Отклонить выбранные'}
+                {selectedRequests.size > 0 && ` (${selectedRequests.size})`}
               </button>
             </div>
             
-            <div className="flex-1 overflow-auto">
-              {requests.length === 0 ? (
+            <div className="flex-1 overflow-auto pr-2">
+              {isLoadingRequests ? (
+                <div className="h-full flex items-center justify-center">
+                  <div className="w-8 h-8 border-4 border-purple-500/30 border-t-purple-500 rounded-full animate-spin"></div>
+                </div>
+              ) : requests.length === 0 ? (
                 <div className="h-full flex flex-col items-center justify-center text-purple-300/50">
                   <Users className="w-16 h-16 mb-4 opacity-20" />
                   <p>{lang === 'en' ? 'No pending agent requests.' : 'Нет активных заявок агентов.'}</p>
@@ -197,8 +323,58 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
                   </p>
                 </div>
               ) : (
-                <div className="space-y-3">
-                  {/* We will populate this when we fetch from the DB */}
+                <div className="space-y-4">
+                  {requests.map(req => (
+                    <div key={req.id} className="flex gap-4 p-5 bg-[#1a0f3c]/80 border border-purple-500/20 rounded-2xl hover:border-purple-500/40 transition-colors">
+                      <div className="flex-none pt-1">
+                        <div 
+                          onClick={() => toggleSelection(req.id)}
+                          className={`w-6 h-6 rounded-md border-2 flex items-center justify-center cursor-pointer transition-colors ${
+                            selectedRequests.has(req.id) 
+                              ? 'bg-purple-500 border-purple-500 text-white' 
+                              : 'border-purple-500/30 hover:border-purple-500/50 text-transparent'
+                          }`}
+                        >
+                          <Check className="w-4 h-4" strokeWidth={3} />
+                        </div>
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center gap-2">
+                            <Server className="w-4 h-4 text-purple-400" />
+                            <span className="font-bold text-white truncate">{req.agent_name}</span>
+                          </div>
+                          <span className={`text-xs px-2 py-1 rounded-full border ${
+                            req.status === 'Ожидает' ? 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20' :
+                            req.status === 'Одобрена' ? 'bg-green-500/10 text-green-400 border-green-500/20' :
+                            'bg-red-500/10 text-red-400 border-red-500/20'
+                          }`}>
+                            {req.status}
+                          </span>
+                        </div>
+                        <h3 className="text-lg font-medium text-purple-100 mb-1">{req.document_name}</h3>
+                        <p className="text-sm text-purple-300/70 leading-relaxed line-clamp-2">
+                          {req.justification}
+                        </p>
+                      </div>
+                      <div className="flex-none flex flex-col gap-2 justify-center pl-4 border-l border-purple-500/10">
+                        <button 
+                          onClick={() => openApproveModal([req])}
+                          disabled={selectedRequests.size > 0}
+                          className="p-2 rounded-xl bg-purple-500/10 text-purple-400 hover:bg-purple-500/20 hover:text-purple-300 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-purple-500/10 transition-colors" title={lang === 'en' ? 'Approve' : 'Одобрить'}
+                        >
+                          <Check className="w-5 h-5" />
+                        </button>
+                        <button 
+                          onClick={() => handleRejectSingle(req.id)}
+                          disabled={selectedRequests.size > 0}
+                          className="p-2 rounded-xl bg-red-500/10 text-red-400 hover:bg-red-500/20 hover:text-red-300 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-red-500/10 transition-colors" title={lang === 'en' ? 'Reject' : 'Отклонить'}
+                        >
+                          <X className="w-5 h-5" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
@@ -206,6 +382,76 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
         </div>
 
       </div>
+
+      {/* Approve Modal Overlay */}
+      {isApproveModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#0f0728]/80 backdrop-blur-sm animate-fade-scale">
+          <div className="bg-[#1a0f3c] border border-purple-500/30 rounded-3xl w-full max-w-2xl shadow-2xl flex flex-col max-h-[90vh]">
+            <div className="flex justify-between items-center p-6 border-b border-purple-500/10">
+              <h3 className="text-xl font-bold text-white">
+                {lang === 'en' ? 'Attach Documents' : 'Прикрепить документы'}
+              </h3>
+              <button 
+                onClick={() => setIsApproveModalOpen(false)}
+                className="p-2 text-purple-300 hover:text-white bg-white/5 hover:bg-white/10 rounded-full transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            
+            <div className="p-6 overflow-y-auto flex-1 space-y-4">
+              {approvingRequests.map(req => (
+                <div key={req.id} className="p-4 bg-[#0f0728]/50 rounded-xl border border-purple-500/10 flex flex-col gap-3">
+                  <div className="flex justify-between">
+                    <span className="font-bold text-purple-200">{req.agent_name}</span>
+                    <span className="text-sm text-purple-400">{req.document_name}</span>
+                  </div>
+                  <p className="text-sm text-purple-300/70">{req.justification}</p>
+                  
+                  {/* File Input for this request */}
+                  <div className="mt-2">
+                    <label className={`flex items-center justify-center gap-2 p-3 border border-dashed rounded-xl cursor-pointer transition-colors ${
+                      requestFiles[req.id] ? 'border-green-500/50 bg-green-500/10 text-green-300' : 'border-purple-500/30 hover:border-purple-500/60 bg-purple-500/5 text-purple-300'
+                    }`}>
+                      <input 
+                        type="file" 
+                        className="hidden" 
+                        onChange={(e) => {
+                          if (e.target.files && e.target.files[0]) {
+                            handleFileForRequest(req.id, e.target.files[0])
+                          }
+                        }}
+                      />
+                      {requestFiles[req.id] ? (
+                        <>
+                          <CheckCircle2 className="w-5 h-5" />
+                          <span className="truncate max-w-[200px]">{requestFiles[req.id].name}</span>
+                        </>
+                      ) : (
+                        <>
+                          <UploadCloud className="w-5 h-5" />
+                          <span>{lang === 'en' ? 'Select File' : 'Выбрать файл'}</span>
+                        </>
+                      )}
+                    </label>
+                  </div>
+                </div>
+              ))}
+            </div>
+            
+            <div className="p-6 border-t border-purple-500/10 bg-[#0f0728]/30 rounded-b-3xl">
+              <button 
+                onClick={confirmApprove}
+                disabled={Object.keys(requestFiles).length !== approvingRequests.length}
+                className="w-full py-4 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 disabled:from-purple-900/50 disabled:to-indigo-900/50 disabled:text-white/30 disabled:cursor-not-allowed text-white font-bold rounded-xl transition-all shadow-lg shadow-purple-500/25 disabled:shadow-none"
+              >
+                {lang === 'en' ? 'Confirm and Upload to RAG' : 'Подтвердить и загрузить в RAG'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       </div>
     </div>
   )
