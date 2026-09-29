@@ -14,6 +14,10 @@ const translations = {
     loginBtn: 'Connect',
     connecting: 'Connecting...',
     errorAuth: 'Invalid password or server error',
+    errorInvalidUrl: 'Invalid server address format',
+    errorEmptyPassword: 'Password cannot be empty',
+    errorInvalidDomain: 'Please enter a valid domain',
+    errorUnknown: 'An unexpected error occurred',
   },
   ru: {
     title: 'Доступ администратора',
@@ -25,6 +29,10 @@ const translations = {
     loginBtn: 'Подключиться',
     connecting: 'Соединение...',
     errorAuth: 'Неверный пароль или ошибка сервера',
+    errorInvalidUrl: 'Неверный формат адреса сервера',
+    errorEmptyPassword: 'Пароль не может быть пустым',
+    errorInvalidDomain: 'Пожалуйста, введите корректный домен',
+    errorUnknown: 'Произошла неизвестная ошибка',
   }
 }
 
@@ -55,12 +63,12 @@ function App() {
       try {
         new URL(baseUrl)
       } catch (err) {
-        throw new Error(lang === 'en' ? 'Invalid server address format' : 'Неверный формат адреса сервера')
+        throw new Error('errorInvalidUrl')
       }
 
       // 2. Проверка, что пароль не пустой
       if (!password.trim()) {
-        throw new Error(lang === 'en' ? 'Password cannot be empty' : 'Пароль не может быть пустым')
+        throw new Error('errorEmptyPassword')
       }
 
       // 3. Запрещаем отправку запросов на локальные и приватные адреса, 
@@ -68,7 +76,7 @@ function App() {
       const parsedUrl = new URL(baseUrl)
       if (parsedUrl.hostname !== 'localhost' && parsedUrl.hostname !== '127.0.0.1') {
         if (!parsedUrl.hostname.includes('.')) {
-          throw new Error(lang === 'en' ? 'Please enter a valid domain' : 'Пожалуйста, введите корректный домен')
+          throw new Error('errorInvalidDomain')
         }
       }
 
@@ -91,7 +99,7 @@ function App() {
       })
 
       if (!response.ok) {
-        throw new Error(t.errorAuth)
+        throw new Error('errorAuth')
       }
 
       const data = await response.json()
@@ -102,24 +110,46 @@ function App() {
         localStorage.setItem('admin_server', baseUrl)
         setIsAuthenticated(true)
       } else {
-        throw new Error(t.errorAuth)
+        throw new Error('errorAuth')
       }
     } catch (err: any) {
-      setError(err.message || t.errorAuth)
+      const knownKeys = ['errorInvalidUrl', 'errorEmptyPassword', 'errorInvalidDomain', 'errorAuth']
+      if (knownKeys.includes(err.message)) {
+        setError(err.message)
+      } else {
+        setError('errorUnknown')
+      }
     } finally {
       setIsLoading(false)
     }
   }
 
+  const handleLogout = async () => {
+    try {
+      const token = localStorage.getItem('admin_token')
+      const serverUrl = localStorage.getItem('admin_server') || ''
+      if (token && serverUrl) {
+        await fetch(`${serverUrl}/api/auth/logout`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`
+          }
+        })
+      }
+    } catch (e) {
+      console.error('Logout error:', e)
+    } finally {
+      localStorage.removeItem('admin_token')
+      setIsAuthenticated(false)
+    }
+  }
+
   if (isAuthenticated) {
-    return <Dashboard lang={lang} setLang={setLang} />
+    return <Dashboard lang={lang} setLang={setLang} onLogout={handleLogout} />
   }
 
   return (
-    <div className="min-h-screen bg-[#0f0728] text-white flex flex-col relative overflow-hidden">
-      {/* Background Decorative Elements */}
-      <div className="absolute top-[-20%] left-[-10%] w-[50%] h-[50%] rounded-full bg-purple-600/20 blur-[120px] pointer-events-none" />
-      <div className="absolute bottom-[-20%] right-[-10%] w-[50%] h-[50%] rounded-full bg-fuchsia-600/10 blur-[120px] pointer-events-none" />
+    <div className="min-h-full flex flex-col relative">
 
       {/* Header / Language Toggle */}
       <div className="p-6 flex justify-end relative z-10">
@@ -200,7 +230,7 @@ function App() {
 
               {error && (
                 <div key={error} className="animate-slide-down p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-sm text-center">
-                  {error}
+                  {t[error as keyof typeof t]}
                 </div>
               )}
 

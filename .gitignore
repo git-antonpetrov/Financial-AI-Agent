@@ -221,3 +221,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Tauri Desktop Client
+src/admin_client/frontend/src-tauri/target/
+src/admin_client/frontend/src-tauri/gen/schemas/
+src/admin_client/frontend/src-tauri/bin/

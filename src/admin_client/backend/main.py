@@ -1,8 +1,7 @@
 import os
 import asyncio
 import uuid
-import shutil
-import json
+import time
 from threading import Thread
 # pyrefly: ignore [missing-import]
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
@@ -10,23 +9,54 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import EventSourceResponse
 # pyrefly: ignore [missing-import]
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 from pipeline import DocumentPipeline
 
-app = FastAPI(title="Local Admin Client Backend")
+# Очереди в памяти для SSE-ответов и время их создания
+job_queues = {}
+job_statuses = {}
+job_creation_times = {}
+
+async def cleanup_stale_jobs():
+    """Фоновая задача для очистки устаревших задач (предотвращение утечки памяти)"""
+    while True:
+        await asyncio.sleep(300)  # Проверяем каждые 5 минут
+        current_time = time.time()
+        stale_jobs = [job_id for job_id, created_at in job_creation_times.items() 
+                      if current_time - created_at > 3600]  # Удаляем старше 1 часа
+        for job_id in stale_jobs:
+            job_queues.pop(job_id, None)
+            job_statuses.pop(job_id, None)
+            job_creation_times.pop(job_id, None)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Запускаем фоновую очистку при старте приложения
+    cleanup_task = asyncio.create_task(cleanup_stale_jobs())
+    yield
+    cleanup_task.cancel()
+
+app = FastAPI(title="Local Admin Client Backend", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "tauri://localhost", "https://tauri.localhost"],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "tauri://localhost", "https://tauri.localhost"],
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
-# Очереди в памяти для SSE-ответов
-job_queues = {}
-job_statuses = {}
 
 TEMP_DIR = os.path.join(os.path.dirname(__file__), "temp_uploads")
+# Очищаем директорию временных файлов при запуске, чтобы не засорять диск
+if os.path.exists(TEMP_DIR):
+    for filename in os.listdir(TEMP_DIR):
+        file_path = os.path.join(TEMP_DIR, filename)
+        try:
+            if os.path.isfile(file_path):
+                os.remove(file_path)
+        except Exception:
+            pass
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 def run_pipeline(job_id: str, file_path: str, agent_name: str, server_url: str, admin_token: str, loop: asyncio.AbstractEventLoop):
@@ -73,9 +103,15 @@ async def process_document(
     admin_token: str = Form(...),
     file: UploadFile = File(...)
 ):
+    # Валидация агента, чтобы не тратить ресурсы впустую
+    VALID_AGENTS = {"main", "bank", "invest", "digital"}
+    if agent_name not in VALID_AGENTS:
+        raise HTTPException(status_code=400, detail=f"Invalid agent: {agent_name}")
+
     job_id = str(uuid.uuid4())
     job_queues[job_id] = asyncio.Queue()
     job_statuses[job_id] = "running"
+    job_creation_times[job_id] = time.time()
     
     # Ограничение размера в 1 ГБ через чтение частями
     MAX_SIZE = 1024 * 1024 * 1024
@@ -104,27 +140,26 @@ async def process_document(
     
     return {"job_id": job_id, "filename": file.filename}
 
-@app.get("/api/local/progress/{job_id}")
+@app.get("/api/local/progress/{job_id}", response_class=EventSourceResponse)
 async def get_progress(job_id: str):
     if job_id not in job_queues:
         raise HTTPException(status_code=404, detail="Job not found")
         
-    async def event_generator():
-        queue = job_queues[job_id]
+    queue = job_queues[job_id]
+    
+    try:
         while True:
             # Ожидание события
             event = await queue.get()
-            yield {"event": "progress", "data": json.dumps(event)}
+            yield event
             
             if event.get("status") in ["done", "error", "skipped"]:
                 break
-                
-        # Очистка ресурсов
-        if job_id in job_queues:
-            del job_queues[job_id]
-            del job_statuses[job_id]
-
-    return EventSourceResponse(event_generator())
+    finally:
+        # Очистка ресурсов при закрытии соединения
+        job_queues.pop(job_id, None)
+        job_statuses.pop(job_id, None)
+        job_creation_times.pop(job_id, None)
 
 if __name__ == "__main__":
     import uvicorn

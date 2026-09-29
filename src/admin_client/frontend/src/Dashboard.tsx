@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { Users, FileText, UploadCloud, Clock, CheckCircle2, Globe, Server, Check, X } from 'lucide-react'
+import { Users, FileText, UploadCloud, Clock, CheckCircle2, Globe, Server, Check, X, LogOut } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 
 type Tab = 'rag' | 'agents'
@@ -29,15 +29,16 @@ interface AgentRequest {
 interface DashboardProps {
   lang: 'en' | 'ru'
   setLang: (lang: 'en' | 'ru') => void
+  onLogout?: () => void
 }
 
 const formatAgentName = (name: string, lang: 'en' | 'ru') => {
   if (!name) return '';
   const dictionary: Record<string, { en: string, ru: string }> = {
-    digital: { en: 'Digital agent', ru: 'Цифровой агент' },
-    invest: { en: 'Invest agent', ru: 'Инвестиционный агент' },
-    bank: { en: 'Bank agent', ru: 'Банковский агент' },
     main: { en: 'Main agent', ru: 'Главный агент' },
+    bank: { en: 'Financial agent', ru: 'Финансовый агент' },
+    invest: { en: 'Invest agent', ru: 'Инвестиционный агент' },
+    digital: { en: 'Digital agent', ru: 'Цифровой агент' },
   };
   
   const lowerName = name.toLowerCase();
@@ -49,7 +50,7 @@ const formatAgentName = (name: string, lang: 'en' | 'ru') => {
   return `${capitalized} ${lang === 'en' ? 'agent' : 'агент'}`;
 };
 
-export default function Dashboard({ lang, setLang }: DashboardProps) {
+export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
   const [activeTab, setActiveTab] = useState<Tab>('rag')
   const [localFiles, setLocalFiles] = useState<LocalFile[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -62,6 +63,25 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
   const [isApproveModalOpen, setIsApproveModalOpen] = useState(false)
   const [approvingRequests, setApprovingRequests] = useState<AgentRequest[]>([])
   const [requestFiles, setRequestFiles] = useState<Record<number, File>>({})
+  const [selectedAgent, setSelectedAgent] = useState('main')
+  
+  const langRef = useRef(lang);
+  useEffect(() => {
+    langRef.current = lang;
+  }, [lang]);
+
+  const generateTestRequest = () => {
+    const testReq: AgentRequest = {
+      id: Date.now(),
+      agent_name: 'bank',
+      document_name_ru: 'Отчет_по_рискам_2026.pdf',
+      document_name_en: 'Risk_Report_2026.pdf',
+      justification_ru: 'Для анализа квартальных рисков и составления прогноза',
+      justification_en: 'To analyze quarterly risks and create a forecast',
+      status: 'pending'
+    }
+    setRequests(prev => [testReq, ...prev])
+  }
 
   const fetchRequests = async () => {
     setIsLoadingRequests(true)
@@ -102,6 +122,7 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
 
   const rejectRequests = async (ids: number[]) => {
     setRequests(prev => prev.map(r => ids.includes(r.id) ? { ...r, status: 'rejected' } : r))
+    setSelectedRequests(new Set())
     try {
       const token = localStorage.getItem('admin_token')
       const serverUrl = localStorage.getItem('admin_server') || ''
@@ -113,7 +134,6 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
         },
         body: JSON.stringify({ request_ids: ids })
       })
-      setSelectedRequests(new Set())
       fetchRequests()
     } catch (e) {
       console.error(e)
@@ -139,11 +159,32 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
   }
 
   const confirmApprove = async () => {
-    const ids = approvingRequests.map(r => r.id)
-    setRequests(prev => prev.map(r => ids.includes(r.id) ? { ...r, status: 'approved' } : r))
-    
-    // First update statuses
     try {
+      const ids = approvingRequests.map(r => r.id)
+      setRequests(prev => prev.map(r => ids.includes(r.id) ? { ...r, status: 'approved' } : r))
+      
+      // Add files to RAG tab queue
+      const newLocalFiles = approvingRequests.map(req => {
+        const file = requestFiles[req.id]
+        return {
+          id: Math.random().toString(36).substring(7),
+          file: file,
+          name: file ? file.name : 'Unknown file',
+          status: 'pending' as const,
+          elapsedSeconds: 0,
+          agent_name: req.agent_name,
+          display_message: lang === 'en' ? 'In queue...' : 'В очереди...'
+        }
+      }).filter(f => f.file !== undefined)
+      
+      setLocalFiles(prev => [...prev, ...newLocalFiles])
+      // Removed newLocalFiles.forEach(processFile) to let the queue handle it
+      
+      setIsApproveModalOpen(false)
+      setSelectedRequests(new Set())
+      setActiveTab('rag')
+      
+      // Try to update statuses on the server
       const token = localStorage.getItem('admin_token')
       const serverUrl = localStorage.getItem('admin_server') || ''
       await fetch(`${serverUrl}/api/agent-requests/approve`, {
@@ -154,91 +195,103 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
         },
         body: JSON.stringify({ request_ids: ids })
       })
-      
-      // Then add files to RAG tab queue
-      const newLocalFiles = approvingRequests.map(req => {
-        const file = requestFiles[req.id]
-        return {
-          id: Math.random().toString(36).substring(7),
-          file: file,
-          name: file.name,
-          status: 'pending' as const,
-          elapsedSeconds: 0,
-          agent_name: req.agent_name,
-          display_message: lang === 'en' ? 'In queue...' : 'В очереди...'
-        }
-      })
-      
-      setLocalFiles(prev => [...prev, ...newLocalFiles])
-      newLocalFiles.forEach(processFile)
-      setIsApproveModalOpen(false)
-      setSelectedRequests(new Set())
       fetchRequests()
-      setActiveTab('rag')
-    } catch (e) {
-      console.error(e)
+    } catch (e: any) {
+      console.error('Error in confirmApprove:', e)
     }
   }
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0) {
-      const newFiles = Array.from(e.target.files).map((f) => ({
-        id: Math.random().toString(36).substring(7),
-        file: f,
-        name: f.name,
-        status: 'pending' as const,
-        elapsedSeconds: 0,
-        agent_name: 'main', // Default agent for manual upload
-        display_message: lang === 'en' ? 'In queue...' : 'В очереди...'
-      }))
-      setLocalFiles((prev) => [...prev, ...newFiles])
-      newFiles.forEach(processFile)
-    }
-    if (fileInputRef.current) {
-      fileInputRef.current.value = ''
+    try {
+      if (e.target.files && e.target.files.length > 0) {
+        const newFiles = Array.from(e.target.files).map((f) => ({
+          id: Math.random().toString(36).substring(7),
+          file: f,
+          name: f.name,
+          status: 'pending' as const,
+          elapsedSeconds: 0,
+          agent_name: selectedAgent || 'main', // Default agent for manual upload
+          display_message: lang === 'en' ? 'In queue...' : 'В очереди...'
+        }))
+        setLocalFiles((prev) => [...prev, ...newFiles])
+        // Removed newFiles.forEach(processFile) to let the queue handle it
+      }
+      if (fileInputRef.current) {
+        fileInputRef.current.value = ''
+      }
+    } catch (e: any) {
+      console.error('Error in handleFileUpload:', e)
     }
   }
 
   const processFile = async (fileObj: LocalFile) => {
-    // Mark as processing immediately so we don't pick it up again
-    setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'processing', display_message: lang === 'en' ? 'Sending file...' : 'Отправка файла...' } : f))
-    
-    const formData = new FormData()
-    formData.append('file', fileObj.file)
-    formData.append('agent_name', fileObj.agent_name || 'main')
-    formData.append('server_url', localStorage.getItem('admin_server') || '')
-    formData.append('admin_token', localStorage.getItem('admin_token') || '')
-
     try {
-      const uploadRes = await fetch('http://localhost:8001/api/local/process', {
+      // Mark as processing immediately so we don't pick it up again
+      setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'processing', display_message: lang === 'en' ? 'Sending file...' : 'Отправка файла...' } : f))
+      
+      const formData = new FormData()
+      formData.append('file', fileObj.file)
+      formData.append('agent_name', fileObj.agent_name || 'main')
+      formData.append('server_url', localStorage.getItem('admin_server') || '')
+      formData.append('admin_token', localStorage.getItem('admin_token') || '')
+
+      const uploadRes = await fetch('http://127.0.0.1:8001/api/local/process', {
         method: 'POST',
         body: formData
       })
       
-      if (!uploadRes.ok) throw new Error('Upload failed')
+      if (!uploadRes.ok) throw new Error('Upload failed with status ' + uploadRes.status)
       
       const { job_id } = await uploadRes.json()
       
       setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, job_id } : f))
       
       // Listen to SSE for progress
-      const eventSource = new EventSource(`http://localhost:8001/api/local/progress/${job_id}`)
+      const eventSource = new EventSource(`http://127.0.0.1:8001/api/local/progress/${job_id}`)
       
       eventSource.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data)
           
+          let translatedMsg = data.message;
+          const currentLang = langRef.current;
+          
+          if (currentLang === 'en') {
+            const translations: Record<string, string> = {
+              'Успешно! Документ отправлен в очередь на обработку.': 'Success! Document sent to processing queue.',
+              'Пропущен: Точная копия файла уже загружена (дубликат)': 'Skipped: Exact copy already loaded (duplicate)',
+              'Пропущен: У нас уже загружена более новая версия этого документа': 'Skipped: A newer version is already loaded',
+              'Ошибка сети при связи с сервером': 'Network error communicating with server',
+              'Критическая ошибка:': 'Critical error:',
+              'Шаг 1: Вычисление MD5 и проверка дубликатов...': 'Step 1: MD5 hash and duplicate check...',
+              'Шаг 2: Извлечение текста (PyMuPDF)...': 'Step 2: Text extraction (PyMuPDF)...',
+              'Шаг 3: Распознавание текста (Content AI)...': 'Step 3: OCR (Content AI)...',
+              'Шаг 4: Анализ названия и типа документа (Gemini)...': 'Step 4: Title and type analysis (Gemini)...',
+              'Шаг 5: Проверка актуальности версии...': 'Step 5: Version validation...',
+              'Шаг 6: Поиск отмененных актов (Gemini)...': 'Step 6: Searching for repealed acts (Gemini)...',
+              'Шаг 7: Подготовка и загрузка на сервер (Векторизация)...': 'Step 7: Preparation and upload (Vectorization)...',
+              'Шаг 8: Отправка списка устаревших актов на удаление...': 'Step 8: Sending repealed acts for deletion...'
+            };
+            
+            for (const [ru, en] of Object.entries(translations)) {
+              if (translatedMsg.includes(ru)) {
+                translatedMsg = translatedMsg.replace(ru, en);
+                break;
+              }
+            }
+          }
+
           if (data.status === 'done' || data.status === 'completed') {
-            setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'sent', display_message: data.message } : f))
+            setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'sent', display_message: translatedMsg } : f))
             eventSource.close()
           } else if (data.status === 'error') {
-            setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'error', display_message: data.message } : f))
+            setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'error', display_message: translatedMsg } : f))
             eventSource.close()
           } else if (data.status === 'skipped') {
-            setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'skipped', display_message: data.message } : f))
+            setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'skipped', display_message: translatedMsg } : f))
             eventSource.close()
           } else {
-            setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, display_message: data.message } : f))
+            setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, display_message: translatedMsg } : f))
           }
         } catch (e) {
           console.error('Failed to parse SSE', e)
@@ -246,15 +299,53 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
       }
       
       eventSource.onerror = () => {
-        setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'error', display_message: lang === 'en' ? 'Connection lost' : 'Соединение прервано' } : f))
+        setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'error', display_message: langRef.current === 'en' ? 'Connection lost' : 'Соединение прервано' } : f))
         eventSource.close()
       }
       
     } catch (e: any) {
-      setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'error', display_message: e.message } : f))
+      console.error('Error in processFile:', e)
+      setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'error', display_message: langRef.current === 'en' ? 'Upload Failed' : 'Ошибка загрузки' } : f))
     }
   }
 
+  const processingRef = useRef<Set<string>>(new Set());
+
+  const processQueue = () => {
+    setLocalFiles(prevFiles => {
+      const processingCount = prevFiles.filter(f => f.status === 'processing').length;
+      if (processingCount >= 3) return prevFiles;
+
+      const pendingFiles = prevFiles.filter(f => f.status === 'pending');
+      const filesToStart = pendingFiles.slice(0, 3 - processingCount);
+      
+      if (filesToStart.length === 0) return prevFiles;
+
+      const idsToStart = filesToStart.map(f => f.id);
+      
+      const newFiles = prevFiles.map(f => 
+        idsToStart.includes(f.id) 
+          ? { ...f, status: 'processing' as const, display_message: langRef.current === 'en' ? 'Starting...' : 'Запуск...' } 
+          : f
+      );
+
+      // Async process
+      setTimeout(() => {
+        filesToStart.forEach(f => {
+          if (!processingRef.current.has(f.id)) {
+            processingRef.current.add(f.id);
+            processFile(f);
+          }
+        });
+      }, 0);
+
+      return newFiles;
+    });
+  };
+
+  useEffect(() => {
+    processQueue();
+  }, [localFiles.map(f => f.status).join(',')]);
 
   // Timer for processing elapsed seconds
   useEffect(() => {
@@ -270,10 +361,10 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
   }, [])
 
   return (
-    <div className="min-h-screen bg-[#0f0728] text-purple-50 flex flex-col items-center p-8 relative">
+    <div className="min-h-full flex flex-col items-center p-8 relative">
       
-      {/* Header / Language Toggle */}
-      <div className="absolute top-6 right-6 z-20">
+      {/* Header / Language Toggle & Logout */}
+      <div className="absolute top-6 right-6 z-20 flex items-center gap-3">
         <button
           onClick={() => setLang(lang === 'en' ? 'ru' : 'en')}
           className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 hover:bg-white/10 transition-colors border border-white/10 text-sm font-medium backdrop-blur-sm"
@@ -281,6 +372,16 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
           <Globe className="w-4 h-4" />
           {lang === 'en' ? 'RU' : 'EN'}
         </button>
+        {onLogout && (
+          <button
+            onClick={onLogout}
+            className="flex items-center gap-2 px-4 py-2 rounded-full bg-red-500/10 hover:bg-red-500/20 text-red-400 transition-colors border border-red-500/20 text-sm font-medium backdrop-blur-sm"
+            title={lang === 'en' ? 'Logout' : 'Выйти'}
+          >
+            <LogOut className="w-4 h-4" />
+            <span className="hidden sm:inline">{lang === 'en' ? 'Logout' : 'Выйти'}</span>
+          </button>
+        )}
       </div>
 
       {/* Main Container that remounts on language change to trigger animation */}
@@ -311,6 +412,7 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
 
       {/* Main Content Area */}
       <div className="w-full max-w-5xl bg-[#1a0f3c]/60 backdrop-blur-xl border border-purple-500/20 rounded-3xl p-8 shadow-2xl relative overflow-hidden min-h-[600px]">
+
         
         {/* Tab 1: Load to RAG */}
         <div 
@@ -322,6 +424,28 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
         >
           <div className="flex flex-col h-full">
             <div className="flex-none mb-10">
+              <div className="mb-6 w-full">
+                <div className="relative flex w-full bg-[#1a0f3c]/80 backdrop-blur-md border border-purple-500/20 rounded-2xl p-1 z-10 shadow-xl">
+                  <div 
+                    className="absolute top-1 bottom-1 bg-gradient-to-r from-purple-600 to-indigo-600 rounded-xl transition-all duration-500 ease-out shadow-lg"
+                    style={{ 
+                      left: `calc(${['main', 'bank', 'invest', 'digital'].indexOf(selectedAgent) * 25}% + 4px)`,
+                      width: 'calc(25% - 8px)'
+                    }}
+                  />
+                  {['main', 'bank', 'invest', 'digital'].map((agent) => (
+                    <button
+                      key={agent}
+                      onClick={() => setSelectedAgent(agent)}
+                      className={`relative z-10 flex-1 py-3 px-2 text-center text-sm font-medium transition-colors duration-500 ${
+                        selectedAgent === agent ? 'text-white' : 'text-purple-300 hover:text-white'
+                      }`}
+                    >
+                      {formatAgentName(agent, lang)}
+                    </button>
+                  ))}
+                </div>
+              </div>
               <input 
                 type="file" 
                 multiple 
@@ -384,7 +508,13 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
                         {f.status === 'processing' && <Clock className="w-4 h-4 animate-spin" />}
                         {f.status === 'sent' && <CheckCircle2 className="w-4 h-4" />}
                         {f.status === 'error' && <X className="w-4 h-4" />}
-                        <span className="capitalize">{f.status}</span>
+                        <span className="capitalize">
+                          {f.status === 'processing' ? (lang === 'en' ? 'Processing' : 'В процессе') :
+                           f.status === 'sent' ? (lang === 'en' ? 'Sent' : 'Отправлено') :
+                           f.status === 'error' ? (lang === 'en' ? 'Error' : 'Ошибка') :
+                           f.status === 'skipped' ? (lang === 'en' ? 'Skipped' : 'Пропущено') :
+                           (lang === 'en' ? 'Pending' : 'В ожидании')}
+                        </span>
                       </div>
                       <div className="flex-none w-20 text-right text-sm text-purple-400 font-mono">
                         {f.elapsedSeconds}s
@@ -422,6 +552,12 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
               >
                 {lang === 'en' ? 'Reject Selected' : 'Отклонить выбранные'}
                 {selectedRequests.size > 0 && ` (${selectedRequests.size})`}
+              </button>
+              <button
+                onClick={generateTestRequest}
+                className="py-3 px-4 bg-purple-900/40 hover:bg-purple-900/60 text-purple-300 font-medium rounded-xl transition-all duration-300 shadow-lg shadow-purple-500/10 border border-purple-500/20 active:scale-[0.98]"
+              >
+                {lang === 'en' ? 'Test Request' : 'Тест. заявка'}
               </button>
             </div>
             
