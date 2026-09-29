@@ -374,11 +374,13 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
                       </div>
                       <div className="flex-none flex flex-col gap-2 pl-4 border-l border-purple-500/10 w-28">
                         <div className={`flex-1 flex items-center justify-center text-xs font-medium rounded-xl border ${
-                          req.status === 'Ожидает' ? 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20' :
-                          req.status === 'Одобрена' ? 'bg-green-500/10 text-green-400 border-green-500/20' :
+                          req.status === 'pending' ? 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20' :
+                          req.status === 'approved' ? 'bg-green-500/10 text-green-400 border-green-500/20' :
                           'bg-red-500/10 text-red-400 border-red-500/20'
                         }`}>
-                          {req.status}
+                          {req.status === 'pending' ? (lang === 'en' ? 'Pending' : 'Ожидает') :
+                           req.status === 'approved' ? (lang === 'en' ? 'Approved' : 'Одобрена') :
+                           (lang === 'en' ? 'Rejected' : 'Отклонена')}
                         </div>
                         <button 
                           onClick={() => openApproveModal([req])}

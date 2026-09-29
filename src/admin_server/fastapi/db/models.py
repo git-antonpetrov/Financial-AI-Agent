@@ -24,7 +24,7 @@ class AgentRequest(Base):
     document_name_en = Column(String, nullable=False)
     justification_ru = Column(Text, nullable=False)
     justification_en = Column(Text, nullable=False)
-    status = Column(String, default="Ожидает", nullable=False)
+    status = Column(String, default="pending", nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 class Agent(Base):

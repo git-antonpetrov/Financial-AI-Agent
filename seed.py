@@ -2,6 +2,9 @@ import urllib.request
 import json
 import urllib.error
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 url = 'https://admin.fin-ai-agent.ru/api/agents/requests'
 requests = [
