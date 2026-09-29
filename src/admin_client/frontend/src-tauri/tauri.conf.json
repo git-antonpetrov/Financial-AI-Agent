@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "admin-client",
+  "productName": "Admin client",
   "version": "0.1.0",
   "identifier": "ru.fin-ai-agent.admin",
   "build": {
