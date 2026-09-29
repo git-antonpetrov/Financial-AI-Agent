@@ -86,6 +86,8 @@ app.add_middleware(
         "http://localhost:5173", 
         "tauri://localhost", 
         "https://tauri.localhost",
+        "http://tauri.localhost",
+        "asset://localhost",
         "https://admin.fin-ai-agent.ru" # Разрешаем CORS для production домена
     ],
     allow_credentials=True,

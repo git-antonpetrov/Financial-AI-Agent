@@ -80,9 +80,9 @@ function App() {
         }
       }
 
-      // Используем локальный прокси Vite для обхода CORS
+      // Используем локальный прокси Vite для обхода CORS только в dev-режиме
       let loginEndpoint = `${baseUrl.replace(/\/$/, '')}/login`
-      if (parsedUrl.hostname === 'admin.fin-ai-agent.ru') {
+      if (import.meta.env.DEV && parsedUrl.hostname === 'admin.fin-ai-agent.ru') {
         loginEndpoint = '/api_proxy/login'
       }
 
