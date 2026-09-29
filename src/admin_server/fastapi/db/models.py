@@ -20,8 +20,10 @@ class AgentRequest(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     agent_name = Column(String, index=True, nullable=False)
-    document_name = Column(String, nullable=False)
-    justification = Column(Text, nullable=False)
+    document_name_ru = Column(String, nullable=False)
+    document_name_en = Column(String, nullable=False)
+    justification_ru = Column(Text, nullable=False)
+    justification_en = Column(Text, nullable=False)
     status = Column(String, default="Ожидает", nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

@@ -37,8 +37,10 @@ class LLMRepealedResponse(BaseModel):
 class AgentRequestResponse(BaseModel):
     id: int
     agent_name: str
-    document_name: str
-    justification: str
+    document_name_ru: str
+    document_name_en: str
+    justification_ru: str
+    justification_en: str
     status: str
     created_at: datetime
     
@@ -47,8 +49,10 @@ class AgentRequestResponse(BaseModel):
 
 class AgentRequestCreate(BaseModel):
     agent_name: str
-    document_name: str
-    justification: str
+    document_name_ru: str
+    document_name_en: str
+    justification_ru: str
+    justification_en: str
 
 class AgentRequestBatchAction(BaseModel):
     request_ids: List[int]

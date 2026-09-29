@@ -15,8 +15,10 @@ interface LocalFile {
 interface AgentRequest {
   id: number
   agent_name: string
-  document_name: string
-  justification: string
+  document_name_ru: string
+  document_name_en: string
+  justification_ru: string
+  justification_en: string
   status: string
 }
 
@@ -24,6 +26,24 @@ interface DashboardProps {
   lang: 'en' | 'ru'
   setLang: (lang: 'en' | 'ru') => void
 }
+
+const formatAgentName = (name: string, lang: 'en' | 'ru') => {
+  if (!name) return '';
+  const dictionary: Record<string, { en: string, ru: string }> = {
+    digital: { en: 'Digital agent', ru: 'Цифровой агент' },
+    invest: { en: 'Invest agent', ru: 'Инвестиционный агент' },
+    bank: { en: 'Bank agent', ru: 'Банковский агент' },
+    main: { en: 'Main agent', ru: 'Главный агент' },
+  };
+  
+  const lowerName = name.toLowerCase();
+  if (dictionary[lowerName]) {
+    return dictionary[lowerName][lang];
+  }
+  
+  const capitalized = name.charAt(0).toUpperCase() + name.slice(1);
+  return `${capitalized} ${lang === 'en' ? 'agent' : 'агент'}`;
+};
 
 export default function Dashboard({ lang, setLang }: DashboardProps) {
   const [activeTab, setActiveTab] = useState<Tab>('rag')
@@ -326,7 +346,7 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
                 <div className="space-y-4">
                   {requests.map(req => (
                     <div key={req.id} className="flex gap-4 p-5 bg-[#1a0f3c]/80 border border-purple-500/20 rounded-2xl hover:border-purple-500/40 transition-colors">
-                      <div className="flex-none pt-1">
+                      <div className="flex-none">
                         <div 
                           onClick={() => toggleSelection(req.id)}
                           className={`w-6 h-6 rounded-md border-2 flex items-center justify-center cursor-pointer transition-colors ${
@@ -342,33 +362,35 @@ export default function Dashboard({ lang, setLang }: DashboardProps) {
                         <div className="flex items-center justify-between mb-2">
                           <div className="flex items-center gap-2">
                             <Server className="w-4 h-4 text-purple-400" />
-                            <span className="font-bold text-white truncate">{req.agent_name}</span>
+                            <span className="font-bold text-white truncate">{formatAgentName(req.agent_name, lang)}</span>
                           </div>
-                          <span className={`text-xs px-2 py-1 rounded-full border ${
-                            req.status === 'Ожидает' ? 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20' :
-                            req.status === 'Одобрена' ? 'bg-green-500/10 text-green-400 border-green-500/20' :
-                            'bg-red-500/10 text-red-400 border-red-500/20'
-                          }`}>
-                            {req.status}
-                          </span>
                         </div>
-                        <h3 className="text-lg font-medium text-purple-100 mb-1">{req.document_name}</h3>
+                        <h3 className="text-lg font-medium text-purple-100 mb-1">
+                          {lang === 'en' ? req.document_name_en : req.document_name_ru}
+                        </h3>
                         <p className="text-sm text-purple-300/70 leading-relaxed line-clamp-2">
-                          {req.justification}
+                          {lang === 'en' ? req.justification_en : req.justification_ru}
                         </p>
                       </div>
-                      <div className="flex-none flex flex-col gap-2 justify-center pl-4 border-l border-purple-500/10">
+                      <div className="flex-none flex flex-col gap-2 pl-4 border-l border-purple-500/10 w-28">
+                        <div className={`flex-1 flex items-center justify-center text-xs font-medium rounded-xl border ${
+                          req.status === 'Ожидает' ? 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20' :
+                          req.status === 'Одобрена' ? 'bg-green-500/10 text-green-400 border-green-500/20' :
+                          'bg-red-500/10 text-red-400 border-red-500/20'
+                        }`}>
+                          {req.status}
+                        </div>
                         <button 
                           onClick={() => openApproveModal([req])}
                           disabled={selectedRequests.size > 0}
-                          className="p-2 rounded-xl bg-purple-500/10 text-purple-400 hover:bg-purple-500/20 hover:text-purple-300 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-purple-500/10 transition-colors" title={lang === 'en' ? 'Approve' : 'Одобрить'}
+                          className="flex-1 flex items-center justify-center rounded-xl bg-purple-500/10 text-purple-400 hover:bg-purple-500/20 hover:text-purple-300 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-purple-500/10 transition-colors w-full" title={lang === 'en' ? 'Approve' : 'Одобрить'}
                         >
                           <Check className="w-5 h-5" />
                         </button>
                         <button 
                           onClick={() => handleRejectSingle(req.id)}
                           disabled={selectedRequests.size > 0}
-                          className="p-2 rounded-xl bg-red-500/10 text-red-400 hover:bg-red-500/20 hover:text-red-300 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-red-500/10 transition-colors" title={lang === 'en' ? 'Reject' : 'Отклонить'}
+                          className="flex-1 flex items-center justify-center rounded-xl bg-red-500/10 text-red-400 hover:bg-red-500/20 hover:text-red-300 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-red-500/10 transition-colors w-full" title={lang === 'en' ? 'Reject' : 'Отклонить'}
                         >
                           <X className="w-5 h-5" />
                         </button>
