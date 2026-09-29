@@ -27,6 +27,13 @@ CHROMA_PORT = int(os.getenv("CHROMA_PORT", "8000"))
 
 # Google Vertex AI (через прокси)
 VERTEX_BASE_URL = os.getenv("VERTEX_BASE_URL", "").rstrip('/')
+
+def get_vertex_api_base(model_name: str) -> str | None:
+    if not VERTEX_BASE_URL:
+        return None
+    clean_model = model_name.replace("vertex_ai/", "")
+    return f"{VERTEX_BASE_URL}/v1/projects/{VERTEX_PROJECT}/locations/{VERTEX_LOCATION}/publishers/google/models/{clean_model}"
+
 VERTEX_PROJECT = os.getenv("VERTEX_PROJECT", "financial-ai-agent-0")
 VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "global")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL_NAME", "gemini-embedding-2")
@@ -110,7 +117,7 @@ def get_embeddings_google(texts: list[str]) -> list[list[float]]:
     response = litellm.embedding(
         model=EMBEDDING_MODEL,
         input=texts,
-        api_base=VERTEX_BASE_URL if VERTEX_BASE_URL else None,
+        api_base=get_vertex_api_base(EMBEDDING_MODEL),
         vertex_project=VERTEX_PROJECT if VERTEX_PROJECT else None,
         vertex_location=VERTEX_LOCATION if VERTEX_LOCATION else None
     )

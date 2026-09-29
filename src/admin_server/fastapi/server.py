@@ -48,6 +48,11 @@ VERTEX_PROJECT = os.getenv("VERTEX_PROJECT")
 VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "global")
 VERTEX_BASE_URL = os.getenv("VERTEX_BASE_URL")
 
+def get_vertex_api_base(model_name: str) -> str | None:
+    if not VERTEX_BASE_URL:
+        return None
+    clean_model = model_name.replace("vertex_ai/", "")
+    return f"{VERTEX_BASE_URL.rstrip('/')}/v1/projects/{VERTEX_PROJECT}/locations/{VERTEX_LOCATION}/publishers/google/models/{clean_model}"
 RAG_DATA_MODEL_NAME = os.getenv("RAG_DATA_MODEL_NAME", "vertex_ai/gemini-3.8-flash")
 RAG_DATA_REASONING_EFFORT = os.getenv("RAG_DATA_REASONING_EFFORT", "low")
 
@@ -295,7 +300,7 @@ async def llm_analyze(
             response_format=schemas.LLMAnalyzeResponse,
             reasoning_effort=RAG_DATA_REASONING_EFFORT,
             temperature=0.0,
-            api_base=VERTEX_BASE_URL,
+            api_base=get_vertex_api_base(RAG_DATA_MODEL_NAME),
             vertex_project=VERTEX_PROJECT,
             vertex_location=VERTEX_LOCATION
         )
@@ -341,7 +346,7 @@ async def llm_find_repealed(
             response_format=schemas.LLMRepealedResponse,
             reasoning_effort=RAG_DATA_REASONING_EFFORT,
             temperature=0.0,
-            api_base=VERTEX_BASE_URL,
+            api_base=get_vertex_api_base(RAG_DATA_MODEL_NAME),
             vertex_project=VERTEX_PROJECT,
             vertex_location=VERTEX_LOCATION
         )

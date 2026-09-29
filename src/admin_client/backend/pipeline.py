@@ -178,7 +178,7 @@ class DocumentPipeline:
                 repeal_resp = requests.post(
                     repeal_url,
                     headers=self.headers,
-                    json={"paragraphs": repealed_paragraphs},
+                    json={"snippets": repealed_paragraphs},
                     timeout=(5, 120)
                 )
                 
