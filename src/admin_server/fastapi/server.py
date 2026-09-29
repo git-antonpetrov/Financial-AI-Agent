@@ -2,6 +2,7 @@ import os
 import io
 import json
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form, Header
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 # pyrefly: ignore [missing-import]
 import redis
@@ -74,6 +75,14 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(title="Financial MAS - Admin Server", version="1.0.0", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # For admin client, this is fine, or specify frontend IP
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # --- ROUTES: AUTH ---
 @app.post("/login")
