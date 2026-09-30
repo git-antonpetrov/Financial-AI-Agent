@@ -254,7 +254,7 @@ async def upload_document(
         await crud.create_document(db, file_hash, file.filename, agent_name, "error", system_name, short_name, str(e))
         raise HTTPException(status_code=500, detail=f"Redis error: {str(e)}")
 
-    await crud.create_document(db, file_hash, file.filename, agent_name, "processing", system_name, short_name, "Задача в очереди у воркера")
+    await crud.update_checking_to_processing(db, file_hash, agent_name, system_name, short_name, "Задача в очереди у воркера")
 
     return {
         "status": "success", 

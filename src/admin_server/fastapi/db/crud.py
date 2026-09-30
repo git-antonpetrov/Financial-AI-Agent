@@ -43,13 +43,14 @@ async def create_document(
 
 async def check_md5(db: AsyncSession, file_hash: str, filename: str, agent_name: str) -> str:
     """
-    Если хеш найден и статус completed, возвращаем 'duplicate'. Иначе 'ok'.
-    Создаем запись в истории, если это дубликат.
+    Если хеш найден и статус completed/processing/checking, возвращаем 'duplicate'.
+    Если хеш новый — создаём запись со статусом 'checking', чтобы заблокировать
+    race condition (параллельная загрузка того же файла не пройдёт проверку).
     """
     query = select(models.Document).where(
         models.Document.file_hash == file_hash,
         models.Document.agent_name == agent_name,
-        models.Document.status.in_(['completed', 'processing'])
+        models.Document.status.in_(['completed', 'processing', 'checking'])
     )
     result = await db.execute(query)
     existing = result.scalars().first()
@@ -57,6 +58,10 @@ async def check_md5(db: AsyncSession, file_hash: str, filename: str, agent_name:
     if existing:
         await create_document(db, file_hash, filename, agent_name, "duplicate", existing.system_name, existing.short_name, "Файл является полным дубликатом по хешу")
         return "duplicate"
+    
+    # Сразу создаём запись 'checking', чтобы следующий параллельный запрос
+    # с тем же хэшем уже нашёл её и вернул 'duplicate'
+    await create_document(db, file_hash, filename, agent_name, "checking", None, None, "Файл принят на проверку")
     return "ok"
 
 async def check_date_version(
@@ -68,12 +73,18 @@ async def check_date_version(
     agent_name: str
 ) -> str:
     """
-    Сравнивает дату с уже загруженными версиями этого short_name.
+    Сравнивает дату с уже загруженными версиями.
+    Ищем по short_name И по file_hash (fallback на случай если LLM дал другое имя).
     """
+    from sqlalchemy import or_
+    
     query = select(models.Document).where(
-        models.Document.short_name == short_name,
+        or_(
+            models.Document.short_name == short_name,
+            models.Document.file_hash == file_hash
+        ),
         models.Document.agent_name == agent_name,
-        models.Document.status.in_(['completed', 'processing'])
+        models.Document.status.in_(['completed', 'processing', 'checking'])
     )
     result = await db.execute(query)
     docs = result.scalars().all()
@@ -95,6 +106,37 @@ async def check_date_version(
             return "old_version"
             
     return "ok"
+
+async def update_checking_to_processing(
+    db: AsyncSession,
+    file_hash: str,
+    agent_name: str,
+    system_name: str,
+    short_name: str,
+    message: str = "Задача в очереди у воркера"
+):
+    """
+    Обновляет запись 'checking' на 'processing' после успешного прохождения всех проверок.
+    Также заполняет system_name и short_name, которые на этапе check_md5 ещё не были известны.
+    """
+    query = select(models.Document).where(
+        models.Document.file_hash == file_hash,
+        models.Document.agent_name == agent_name,
+        models.Document.status == 'checking'
+    )
+    result = await db.execute(query)
+    doc = result.scalars().first()
+    
+    if doc:
+        doc.status = "processing"
+        doc.system_name = system_name
+        doc.short_name = short_name
+        doc.message = message
+        await db.commit()
+        return doc
+    
+    # Fallback: если 'checking' запись не найдена (не должно быть), создаём новую
+    return await create_document(db, file_hash, "", agent_name, "processing", system_name, short_name, message)
 
 async def get_agent_requests(db: AsyncSession, skip: int = 0, limit: int = 50) -> list[models.AgentRequest]:
     result = await db.execute(select(models.AgentRequest).order_by(models.AgentRequest.created_at.desc()).offset(skip).limit(limit))
