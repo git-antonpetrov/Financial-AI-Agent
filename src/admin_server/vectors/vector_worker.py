@@ -127,18 +127,18 @@ def update_document_status(file_hash: str, agent_name: str, new_status: str, mes
 def get_embeddings_google(texts: list[str]) -> list[list[float]]:
     """
     Отправляет батч текстов к Vertex AI (через наш прокси) для получения эмбеддингов.
-    Использует библиотеку litellm.
+    Использует библиотеку litellm. Делаем по одному, чтобы избежать ошибки размерности (1 к 10).
     """
-    response = litellm.embedding(
-        model=EMBEDDING_MODEL,
-        input=texts,
-        api_base=get_vertex_api_base(EMBEDDING_MODEL),
-        vertex_project=VERTEX_PROJECT if VERTEX_PROJECT else None,
-        vertex_location=VERTEX_LOCATION if VERTEX_LOCATION else None
-    )
-    
-    # LiteLLM возвращает стандартизированный ответ, аналогичный OpenAI
-    embeddings = [item["embedding"] for item in response.data]
+    embeddings = []
+    for text in texts:
+        response = litellm.embedding(
+            model=EMBEDDING_MODEL,
+            input=[text],
+            api_base=get_vertex_api_base(EMBEDDING_MODEL),
+            vertex_project=VERTEX_PROJECT if VERTEX_PROJECT else None,
+            vertex_location=VERTEX_LOCATION if VERTEX_LOCATION else None
+        )
+        embeddings.append(response.data[0]["embedding"])
     return embeddings
 
 def extract_metadata_from_markdown(markdown_text: str) -> dict:

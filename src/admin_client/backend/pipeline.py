@@ -6,6 +6,11 @@ from typing import Callable, Any
 from core.utils.console_logger import log_info, log_error, log_warning
 from core.utils.pdf_converter import convert_to_pdf
 from core.utils.content_ai import ContentCaptureRecognizer
+import threading
+
+_ACTIVE_MD5_LOCK = threading.Lock()
+_ACTIVE_MD5S = set()
+
 class DocumentPipeline:
     """
     Класс, отвечающий за полный жизненный цикл обработки документов перед отправкой на сервер.
@@ -67,6 +72,14 @@ class DocumentPipeline:
             # ==========================================
             file_hash = self._calculate_md5(file_path)
             
+            with _ACTIVE_MD5_LOCK:
+                if file_hash in _ACTIVE_MD5S:
+                    msg = "Пропущен: Точная копия файла уже находится в процессе обработки локально"
+                    log_warning("Pipeline", f"Файл {filename} отброшен (локальный дубликат): {msg}")
+                    self.on_progress_update(filename, "skipped", msg)
+                    return {"status": "skipped", "reason": "md5_duplicate_local"}
+                _ACTIVE_MD5S.add(file_hash)
+                
             is_duplicate = self._check_duplicate_on_server(filename, file_hash, agent_name)
             if is_duplicate:
                 msg = "Пропущен: Точная копия файла уже загружена (дубликат)"
@@ -75,6 +88,7 @@ class DocumentPipeline:
                 # Сигнализируем React'у, что файл нужно покрасить в серый/желтый цвет
                 self.on_progress_update(filename, "skipped", msg)
                 return {"status": "skipped", "reason": "md5_duplicate"}
+
 
             # ==========================================
             # ШАГ 2: КОНВЕРТАЦИЯ В PDF (ПРИ НЕОБХОДИМОСТИ)
@@ -266,6 +280,11 @@ class DocumentPipeline:
             return {"status": "error", "message": str(e)}
 
         finally:
+            # Освобождаем локальную блокировку MD5
+            if 'file_hash' in locals():
+                with _ACTIVE_MD5_LOCK:
+                    _ACTIVE_MD5S.discard(file_hash)
+                    
             # Очистка временных файлов PDF
             if 'working_file_path' in locals() and working_file_path != file_path and os.path.exists(working_file_path):
                 try:
