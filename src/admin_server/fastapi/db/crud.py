@@ -49,7 +49,7 @@ async def check_md5(db: AsyncSession, file_hash: str, filename: str, agent_name:
     query = select(models.Document).where(
         models.Document.file_hash == file_hash,
         models.Document.agent_name == agent_name,
-        models.Document.status == 'completed'
+        models.Document.status.in_(['completed', 'processing'])
     )
     result = await db.execute(query)
     existing = result.scalars().first()
@@ -73,7 +73,7 @@ async def check_date_version(
     query = select(models.Document).where(
         models.Document.short_name == short_name,
         models.Document.agent_name == agent_name,
-        models.Document.status == 'completed'
+        models.Document.status.in_(['completed', 'processing'])
     )
     result = await db.execute(query)
     docs = result.scalars().all()
