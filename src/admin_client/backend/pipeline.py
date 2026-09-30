@@ -12,7 +12,7 @@ class DocumentPipeline:
     Пайплайн разбит на логические шаги (этапы). 
     """
 
-    def __init__(self, server_url: str, admin_token: str, contentai_username: str = "", contentai_password: str = ""):
+    def __init__(self, server_url: str, admin_token: str, contentai_username: str = "", contentai_password: str = "", contentai_api_uri: str = ""):
         """
         Инициализация пайплайна.
         
@@ -24,6 +24,7 @@ class DocumentPipeline:
         self.headers = {"Authorization": f"Bearer {admin_token}"}
         self.contentai_username = contentai_username
         self.contentai_password = contentai_password
+        self.contentai_api_uri = contentai_api_uri
         
         # Функция обратного вызова для отправки прогресса во фронтенд (React)
         # Если она не задана, по умолчанию ничего не делает.
@@ -96,7 +97,7 @@ class DocumentPipeline:
             self.on_progress_update(filename, "processing", "Шаг 3: Распознавание текста (Content AI)...")
             log_info("Pipeline", "Отправка документа в Content AI...")
             if not self._recognizer:
-                self._recognizer = ContentCaptureRecognizer(username=self.contentai_username, password=self.contentai_password)
+                self._recognizer = ContentCaptureRecognizer(username=self.contentai_username, password=self.contentai_password, api_uri=self.contentai_api_uri)
                 
             ocr_results = self._recognizer.recognize(working_file_path)
             

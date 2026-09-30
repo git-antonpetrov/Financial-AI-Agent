@@ -59,13 +59,15 @@ class ContentCaptureRecognizer:
     Клиент для взаимодействия с сервером Content AI (ABBYY FlexiCapture) через SOAP API.
     Выполняет загрузку, распознавание документов и выгрузку результатов.
     """
-    def __init__(self, username: str = "", password: str = "", delete_batch_after=True):
+    def __init__(self, username: str = "", password: str = "", delete_batch_after=True, api_uri: str = ""):
         self.username = username or os.getenv('CONTENTAI_USERNAME')
         self.password = password or os.getenv('CONTENTAI_PASSWORD')
         if not self.username or not self.password:
             raise ValueError("Не заданы CONTENTAI_USERNAME или CONTENTAI_PASSWORD")
         
-        self.api_uri = os.getenv('CONTENT_AI_API_URI', 'https://localhost/ContentCapture/Server/FCAuth/API/v2/Soap')
+        self.api_uri = api_uri or os.getenv('CONTENT_AI_API_URI')
+        if not self.api_uri:
+            raise ValueError("Не задан CONTENT_AI_API_URI. Укажите его в .env на главном сервере.")
         self.project_name = os.getenv('CONTENT_AI_PROJECT', 'FullText')
         
         self.delete_batch_after = delete_batch_after
