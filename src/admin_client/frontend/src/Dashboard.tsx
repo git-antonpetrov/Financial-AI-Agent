@@ -261,11 +261,34 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
       // Mark as processing immediately so we don't pick it up again
       setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'processing', display_message: 'Отправка файла...' } : f))
       
+      let serverUrl = localStorage.getItem('admin_server') || ''
+      const parsedUrl = new URL(serverUrl || 'http://127.0.0.1:8000')
+      if (import.meta.env.DEV && parsedUrl.hostname === 'admin.fin-ai-agent.ru') {
+        serverUrl = '/api_proxy'
+      }
+
+      let contentaiUsername = ''
+      let contentaiPassword = ''
+      try {
+        const configRes = await fetch(`${serverUrl}/api/config/contentai`, {
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('admin_token') || ''}` }
+        })
+        if (configRes.ok) {
+          const config = await configRes.json()
+          contentaiUsername = config.username || ''
+          contentaiPassword = config.password || ''
+        }
+      } catch (e) {
+        console.warn('Failed to fetch ContentAI config', e)
+      }
+
       const formData = new FormData()
       formData.append('file', fileObj.file)
       formData.append('agent_name', fileObj.agent_name || 'main')
       formData.append('server_url', localStorage.getItem('admin_server') || '')
       formData.append('admin_token', localStorage.getItem('admin_token') || '')
+      formData.append('contentai_username', contentaiUsername)
+      formData.append('contentai_password', contentaiPassword)
 
       const uploadRes = await fetch('http://127.0.0.1:8001/api/local/process', {
         method: 'POST',

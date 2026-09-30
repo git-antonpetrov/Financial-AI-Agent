@@ -40,7 +40,7 @@ app = FastAPI(title="Local Admin Client Backend", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "tauri://localhost", "https://tauri.localhost"],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "tauri://localhost", "https://tauri.localhost", "http://tauri.localhost", "asset://localhost"],
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
@@ -59,7 +59,7 @@ if os.path.exists(TEMP_DIR):
             pass
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-def run_pipeline(job_id: str, file_path: str, agent_name: str, server_url: str, admin_token: str, loop: asyncio.AbstractEventLoop):
+def run_pipeline(job_id: str, file_path: str, agent_name: str, server_url: str, admin_token: str, contentai_username: str, contentai_password: str, loop: asyncio.AbstractEventLoop):
     def progress_callback(filename, status, message):
         event = {
             "status": status,
@@ -70,7 +70,7 @@ def run_pipeline(job_id: str, file_path: str, agent_name: str, server_url: str, 
             loop.call_soon_threadsafe(job_queues[job_id].put_nowait, event)
     
     try:
-        pipeline = DocumentPipeline(server_url=server_url, admin_token=admin_token)
+        pipeline = DocumentPipeline(server_url=server_url, admin_token=admin_token, contentai_username=contentai_username, contentai_password=contentai_password)
         pipeline.set_progress_callback(progress_callback)
         
         result = pipeline.process_file(file_path, agent_name)
@@ -101,6 +101,8 @@ async def process_document(
     agent_name: str = Form(...),
     server_url: str = Form(...),
     admin_token: str = Form(...),
+    contentai_username: str = Form(""),
+    contentai_password: str = Form(""),
     file: UploadFile = File(...)
 ):
     # Валидация агента, чтобы не тратить ресурсы впустую
@@ -135,7 +137,7 @@ async def process_document(
         
     # Запуск фонового потока
     loop = asyncio.get_running_loop()
-    thread = Thread(target=run_pipeline, args=(job_id, file_path, agent_name, server_url, admin_token, loop))
+    thread = Thread(target=run_pipeline, args=(job_id, file_path, agent_name, server_url, admin_token, contentai_username, contentai_password, loop))
     thread.start()
     
     return {"job_id": job_id, "filename": file.filename}
