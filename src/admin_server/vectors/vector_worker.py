@@ -112,7 +112,7 @@ def update_document_status(file_hash: str, agent_name: str, new_status: str, mes
         conn = db_pool.getconn()
         cur = conn.cursor()
         cur.execute(
-            "UPDATE documents SET status = %s, message = %s WHERE file_hash = %s AND agent_name = %s",
+            "UPDATE documents SET status = %s, message = %s WHERE file_hash = %s AND agent_name = %s AND status IN ('processing', 'checking')",
             (new_status, message, file_hash, agent_name)
         )
         conn.commit()
