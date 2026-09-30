@@ -148,7 +148,8 @@ async def get_contentai_config(current_admin: str = Depends(get_current_admin)):
     """Возвращает учетные данные ContentAI для локального sidecar клиента"""
     return {
         "username": os.getenv("CONTENTAI_USERNAME"),
-        "password": os.getenv("CONTENTAI_PASSWORD")
+        "password": os.getenv("CONTENTAI_PASSWORD"),
+        "api_uri": os.getenv("CONTENT_AI_API_URI")
     }
 
 # --- ROUTES: DOCUMENTS CHECK ---

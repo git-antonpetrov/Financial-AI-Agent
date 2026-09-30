@@ -269,6 +269,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
 
       let contentaiUsername = ''
       let contentaiPassword = ''
+      let contentaiApiUri = ''
 
       const configRes = await fetch(`${serverUrl}/api/config/contentai`, {
         headers: { 'Authorization': `Bearer ${localStorage.getItem('admin_token') || ''}` }
@@ -281,6 +282,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
       const config = await configRes.json()
       contentaiUsername = config.username || ''
       contentaiPassword = config.password || ''
+      contentaiApiUri = config.api_uri || ''
 
       if (!contentaiUsername || !contentaiPassword) {
         throw new Error('Учетные данные Content AI не настроены на главном сервере (.env)')
@@ -293,6 +295,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
       formData.append('admin_token', localStorage.getItem('admin_token') || '')
       formData.append('contentai_username', contentaiUsername)
       formData.append('contentai_password', contentaiPassword)
+      formData.append('contentai_api_uri', contentaiApiUri)
 
       const uploadRes = await fetch('http://127.0.0.1:8001/api/local/process', {
         method: 'POST',
