@@ -16,5 +16,6 @@ jobs:
           key: ${{ secrets.VDS_SSH_KEY }}
           script: |
             cd Financial-AI-Agent
-            git pull origin main
+            git fetch origin main
+            git reset --hard origin/main
             sudo docker compose up -d --build
