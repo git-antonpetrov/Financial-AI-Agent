@@ -143,6 +143,14 @@ async def logout(
     log_success("Auth", "Successful logout, token revoked in Redis")
     return {"status": "ok", "message": "Token revoked successfully"}
 
+@app.get("/api/config/contentai")
+async def get_contentai_config(current_admin: str = Depends(get_current_admin)):
+    """Возвращает учетные данные ContentAI для локального sidecar клиента"""
+    return {
+        "username": os.getenv("CONTENTAI_USERNAME"),
+        "password": os.getenv("CONTENTAI_PASSWORD")
+    }
+
 # --- ROUTES: DOCUMENTS CHECK ---
 @app.post("/api/documents/check/md5", response_model=schemas.CheckHashResponse)
 async def check_md5(
