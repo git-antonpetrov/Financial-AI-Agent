@@ -47,6 +47,13 @@ async def check_md5(db: AsyncSession, file_hash: str, filename: str, agent_name:
     Если хеш новый — создаём запись со статусом 'checking', чтобы заблокировать
     race condition (параллельная загрузка того же файла не пройдёт проверку).
     """
+    from sqlalchemy import text
+    import hashlib
+
+    # Создаем 64-битный хэш из file_hash для блокировки
+    lock_id = int(hashlib.md5(file_hash.encode()).hexdigest()[:16], 16) - 2**63
+    await db.execute(text("SELECT pg_advisory_xact_lock(:lock_id)"), {"lock_id": lock_id})
+
     query = select(models.Document).where(
         models.Document.file_hash == file_hash,
         models.Document.agent_name == agent_name,
@@ -135,7 +142,7 @@ async def update_checking_to_processing(
         await db.commit()
         return doc
     
-    # Fallback: если 'checking' запись не найдена (не должно быть), создаём новую
+    # Запасной вариант: если 'checking' запись не найдена (не должно быть), создаём новую
     return await create_document(db, file_hash, "", agent_name, "processing", system_name, short_name, message)
 
 async def get_agent_requests(db: AsyncSession, skip: int = 0, limit: int = 50) -> list[models.AgentRequest]:
