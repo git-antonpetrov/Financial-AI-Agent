@@ -262,7 +262,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
       setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'processing', display_message: 'Отправка файла...' } : f))
 
       let serverUrl = localStorage.getItem('admin_server') || ''
-      const parsedUrl = new URL(serverUrl || 'http://localhost:8000')
+      const parsedUrl = new URL(serverUrl || 'http://127.0.0.1:8000')
       if (import.meta.env.DEV && parsedUrl.hostname === 'admin.fin-ai-agent.ru') {
         serverUrl = '/api_proxy'
       }
@@ -297,7 +297,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
       formData.append('contentai_password', contentaiPassword)
       formData.append('contentai_api_uri', contentaiApiUri)
 
-      const uploadRes = await fetch('http://localhost:8001/api/local/process', {
+      const uploadRes = await fetch('http://127.0.0.1:8001/api/local/process', {
         method: 'POST',
         body: formData
       })
@@ -309,7 +309,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
       setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, job_id } : f))
 
       // Слушаем SSE для получения прогресса
-      const eventSource = new EventSource(`http://localhost:8001/api/local/progress/${job_id}`)
+      const eventSource = new EventSource(`http://127.0.0.1:8001/api/local/progress/${job_id}`)
 
       eventSource.onmessage = (event) => {
         try {
