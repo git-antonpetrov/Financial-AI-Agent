@@ -217,7 +217,7 @@ async def upload_document(
     content = content_stream.getvalue()
     content_stream.seek(0)
 
-    # Sanitize filename to prevent path traversal
+    # Очистка имени файла для предотвращения path traversal
     safe_filename = os.path.basename(file.filename)
     bucket_name = f"knowledge-{agent_name}"
     object_name = f"{action}/{safe_filename}"
