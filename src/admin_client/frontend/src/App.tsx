@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Globe, Lock, Server, ArrowRight, Loader2, Eye, EyeOff } from 'lucide-react'
 import Dashboard from './Dashboard'
 
-// Language dictionary
+// Словарь локализации
 const translations = {
   en: {
     title: 'Admin Access',
@@ -105,7 +105,7 @@ function App() {
       const data = await response.json()
       
       if (data.access_token) {
-        // Save token (could be localStorage or just state for now)
+        // Сохраняем токен (в localStorage)
         localStorage.setItem('admin_token', data.access_token)
         localStorage.setItem('admin_server', baseUrl)
         setIsAuthenticated(true)

@@ -351,6 +351,8 @@ class DocumentPipeline:
                 texts.append(self._extract_text_from_parsed_dict(item))
         elif isinstance(parsed_data, str):
             texts.append(parsed_data.strip())
+        elif isinstance(parsed_data, (int, float)):
+            texts.append(str(parsed_data))
         
         # Отфильтруем пустые строки и склеим через пробел/перенос строки
         return "\n".join(filter(bool, texts))

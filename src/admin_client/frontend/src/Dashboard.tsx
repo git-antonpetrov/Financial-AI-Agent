@@ -15,7 +15,7 @@ interface LocalFile {
   display_message?: string
 }
 
-// Mock agent request type
+// Тип запроса агента (заглушка)
 interface AgentRequest {
   id: number
   agent_name: string
@@ -56,7 +56,7 @@ const translateStatusMessage = (msg: string | undefined, lang: 'en' | 'ru') => {
 
   let translatedMsg = msg;
 
-  // Handle dynamic regex translations first
+  // Сначала обрабатываем динамические переводы по регулярным выражениям
   const successRegex = /^Успешно! Документ (.*) отправлен в очередь на обработку\.$/;
   const match = translatedMsg.match(successRegex);
   if (match) {
@@ -81,7 +81,7 @@ const translateStatusMessage = (msg: string | undefined, lang: 'en' | 'ru') => {
     'Шаг 4: Анализ названия и типа документа (Gemini)...': 'Step 4: Title and type analysis (Gemini)...',
     'Шаг 5: Проверка актуальности версии...': 'Step 5: Version validation...',
     'Шаг 6: Поиск отмененных актов (Gemini)...': 'Step 6: Searching for repealed acts (Gemini)...',
-    'Шаг 6: Поиск отмененных документов...': 'Step 6: Searching for repealed acts (Gemini)...', // added fallback
+    'Шаг 6: Поиск отмененных документов...': 'Step 6: Searching for repealed acts (Gemini)...', // добавлено запасное значение
     'Шаг 7: Подготовка и загрузка на сервер (Векторизация)...': 'Step 7: Preparation and upload (Vectorization)...',
     'Шаг 8: Отправка списка устаревших актов на удаление...': 'Step 8: Sending repealed acts for deletion...'
   };
@@ -104,7 +104,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
   const [selectedRequests, setSelectedRequests] = useState<Set<number>>(new Set())
   const [isLoadingRequests, setIsLoadingRequests] = useState(false)
 
-  // Approve Modal State
+  // Состояние модального окна одобрения
   const [isApproveModalOpen, setIsApproveModalOpen] = useState(false)
   const [approvingRequests, setApprovingRequests] = useState<AgentRequest[]>([])
   const [requestFiles, setRequestFiles] = useState<Record<number, File>>({})
@@ -195,7 +195,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
       const ids = approvingRequests.map(r => r.id)
       setRequests(prev => prev.map(r => ids.includes(r.id) ? { ...r, status: 'approved' } : r))
 
-      // Add files to RAG tab queue
+      // Добавляем файлы в очередь вкладки RAG
       const newLocalFiles = approvingRequests.map(req => {
         const file = requestFiles[req.id]
         return {
@@ -216,7 +216,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
       setSelectedRequests(new Set())
       setActiveTab('rag')
 
-      // Try to update statuses on the server
+      // Пытаемся обновить статусы на сервере
       const token = localStorage.getItem('admin_token')
       const serverUrl = localStorage.getItem('admin_server') || ''
       await fetch(`${serverUrl}/api/agent-requests/approve`, {
@@ -242,7 +242,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
           name: f.name,
           status: 'pending' as const,
           elapsedSeconds: 0,
-          agent_name: selectedAgent || 'main', // Default agent for manual upload
+          agent_name: selectedAgent || 'main', // Агент по умолчанию для ручной загрузки
           display_message: 'В очереди...'
         }))
         setLocalFiles((prev) => [...prev, ...newFiles])
@@ -262,7 +262,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
       setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'processing', display_message: 'Отправка файла...' } : f))
 
       let serverUrl = localStorage.getItem('admin_server') || ''
-      const parsedUrl = new URL(serverUrl || 'http://127.0.0.1:8000')
+      const parsedUrl = new URL(serverUrl || 'http://localhost:8000')
       if (import.meta.env.DEV && parsedUrl.hostname === 'admin.fin-ai-agent.ru') {
         serverUrl = '/api_proxy'
       }
@@ -297,7 +297,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
       formData.append('contentai_password', contentaiPassword)
       formData.append('contentai_api_uri', contentaiApiUri)
 
-      const uploadRes = await fetch('http://127.0.0.1:8001/api/local/process', {
+      const uploadRes = await fetch('http://localhost:8001/api/local/process', {
         method: 'POST',
         body: formData
       })
@@ -308,8 +308,8 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
 
       setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, job_id } : f))
 
-      // Listen to SSE for progress
-      const eventSource = new EventSource(`http://127.0.0.1:8001/api/local/progress/${job_id}`)
+      // Слушаем SSE для получения прогресса
+      const eventSource = new EventSource(`http://localhost:8001/api/local/progress/${job_id}`)
 
       eventSource.onmessage = (event) => {
         try {
@@ -364,7 +364,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
           : f
       );
 
-      // Async process
+      // Асинхронный процесс
       setTimeout(() => {
         filesToStart.forEach(f => {
           if (!processingRef.current.has(f.id)) {
@@ -382,7 +382,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
     processQueue();
   }, [localFiles.map(f => f.status).join(',')]);
 
-  // Timer for processing elapsed seconds
+  // Таймер для прошедших секунд обработки
   useEffect(() => {
     const timer = setInterval(() => {
       setLocalFiles(prev => prev.map(f => {
