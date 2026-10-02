@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 # Ensure env vars
 os.environ["ADMIN_PASSWORD"] = "test"
-os.environ["JWT_SECRET_KEY"] = "test"
+os.environ["JWT_SECRET_KEY"] = "test_jwt_secret_key_minimum_32_bytes_long_12345"
 os.environ["POSTGRES_PASSWORD"] = "test"
 for agent in ["DIGITAL", "MAIN", "BANK", "INVEST"]:
     os.environ[f"AGENT_{agent}_BOOTSTRAP_TOKEN"] = "test_token"

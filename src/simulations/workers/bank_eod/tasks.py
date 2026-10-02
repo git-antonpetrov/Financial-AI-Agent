@@ -1,5 +1,6 @@
 import random
-from datetime import timedelta, datetime, date
+from datetime import timedelta, datetime, date, timezone
+from decimal import Decimal
 from dateutil.relativedelta import relativedelta
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
@@ -30,20 +31,22 @@ async def process_auto_payments(session, current_date):
         if not account or account.status != "active":
             continue
             
-        if account.balance >= ap.amount:
+        acc_bal = Decimal(str(account.balance))
+        ap_amt = Decimal(str(ap.amount))
+        if acc_bal >= ap_amt:
             # Списываем деньги
-            account.balance -= ap.amount
+            account.balance = acc_bal - ap_amt
             
             # Создаем транзакцию
             tx = Transaction(
                 account_id=account.id,
                 category="expense",
                 operation_type="auto_payment",
-                amount=ap.amount,
+                amount=ap_amt,
                 description=f"Автоплатеж: {ap.recipient}",
                 status="completed",
                 date=current_date,
-                time=datetime.utcnow().time()
+                time=datetime.now(timezone.utc).time()
             )
             session.add(tx)
             
@@ -60,11 +63,11 @@ async def process_auto_payments(session, current_date):
                 account_id=account.id,
                 category="expense",
                 operation_type="auto_payment",
-                amount=ap.amount,
+                amount=ap_amt,
                 description=f"Недостаточно средств. Автоплатеж: {ap.recipient}",
                 status="failed",
                 date=current_date,
-                time=datetime.utcnow().time()
+                time=datetime.now(timezone.utc).time()
             )
             session.add(tx)
             # Сдвигаем на завтра чтобы попробовать снова
@@ -87,18 +90,20 @@ async def process_tariff_fees(session, current_date):
     
     processed = 0
     for acc in accounts:
-        if acc.tariff.service_cost > 0:
-            if acc.balance >= acc.tariff.service_cost:
-                acc.balance -= acc.tariff.service_cost
+        tariff_cost = Decimal(str(acc.tariff.service_cost))
+        if tariff_cost > Decimal("0.00"):
+            acc_bal = Decimal(str(acc.balance))
+            if acc_bal >= tariff_cost:
+                acc.balance = acc_bal - tariff_cost
                 tx = Transaction(
                     account_id=acc.id,
                     category="expense",
                     operation_type="service_fee",
-                    amount=acc.tariff.service_cost,
+                    amount=tariff_cost,
                     description=f"Плата за обслуживание тарифа '{acc.tariff.name}'",
                     status="completed",
                     date=current_date,
-                    time=datetime.utcnow().time()
+                    time=datetime.now(timezone.utc).time()
                 )
                 session.add(tx)
                 processed += 1
@@ -107,11 +112,11 @@ async def process_tariff_fees(session, current_date):
                     account_id=acc.id,
                     category="expense",
                     operation_type="service_fee",
-                    amount=acc.tariff.service_cost,
+                    amount=tariff_cost,
                     description=f"Недостаточно средств для платы за тариф '{acc.tariff.name}'",
                     status="failed",
                     date=current_date,
-                    time=datetime.utcnow().time()
+                    time=datetime.now(timezone.utc).time()
                 )
                 session.add(tx)
             
@@ -148,16 +153,17 @@ async def process_salaries(session, current_date):
         else:
             continue
 
-        acc.balance += salary_amount
+        salary_decimal = Decimal(str(salary_amount))
+        acc.balance = Decimal(str(acc.balance)) + salary_decimal
         tx = Transaction(
             account_id=acc.id,
             category="income",
             operation_type="salary",
-            amount=salary_amount,
+            amount=salary_decimal,
             description=f"Поступление зарплаты",
             status="completed",
             date=current_date,
-            time=datetime.utcnow().time()
+            time=datetime.now(timezone.utc).time()
         )
         session.add(tx)
         paid_clients.add(acc.client_id)

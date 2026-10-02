@@ -2,6 +2,7 @@ import os
 import asyncio
 import random
 from datetime import datetime, timedelta
+from decimal import Decimal
 from urllib.parse import urlparse
 # pyrefly: ignore [missing-import]
 import asyncpg
@@ -28,6 +29,8 @@ def random_next_payment_date():
     random_days = random.randrange(delta.days)
     return start_date + timedelta(days=random_days)
 
+from src.simulations.core.utils.db_utils import validate_db_name
+
 async def create_database_if_not_exists():
     DATABASE_URL = os.getenv(
         "INVEST_DATABASE_URL", 
@@ -35,15 +38,16 @@ async def create_database_if_not_exists():
     )
     url = DATABASE_URL
     parsed = urlparse(url.replace("postgresql+asyncpg://", "postgresql://"))
-    db_name = parsed.path.lstrip('/')
+    raw_db_name = parsed.path.lstrip('/')
+    db_name = validate_db_name(raw_db_name)
     
-    sys_url = url.replace(f"/{db_name}", "/postgres")
+    sys_url = url.replace(f"/{raw_db_name}", "/postgres")
     sys_url_asyncpg = sys_url.replace("postgresql+asyncpg://", "postgres://")
     
     try:
         print(f"Подключаемся к {sys_url_asyncpg} для создания БД {db_name}...")
         conn = await asyncpg.connect(sys_url_asyncpg)
-        await conn.execute(f"CREATE DATABASE {db_name}")
+        await conn.execute(f'CREATE DATABASE "{db_name}"')
         await conn.close()
         print(f"База данных {db_name} успешно создана.")
     except asyncpg.exceptions.DuplicateDatabaseError:
@@ -108,10 +112,10 @@ async def seed_data():
                 sa = SavingsAccount(
                     client_id=client_id,
                     account_number=str(random.randint(40817810000000000000, 40817810099999999999)),
-                    balance=random.uniform(5000, 500000),
-                    interest_rate=random.uniform(7.0, 15.0),
+                    balance=Decimal(str(round(random.uniform(5000, 500000), 2))),
+                    interest_rate=Decimal(str(round(random.uniform(7.0, 15.0), 2))),
                     next_payment_date=random_next_payment_date(),
-                    next_payment_amount=random.uniform(50, 5000),
+                    next_payment_amount=Decimal(str(round(random.uniform(50, 5000), 2))),
                     opened_at=random_date_past_months(12)
                 )
                 session.add(sa)
@@ -121,11 +125,11 @@ async def seed_data():
                 dep = Deposit(
                     client_id=client_id,
                     account_number=str(random.randint(42301810000000000000, 42301810099999999999)),
-                    balance=random.uniform(50000, 2000000),
-                    interest_rate=random.uniform(12.0, 20.0),
+                    balance=Decimal(str(round(random.uniform(50000, 2000000), 2))),
+                    interest_rate=Decimal(str(round(random.uniform(12.0, 20.0), 2))),
                     term_months=random.choice([3, 6, 12, 36]),
                     next_payment_date=random_next_payment_date(),
-                    next_payment_amount=random.uniform(500, 20000),
+                    next_payment_amount=Decimal(str(round(random.uniform(500, 20000), 2))),
                     opened_at=random_date_past_months(6)
                 )
                 session.add(dep)
@@ -136,13 +140,13 @@ async def seed_data():
                 strat_id = strat.id if strat else None
                 
                 # Если подписан на стратегию, случайным образом генерируем доход
-                income = random.uniform(-5000, 20000) if strat_id else 0.0
+                income = Decimal(str(round(random.uniform(-5000, 20000), 2))) if strat_id else Decimal("0.00")
                 next_comm = random_next_payment_date() if strat_id else None
                 
                 brk = BrokerAccount(
                     client_id=client_id,
                     account_number=str(random.randint(30601810000000000000, 30601810099999999999)),
-                    balance=random.uniform(1000, 100000), # свободный кэш
+                    balance=Decimal(str(round(random.uniform(1000, 100000), 2))), # свободный кэш
                     monthly_income=income,
                     strategy_id=strat_id,
                     next_commission_date=next_comm,

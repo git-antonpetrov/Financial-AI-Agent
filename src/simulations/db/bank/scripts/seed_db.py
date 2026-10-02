@@ -2,6 +2,7 @@ import os
 import asyncio
 import random
 from datetime import datetime, timedelta, date
+from decimal import Decimal
 from urllib.parse import urlparse
 # pyrefly: ignore [missing-import]
 import asyncpg
@@ -21,19 +22,22 @@ def random_date_past_months(months=3):
     random_seconds = random.randrange(24*60*60)
     return start_date + timedelta(days=random_days, seconds=random_seconds)
 
+from src.simulations.core.utils.db_utils import validate_db_name
+
 async def create_database_if_not_exists():
     url = os.getenv("BANK_DATABASE_URL", "postgresql+asyncpg://agent_user:agent_password@localhost:15432/bank_db")
     parsed = urlparse(url.replace("postgresql+asyncpg://", "postgresql://"))
-    db_name = parsed.path.lstrip("/")
+    raw_db_name = parsed.path.lstrip("/")
+    db_name = validate_db_name(raw_db_name)
     
     # URL для подключения к системной базе postgres
-    sys_url = url.replace(f"/{db_name}", "/postgres")
+    sys_url = url.replace(f"/{raw_db_name}", "/postgres")
     sys_url_asyncpg = sys_url.replace("postgresql+asyncpg://", "postgres://")
     
     try:
         print(f"Подключаемся к {sys_url_asyncpg} для создания БД {db_name}...")
         conn = await asyncpg.connect(sys_url_asyncpg)
-        await conn.execute(f"CREATE DATABASE {db_name}")
+        await conn.execute(f'CREATE DATABASE "{db_name}"')
         await conn.close()
         print(f"✅ База данных {db_name} успешно создана.")
     except asyncpg.exceptions.DuplicateDatabaseError:
@@ -82,7 +86,7 @@ async def seed_data():
                 account = Account(
                     client_id=client_id,
                     account_number=str(random.randint(40817810000000000000, 40817810099999999999)),
-                    balance=random.uniform(10000, 1500000),
+                    balance=Decimal(str(round(random.uniform(10000, 1500000), 2))),
                     currency="RUB",
                     tariff_id=tariff.id
                 )
@@ -93,7 +97,7 @@ async def seed_data():
                 if random.random() > 0.5:
                     ap = AutoPayment(
                         account_id=account.id,
-                        amount=random.uniform(500, 5000),
+                        amount=Decimal(str(round(random.uniform(500, 5000), 2))),
                         recipient=random.choice(merchants),
                         schedule="monthly",
                         next_payment_date=date.today() + timedelta(days=random.randint(1, 10))
@@ -119,7 +123,7 @@ async def seed_data():
                     if is_income:
                         category = "income"
                         op_type = random.choice(operation_types_income)
-                        amount = random.uniform(1000, 150000)
+                        amount = round(random.uniform(1000, 150000), 2)
                         desc = f"Поступление: {op_type}"
                     else:
                         category = "expense"
@@ -135,8 +139,8 @@ async def seed_data():
                         account_id=account.id,
                         category=category,
                         operation_type=op_type,
-                        amount=round(amount, 2),
-                        commission=round(commission, 2),
+                        amount=Decimal(str(round(amount, 2))),
+                        commission=Decimal(str(round(commission, 2))),
                         description=desc,
                         status=random.choices(["completed", "failed", "pending"], weights=[0.9, 0.05, 0.05])[0],
                         date=tx_date_time.date(),

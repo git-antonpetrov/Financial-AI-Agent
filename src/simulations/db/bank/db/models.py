@@ -8,7 +8,7 @@ def generate_uuid():
     return str(uuid.uuid4())
 
 def get_moscow_now():
-    return datetime.utcnow() + timedelta(hours=3)
+    return (datetime.now(timezone.utc) + timedelta(hours=3)).replace(tzinfo=None)
 
 class Tariff(Base):
     __tablename__ = "tariffs"
@@ -28,12 +28,12 @@ class Tariff(Base):
 class Account(Base):
     __tablename__ = "accounts"
     id = Column(String, primary_key=True, default=generate_uuid)
-    client_id = Column(String, nullable=False)
+    client_id = Column(String, nullable=False, index=True)
     account_number = Column(String, unique=True, nullable=False)
     balance = Column(Numeric(12, 2), default=0.00)
     currency = Column(String, default="RUB")
-    tariff_id = Column(String, ForeignKey("tariffs.id"), nullable=False)
-    status = Column(String, default="active") # active, closed
+    tariff_id = Column(String, ForeignKey("tariffs.id"), nullable=False, index=True)
+    status = Column(String, default="active", index=True) # active, closed
     created_at = Column(DateTime, default=get_moscow_now)
 
     tariff = relationship("Tariff", back_populates="accounts")
@@ -45,9 +45,9 @@ class Account(Base):
 class Card(Base):
     __tablename__ = "cards"
     id = Column(String, primary_key=True, default=generate_uuid)
-    account_id = Column(String, ForeignKey("accounts.id"), nullable=False)
+    account_id = Column(String, ForeignKey("accounts.id"), nullable=False, index=True)
     card_number = Column(String, unique=True, nullable=False)
-    status = Column(String, default="active") # active, blocked, frozen
+    status = Column(String, default="active", index=True) # active, blocked, frozen
     created_at = Column(DateTime, default=get_moscow_now)
 
     account = relationship("Account", back_populates="cards")
@@ -56,17 +56,17 @@ class Card(Base):
 class Transaction(Base):
     __tablename__ = "transactions"
     id = Column(String, primary_key=True, default=generate_uuid)
-    account_id = Column(String, ForeignKey("accounts.id"), nullable=False)
+    account_id = Column(String, ForeignKey("accounts.id"), nullable=False, index=True)
     category = Column(String, nullable=False) # 'income', 'expense'
     operation_type = Column(String, nullable=False) # 'transfer_sbp', 'transfer_non_sbp', 'purchase', 'top_up', 'cash_deposit', 'salary', etc.
     amount = Column(Numeric(12, 2), nullable=False)
     commission = Column(Numeric(12, 2), default=0.00)
     description = Column(String)
     status = Column(String, default="completed") # 'completed', 'failed', 'pending'
-    date = Column(Date, default=date.today)
+    date = Column(Date, default=date.today, index=True)
     
     # We use a callable to set the default time correctly when the object is created
-    time = Column(Time, default=lambda: datetime.utcnow().time()) 
+    time = Column(Time, default=lambda: (datetime.now(timezone.utc) + timedelta(hours=3)).time()) 
     
     account = relationship("Account", back_populates="transactions")
 
@@ -74,12 +74,12 @@ class Transaction(Base):
 class AutoPayment(Base):
     __tablename__ = "auto_payments"
     id = Column(String, primary_key=True, default=generate_uuid)
-    account_id = Column(String, ForeignKey("accounts.id"), nullable=False)
+    account_id = Column(String, ForeignKey("accounts.id"), nullable=False, index=True)
     amount = Column(Numeric(12, 2), nullable=False)
     recipient = Column(String, nullable=False)
     schedule = Column(String, nullable=False) # 'monthly', 'weekly'
-    next_payment_date = Column(Date, nullable=False)
-    is_active = Column(Boolean, default=True)
+    next_payment_date = Column(Date, nullable=False, index=True)
+    is_active = Column(Boolean, default=True, index=True)
 
     account = relationship("Account", back_populates="auto_payments")
 

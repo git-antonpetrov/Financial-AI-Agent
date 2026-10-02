@@ -15,11 +15,11 @@ from src.simulations.core.utils.console_logger import log_info
 async def main():
     log_info("Bank EOD Worker", "Инициализация воркера...")
     
-    # Создаем асинхронный планировщик
-    scheduler = AsyncIOScheduler()
+    # Создаем асинхронный планировщик с явным указанием московского времени
+    scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
     
-    # Настраиваем запуск EOD каждый день в 23:30
-    scheduler.add_job(run_bank_eod, 'cron', hour=23, minute=30)
+    # Настраиваем запуск EOD каждый день в 23:30 по Москве
+    scheduler.add_job(run_bank_eod, 'cron', hour=23, minute=30, timezone="Europe/Moscow")
     
     # Запускаем планировщик
     scheduler.start()

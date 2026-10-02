@@ -2,6 +2,7 @@ import os
 import asyncio
 import random
 from datetime import datetime, timedelta
+from decimal import Decimal
 from urllib.parse import urlparse
 # pyrefly: ignore [missing-import]
 import asyncpg
@@ -29,6 +30,8 @@ def random_date_late_2026():
     random_days = random.randrange(delta.days)
     return start_date + timedelta(days=random_days)
 
+from src.simulations.core.utils.db_utils import validate_db_name
+
 async def create_database_if_not_exists():
     DATABASE_URL = os.getenv(
         "RUBLE_DATABASE_URL", 
@@ -36,15 +39,16 @@ async def create_database_if_not_exists():
     )
     url = DATABASE_URL
     parsed = urlparse(url.replace("postgresql+asyncpg://", "postgresql://"))
-    db_name = parsed.path.lstrip('/')
+    raw_db_name = parsed.path.lstrip('/')
+    db_name = validate_db_name(raw_db_name)
     
-    sys_url = url.replace(f"/{db_name}", "/postgres")
+    sys_url = url.replace(f"/{raw_db_name}", "/postgres")
     sys_url_asyncpg = sys_url.replace("postgresql+asyncpg://", "postgres://")
     
     try:
         print(f"Подключаемся к {sys_url_asyncpg} для создания БД {db_name}...")
         conn = await asyncpg.connect(sys_url_asyncpg)
-        await conn.execute(f"CREATE DATABASE {db_name}")
+        await conn.execute(f'CREATE DATABASE "{db_name}"')
         await conn.close()
         print(f"База данных {db_name} успешно создана.")
     except asyncpg.exceptions.DuplicateDatabaseError:
@@ -69,7 +73,7 @@ async def seed_data():
             wallet = Wallet(
                 client_id=client_id,
                 wallet_number=str(random.randint(5000000000000000, 5999999999999999)),
-                balance=random.uniform(5000, 200000),
+                balance=Decimal(str(round(random.uniform(5000, 200000), 2))),
                 opened_at=random_date_past_months(12)
             )
             wallets.append(wallet)
@@ -81,7 +85,7 @@ async def seed_data():
         for _ in range(15):
             sender = random.choice(wallets)
             receiver = random.choice([w for w in wallets if w.id != sender.id])
-            amount = random.uniform(500, 15000)
+            amount = Decimal(str(round(random.uniform(500, 15000), 2)))
             
             tx = RubleTransaction(
                 sender_wallet_id=sender.id,
@@ -107,11 +111,11 @@ def execute(ctx):
         for _ in range(5):
             creator = random.choice(wallets)
             receiver = random.choice([w for w in wallets if w.id != creator.id])
-            amount = random.uniform(10000, 50000)
+            amount = Decimal(str(round(random.uniform(10000, 50000), 2)))
             
             # Обеспечиваем, чтобы у создателя было достаточно денег для заморозки
-            creator.balance += amount
-            creator.frozen_balance += amount
+            creator.balance = Decimal(str(creator.balance)) + amount
+            creator.frozen_balance = Decimal(str(creator.frozen_balance)) + amount
             
             sc = SmartContract(
                 creator_wallet_id=creator.id,

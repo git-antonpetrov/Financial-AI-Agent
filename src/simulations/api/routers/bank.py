@@ -1,18 +1,26 @@
-from typing import Optional
+from decimal import Decimal
+from typing import Optional, List
 import random
 from datetime import date
 # pyrefly: ignore [missing-import]
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.simulations.db.bank.db.client import get_async_session_maker
 from src.simulations.db.bank.db.models import Account, Card, Transaction, Tariff, AutoPayment
 from src.simulations.core.utils.console_logger import log_info, log_error, log_success
-from src.simulations.api.core.utils import to_dict, to_dict_list
+from src.simulations.api.core.auth import verify_bank_token
+from src.simulations.api.schemas.responses import (
+    AccountResponse,
+    TariffResponse,
+    CardResponse,
+    TransactionResponse,
+    AutoPaymentResponse,
+)
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(verify_bank_token)])
 
 def get_db():
     """
@@ -28,7 +36,7 @@ class TransferRequest(BaseModel):
     Схема запроса для перевода средств внутри банка.
     """
     from_account_id: str
-    amount: float
+    amount: Decimal = Field(..., gt=Decimal("0.00"), description="Сумма перевода (строго больше нуля)")
     transfer_type: str # Типы: 'account', 'phone', 'card'
     destination: str # Номер счета, номер телефона или номер карты
     description: Optional[str] = None
@@ -37,15 +45,15 @@ class AutoPaymentCreate(BaseModel):
     """
     Схема запроса для создания нового автоплатежа.
     """
-    amount: float
+    amount: Decimal = Field(..., gt=Decimal("0.00"), description="Сумма автоплатежа (строго больше нуля)")
     recipient: str
     schedule: str # Расписание: 'monthly', 'weekly'
     next_payment_date: date
 
 # --- Эндпоинты ---
 
-@router.get("/accounts/by-client/{client_id}")
-async def get_accounts(client_id: str):
+@router.get("/accounts/by-client/{client_id}", response_model=List[AccountResponse])
+async def get_accounts(client_id: str) -> List[AccountResponse]:
     """
     Получить список всех счетов для указанного клиента.
     """
@@ -53,10 +61,10 @@ async def get_accounts(client_id: str):
         result = await db.execute(select(Account).where(Account.client_id == client_id))
         accounts = result.scalars().all()
         log_info("BankAPI", f"Запрошены счета клиента {client_id}. Найдено: {len(accounts)}")
-        return to_dict_list(accounts)
+        return [AccountResponse.model_validate(acc) for acc in accounts]
 
-@router.get("/accounts/{account_id}/tariff")
-async def get_tariff(account_id: str):
+@router.get("/accounts/{account_id}/tariff", response_model=TariffResponse)
+async def get_tariff(account_id: str) -> TariffResponse:
     """
     Получить информацию о тарифе, привязанном к конкретному счету.
     """
@@ -67,19 +75,19 @@ async def get_tariff(account_id: str):
             raise HTTPException(404, "Счет не найден")
             
         tariff = await db.scalar(select(Tariff).where(Tariff.id == acc.tariff_id))
-        return to_dict(tariff)
+        return TariffResponse.model_validate(tariff)
 
-@router.get("/accounts/{account_id}/cards")
-async def get_cards(account_id: str):
+@router.get("/accounts/{account_id}/cards", response_model=List[CardResponse])
+async def get_cards(account_id: str) -> List[CardResponse]:
     """
     Получить список всех карт, привязанных к счету.
     """
     async with get_db() as db:
         result = await db.execute(select(Card).where(Card.account_id == account_id))
-        return to_dict_list(result.scalars().all())
+        return [CardResponse.model_validate(c) for c in result.scalars().all()]
 
-@router.get("/accounts/{account_id}/transactions")
-async def get_transactions(account_id: str):
+@router.get("/accounts/{account_id}/transactions", response_model=List[TransactionResponse])
+async def get_transactions(account_id: str) -> List[TransactionResponse]:
     """
     Получить историю транзакций по счету, отсортированную по дате убывания.
     """
@@ -89,19 +97,19 @@ async def get_transactions(account_id: str):
             .where(Transaction.account_id == account_id)
             .order_by(Transaction.date.desc())
         )
-        return to_dict_list(result.scalars().all())
+        return [TransactionResponse.model_validate(t) for t in result.scalars().all()]
 
-@router.get("/accounts/{account_id}/autopayments")
-async def get_autopayments(account_id: str):
+@router.get("/accounts/{account_id}/autopayments", response_model=List[AutoPaymentResponse])
+async def get_autopayments(account_id: str) -> List[AutoPaymentResponse]:
     """
     Получить список активных автоплатежей для счета.
     """
     async with get_db() as db:
         result = await db.execute(select(AutoPayment).where(AutoPayment.account_id == account_id))
-        return to_dict_list(result.scalars().all())
+        return [AutoPaymentResponse.model_validate(ap) for ap in result.scalars().all()]
 
-@router.post("/accounts/{account_id}/cards/issue")
-async def issue_card(account_id: str):
+@router.post("/accounts/{account_id}/cards/issue", response_model=CardResponse)
+async def issue_card(account_id: str) -> CardResponse:
     """
     Выпустить новую карту и привязать ее к существующему счету.
     """
@@ -121,7 +129,7 @@ async def issue_card(account_id: str):
         await db.commit()
         await db.refresh(new_card)
         log_success("BankAPI", f"Успешно выпущена карта {new_card.card_number} для счета {account_id}")
-        return to_dict(new_card)
+        return CardResponse.model_validate(new_card)
 
 @router.post("/cards/{card_id}/block")
 async def block_card(card_id: str):
@@ -152,8 +160,8 @@ async def freeze_card(card_id: str):
         log_info("BankAPI", f"Карта {card_id} заморожена")
         return {"status": "success", "message": "Карта заморожена"}
 
-@router.post("/cards/{card_id}/reissue")
-async def reissue_card(card_id: str):
+@router.post("/cards/{card_id}/reissue", response_model=CardResponse)
+async def reissue_card(card_id: str) -> CardResponse:
     """
     Перевыпустить карту. Старая карта блокируется, создается новая 
     и привязывается к тому же счету.
@@ -173,7 +181,7 @@ async def reissue_card(card_id: str):
         await db.commit()
         await db.refresh(new_card)
         log_success("BankAPI", f"Карта {card_id} перевыпущена. Новый номер: {new_card.card_number}")
-        return to_dict(new_card)
+        return CardResponse.model_validate(new_card)
 
 @router.post("/accounts/{account_id}/close")
 async def close_account(account_id: str):
@@ -182,20 +190,27 @@ async def close_account(account_id: str):
     Требует, чтобы баланс счета был равен нулю.
     """
     async with get_db() as db:
-        acc = await db.scalar(select(Account).where(Account.id == account_id))
+        acc = await db.scalar(
+            select(Account)
+            .where(Account.id == account_id)
+            .with_for_update()
+        )
         if not acc: raise HTTPException(404, "Счет не найден")
         
-        if float(acc.balance) > 0:
-            log_error("BankAPI", f"Попытка закрыть счет {account_id} с положительным балансом")
-            raise HTTPException(400, "Невозможно закрыть счет с положительным балансом")
+        if acc.status == "closed":
+            raise HTTPException(400, "Счет уже закрыт")
+
+        if Decimal(str(acc.balance)) != Decimal("0.00"):
+            log_error("BankAPI", f"Попытка закрыть счет {account_id} с ненулевым балансом ({acc.balance})")
+            raise HTTPException(400, "Невозможно закрыть счет с ненулевым балансом")
             
         acc.status = "closed"
         await db.commit()
         log_info("BankAPI", f"Счет {account_id} закрыт")
         return {"status": "success"}
 
-@router.post("/accounts/{account_id}/autopayments")
-async def create_autopayment(account_id: str, data: AutoPaymentCreate):
+@router.post("/accounts/{account_id}/autopayments", response_model=AutoPaymentResponse)
+async def create_autopayment(account_id: str, data: AutoPaymentCreate) -> AutoPaymentResponse:
     """
     Создать новый автоплатеж, привязанный к счету.
     """
@@ -211,22 +226,17 @@ async def create_autopayment(account_id: str, data: AutoPaymentCreate):
         await db.commit()
         await db.refresh(ap)
         log_success("BankAPI", f"Создан автоплатеж для счета {account_id} на сумму {data.amount}")
-        return to_dict(ap)
+        return AutoPaymentResponse.model_validate(ap)
 
 @router.post("/transfers")
 async def transfer_money(data: TransferRequest):
     """
     Универсальный эндпоинт для перевода средств внутри банка.
     Поддерживает переводы по номеру счета, карты или телефона.
+    Использует пессимистическую блокировку строк (SELECT FOR UPDATE) 
+    в детерминированном порядке ID для защиты от состояния гонки и взаимных блокировок.
     """
     async with get_db() as db:
-        sender_acc = await db.scalar(select(Account).where(Account.id == data.from_account_id))
-        if not sender_acc: raise HTTPException(404, "Счет отправителя не найден")
-        
-        if float(sender_acc.balance) < data.amount:
-            log_error("BankAPI", f"Недостаточно средств на счете {data.from_account_id} для перевода {data.amount}")
-            raise HTTPException(400, "Недостаточно средств")
-
         receiver_acc = None
         
         # Поиск счета получателя в зависимости от типа перевода
@@ -245,29 +255,61 @@ async def transfer_money(data: TransferRequest):
             log_error("BankAPI", f"Получатель не найден. Тип: {data.transfer_type}, Назначение: {data.destination}")
             raise HTTPException(404, "Получатель не найден")
 
+        if str(data.from_account_id) == str(receiver_acc.id):
+            log_error("BankAPI", f"Попытка самоперевода на счет {data.from_account_id}")
+            raise HTTPException(400, "Перевод на тот же самый счет невозможен")
+
+        lock_ids = sorted([str(data.from_account_id), str(receiver_acc.id)])
+        accounts_res = await db.execute(
+            select(Account)
+            .where(Account.id.in_(lock_ids))
+            .order_by(Account.id)
+            .with_for_update()
+        )
+        accounts_map = {str(acc.id): acc for acc in accounts_res.scalars().all()}
+
+        sender = accounts_map.get(str(data.from_account_id))
+        if not sender:
+            raise HTTPException(404, "Счет отправителя не найден")
+            
+        receiver = accounts_map.get(str(receiver_acc.id))
+        if not receiver:
+            raise HTTPException(404, "Счет получателя не найден")
+
+        if sender.status and sender.status != "active":
+            raise HTTPException(400, f"Счет отправителя недоступен для перевода (статус: {sender.status})")
+
+        if receiver.status and receiver.status != "active":
+            raise HTTPException(400, f"Счет получателя недоступен для перевода (статус: {receiver.status})")
+
+        sender_balance = Decimal(str(sender.balance))
+        if sender_balance < data.amount:
+            log_error("BankAPI", f"Недостаточно средств на счете {sender.id} для перевода {data.amount}")
+            raise HTTPException(400, "Недостаточно средств")
+
         # Выполнение перевода
-        sender_acc.balance = float(sender_acc.balance) - data.amount
-        receiver_acc.balance = float(receiver_acc.balance) + data.amount
+        sender.balance = sender_balance - data.amount
+        receiver.balance = Decimal(str(receiver.balance)) + data.amount
 
         # Запись транзакций для истории
         tx_out = Transaction(
-            account_id=sender_acc.id,
+            account_id=sender.id,
             category='expense',
             operation_type=f'transfer_out_{data.transfer_type}',
             amount=data.amount,
             description=data.description or f"Перевод получателю: {data.destination}"
         )
         tx_in = Transaction(
-            account_id=receiver_acc.id,
+            account_id=receiver.id,
             category='income',
             operation_type=f'transfer_in_{data.transfer_type}',
             amount=data.amount,
-            description=data.description or f"Перевод от: {sender_acc.account_number}"
+            description=data.description or f"Перевод от: {sender.account_number}"
         )
         
         db.add(tx_out)
         db.add(tx_in)
         await db.commit()
 
-        log_success("BankAPI", f"Успешный перевод {data.amount} от {sender_acc.id} к {receiver_acc.id}")
+        log_success("BankAPI", f"Успешный перевод {data.amount} от {sender.id} к {receiver.id}")
         return {"status": "success", "transaction_id": tx_out.id}

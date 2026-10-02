@@ -4,6 +4,7 @@ from pathlib import Path
 # Добавляем корень проекта в sys.path
 sys.path.append(str(Path(__file__).resolve().parents[3]))
 
+import os
 import uvicorn
 # pyrefly: ignore [missing-import]
 from fastapi import FastAPI
@@ -26,12 +27,27 @@ app = FastAPI(
     version="1.0.0"
 )
 
+cors_env = os.getenv("CORS_ALLOWED_ORIGINS", "")
+if cors_env.strip():
+    allowed_origins = [o.strip() for o in cors_env.split(",") if o.strip()]
+else:
+    allowed_origins = [
+        "http://localhost:8001",
+        "http://localhost:8002",
+        "http://localhost:5173",
+        "tauri://localhost",
+        "https://tauri.localhost",
+        "http://tauri.localhost",
+        "asset://localhost",
+        "https://admin.fin-ai-agent.ru",
+    ]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Bootstrap-Token", "x-bootstrap-token"],
 )
 
 # Подключение роутеров

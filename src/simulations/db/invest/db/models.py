@@ -8,7 +8,7 @@ def generate_uuid():
     return str(uuid.uuid4())
 
 def get_moscow_now():
-    return datetime.utcnow() + timedelta(hours=3)
+    return (datetime.now(timezone.utc) + timedelta(hours=3)).replace(tzinfo=None)
 
 class InvestmentStrategy(Base):
     __tablename__ = "investment_strategies"
@@ -24,38 +24,38 @@ class InvestmentStrategy(Base):
 class SavingsAccount(Base):
     __tablename__ = "savings_accounts"
     id = Column(String, primary_key=True, default=generate_uuid)
-    client_id = Column(String, nullable=False)
+    client_id = Column(String, nullable=False, index=True)
     account_number = Column(String, unique=True, nullable=False)
     balance = Column(Numeric(12, 2), default=0.00)
     interest_rate = Column(Numeric(5, 2), default=0.00)
-    status = Column(String, default="active") # active, closed
-    next_payment_date = Column(DateTime, nullable=True)
+    status = Column(String, default="active", index=True) # active, closed
+    next_payment_date = Column(DateTime, nullable=True, index=True)
     next_payment_amount = Column(Numeric(12, 2), default=0.00)
     opened_at = Column(DateTime, default=get_moscow_now)
 
 class Deposit(Base):
     __tablename__ = "deposits"
     id = Column(String, primary_key=True, default=generate_uuid)
-    client_id = Column(String, nullable=False)
+    client_id = Column(String, nullable=False, index=True)
     account_number = Column(String, unique=True, nullable=False)
     balance = Column(Numeric(12, 2), default=0.00)
     interest_rate = Column(Numeric(5, 2), default=0.00)
     term_months = Column(Numeric(5, 0), default=12)
-    status = Column(String, default="active") # active, closed
-    next_payment_date = Column(DateTime, nullable=True)
+    status = Column(String, default="active", index=True) # active, closed
+    next_payment_date = Column(DateTime, nullable=True, index=True)
     next_payment_amount = Column(Numeric(12, 2), default=0.00)
     opened_at = Column(DateTime, default=get_moscow_now)
 
 class BrokerAccount(Base):
     __tablename__ = "broker_accounts"
     id = Column(String, primary_key=True, default=generate_uuid)
-    client_id = Column(String, nullable=False)
+    client_id = Column(String, nullable=False, index=True)
     account_number = Column(String, unique=True, nullable=False)
     balance = Column(Numeric(12, 2), default=0.00)
     monthly_income = Column(Numeric(12, 2), default=0.00) # Доход за месяц (для расчета комиссии)
-    strategy_id = Column(String, ForeignKey("investment_strategies.id"), nullable=True)
-    status = Column(String, default="active") # active, blocked, closed
-    next_commission_date = Column(DateTime, nullable=True) # Дата списания комиссии
+    strategy_id = Column(String, ForeignKey("investment_strategies.id"), nullable=True, index=True)
+    status = Column(String, default="active", index=True) # active, blocked, closed
+    next_commission_date = Column(DateTime, nullable=True, index=True) # Дата списания комиссии
     opened_at = Column(DateTime, default=get_moscow_now)
     
     strategy = relationship("InvestmentStrategy", back_populates="broker_accounts")

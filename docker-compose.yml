@@ -29,6 +29,8 @@ services:
 
 
   simulations-seeder:
+    profiles:
+      - seed
     build:
       context: .
       dockerfile: src/simulations/Dockerfile.seeder
@@ -51,6 +53,7 @@ services:
       - postgres-db
     environment:
       - BANK_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/bank_db
+      - TZ=Europe/Moscow
     env_file:
       - .env
     restart: unless-stopped
@@ -64,6 +67,7 @@ services:
       - postgres-db
     environment:
       - INVEST_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/invest_db
+      - TZ=Europe/Moscow
     env_file:
       - .env
     restart: unless-stopped
@@ -78,6 +82,7 @@ services:
         condition: service_started
     environment:
       - RUBLE_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/digital_db
+      - TZ=Europe/Moscow
     env_file:
       - .env
     restart: unless-stopped

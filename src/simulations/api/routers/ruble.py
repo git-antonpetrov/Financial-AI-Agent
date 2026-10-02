@@ -1,17 +1,23 @@
-# Removed unused imports
+from decimal import Decimal
+from typing import Optional, List
 # pyrefly: ignore [missing-import]
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.future import select
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.simulations.db.digital_ruble.db.client import get_async_session_maker as get_ruble_session
 from src.simulations.db.bank.db.client import get_async_session_maker as get_bank_session
 from src.simulations.db.digital_ruble.db.models import Wallet, RubleTransaction, SmartContract
 from src.simulations.db.bank.db.models import Account, Transaction
 from src.simulations.core.utils.console_logger import log_info, log_error, log_success
-from src.simulations.api.core.utils import to_dict, to_dict_list
+from src.simulations.api.core.auth import verify_digital_token, verify_oracle_token
+from src.simulations.api.schemas.responses import (
+    WalletResponse,
+    RubleTransactionResponse,
+    SmartContractResponse,
+)
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(verify_digital_token)])
 
 def ruble_db():
     """Фабрика для получения сессии БД цифрового рубля."""
@@ -26,24 +32,77 @@ def bank_db():
 class FundWithdrawRequest(BaseModel):
     """Схема запроса для пополнения и вывода средств из кошелька цифрового рубля."""
     bank_account_id: str
-    amount: float
+    amount: Decimal = Field(..., gt=Decimal("0.00"), description="Сумма операции (строго больше нуля)")
 
 class RubleTransferRequest(BaseModel):
     """Схема запроса для P2P перевода цифровых рублей."""
     to_wallet_id: str
-    amount: float
+    amount: Decimal = Field(..., gt=Decimal("0.00"), description="Сумма P2P перевода (строго больше нуля)")
 
 class CreateContractRequest(BaseModel):
     """Схема запроса для создания смарт-контракта."""
     receiver_wallet_id: str
-    amount: float
+    amount: Decimal = Field(..., gt=Decimal("0.00"), description="Сумма смарт-контракта (строго больше нуля)")
     condition_type: str
     contract_code: str
 
+class ConditionUpdateRequest(BaseModel):
+    """Схема запроса для обновления внешнего условия смарт-контракта оракулом."""
+    status: str
+    oracle_name: Optional[str] = "default_oracle"
+    reason: Optional[str] = None
+    signature: Optional[str] = None
+
+# --- Вспомогательные функции компенсации (Saga pattern) ---
+
+async def _compensate_bank_transfer(bank_account_id: str, amount: Decimal, reason: str, op_type: str = "transfer_in_compensation"):
+    """
+    Компенсационная транзакция: возвращает средства на банковский счет при сбое в кошельке цифрового рубля.
+    """
+    try:
+        async with bank_db() as bdb:
+            acc = await bdb.scalar(
+                select(Account)
+                .where(Account.id == bank_account_id)
+                .with_for_update()
+            )
+            if acc:
+                acc.balance = Decimal(str(acc.balance)) + amount
+                tx = Transaction(
+                    account_id=acc.id,
+                    category='income',
+                    operation_type=op_type,
+                    amount=amount,
+                    description=f"Компенсация: {reason}"
+                )
+                bdb.add(tx)
+                await bdb.commit()
+                log_info("RubleAPI", f"Успешная компенсация {amount} на счет {bank_account_id} ({reason})")
+    except Exception as comp_err:
+        log_error("RubleAPI", f"КРИТИЧЕСКИЙ СБОЙ КОМПЕНСАЦИИ на счете {bank_account_id}: {comp_err}")
+
+async def _compensate_wallet_withdraw(wallet_id: str, amount: Decimal, reason: str):
+    """
+    Компенсационная транзакция: возвращает средства в кошелек цифрового рубля при сбое зачисления на банковский счет.
+    """
+    try:
+        async with ruble_db() as rdb:
+            wallet = await rdb.scalar(
+                select(Wallet)
+                .where(Wallet.id == wallet_id)
+                .with_for_update()
+            )
+            if wallet:
+                wallet.balance = Decimal(str(wallet.balance)) + amount
+                await rdb.commit()
+                log_info("RubleAPI", f"Успешная компенсация: возвращено {amount} в кошелек {wallet_id} ({reason})")
+    except Exception as comp_err:
+        log_error("RubleAPI", f"КРИТИЧЕСКИЙ СБОЙ КОМПЕНСАЦИИ кошелька {wallet_id}: {comp_err}")
+
 # --- Эндпоинты ---
 
-@router.get("/wallets/{client_id}")
-async def get_wallet(client_id: str):
+@router.get("/wallets/{client_id}", response_model=WalletResponse)
+async def get_wallet(client_id: str) -> WalletResponse:
     """
     Получить кошелек цифрового рубля для указанного клиента.
     """
@@ -52,10 +111,10 @@ async def get_wallet(client_id: str):
         if not wallet: 
             log_error("RubleAPI", f"Кошелек для клиента {client_id} не найден")
             raise HTTPException(404, "Кошелек не найден")
-        return to_dict(wallet)
+        return WalletResponse.model_validate(wallet)
 
-@router.get("/wallets/{wallet_id}/transactions")
-async def get_transactions(wallet_id: str):
+@router.get("/wallets/{wallet_id}/transactions", response_model=List[RubleTransactionResponse])
+async def get_transactions(wallet_id: str) -> List[RubleTransactionResponse]:
     """
     Получить историю транзакций для кошелька цифрового рубля.
     """
@@ -65,22 +124,30 @@ async def get_transactions(wallet_id: str):
             .where((RubleTransaction.sender_wallet_id == wallet_id) | (RubleTransaction.receiver_wallet_id == wallet_id))
             .order_by(RubleTransaction.timestamp.desc())
         )
-        return to_dict_list(result.scalars().all())
+        return [RubleTransactionResponse.model_validate(tx) for tx in result.scalars().all()]
 
 @router.post("/wallets/{wallet_id}/fund")
 async def fund_wallet(wallet_id: str, req: FundWithdrawRequest):
     """
     Пополнить кошелек цифрового рубля со счета в банке.
     Кросс-доменная операция: Банк -> Цифровой Рубль.
+    Использует with_for_update() для блокировки счета и кошелька.
+    Реализует Saga-паттерн с автоматической компенсацией на банковский счет при сбое.
     """
-    # Списание из банка
+    # 1. Списание из банка
     async with bank_db() as bdb:
-        acc = await bdb.scalar(select(Account).where(Account.id == req.bank_account_id))
+        acc = await bdb.scalar(
+            select(Account)
+            .where(Account.id == req.bank_account_id)
+            .with_for_update()
+        )
         if not acc: raise HTTPException(404, "Банковский счет не найден")
-        if float(acc.balance) < req.amount:
+        
+        acc_balance = Decimal(str(acc.balance))
+        if acc_balance < req.amount:
             raise HTTPException(400, "Недостаточно средств на банковском счете")
         
-        acc.balance = float(acc.balance) - req.amount
+        acc.balance = acc_balance - req.amount
         tx = Transaction(
             account_id=acc.id,
             category='expense',
@@ -91,13 +158,29 @@ async def fund_wallet(wallet_id: str, req: FundWithdrawRequest):
         bdb.add(tx)
         await bdb.commit()
 
-    # Пополнение кошелька
-    async with ruble_db() as rdb:
-        wallet = await rdb.scalar(select(Wallet).where(Wallet.id == wallet_id))
-        if not wallet: raise HTTPException(404, "Кошелек не найден")
-        
-        wallet.balance = float(wallet.balance) + req.amount
-        await rdb.commit()
+    # 2. Пополнение кошелька с Saga-компенсацией
+    try:
+        async with ruble_db() as rdb:
+            wallet = await rdb.scalar(
+                select(Wallet)
+                .where(Wallet.id == wallet_id)
+                .with_for_update()
+            )
+            if not wallet: raise HTTPException(404, "Кошелек не найден")
+            
+            wallet.balance = Decimal(str(wallet.balance)) + req.amount
+            await rdb.commit()
+    except Exception as e:
+        log_error("RubleAPI", f"Ошибка пополнения кошелька {wallet_id}: {e}. Запуск компенсационной транзакции...")
+        await _compensate_bank_transfer(
+            bank_account_id=req.bank_account_id,
+            amount=req.amount,
+            reason="Сбой пополнения цифрового кошелька",
+            op_type="compensation_ruble_fund"
+        )
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(500, f"Ошибка пополнения цифрового кошелька. Средства компенсированы на банковский счет: {e}")
         
     log_success("RubleAPI", f"Кошелек {wallet_id} пополнен на {req.amount} со счета {req.bank_account_id}")
     return {"status": "success"}
@@ -107,52 +190,95 @@ async def withdraw_wallet(wallet_id: str, req: FundWithdrawRequest):
     """
     Вывести цифровые рубли на банковский счет.
     Кросс-доменная операция: Цифровой Рубль -> Банк.
+    Использует with_for_update() для блокировки кошелька и счета.
+    Реализует Saga-паттерн с автоматической компенсацией в кошелек при сбое зачисления в банк.
     """
-    # Списание из кошелька
+    # 1. Списание из кошелька
     async with ruble_db() as rdb:
-        wallet = await rdb.scalar(select(Wallet).where(Wallet.id == wallet_id))
+        wallet = await rdb.scalar(
+            select(Wallet)
+            .where(Wallet.id == wallet_id)
+            .with_for_update()
+        )
         if not wallet: raise HTTPException(404, "Кошелек не найден")
-        if float(wallet.balance) < req.amount:
+        
+        wallet_balance = Decimal(str(wallet.balance))
+        if wallet_balance < req.amount:
             raise HTTPException(400, "Недостаточно цифровых рублей")
         
-        wallet.balance = float(wallet.balance) - req.amount
+        wallet.balance = wallet_balance - req.amount
         await rdb.commit()
 
-    # Зачисление в банк
-    async with bank_db() as bdb:
-        acc = await bdb.scalar(select(Account).where(Account.id == req.bank_account_id))
-        if not acc: raise HTTPException(404, "Банковский счет не найден")
-        
-        acc.balance = float(acc.balance) + req.amount
-        tx = Transaction(
-            account_id=acc.id,
-            category='income',
-            operation_type='transfer_in_ruble',
+    # 2. Зачисление в банк с Saga-компенсацией
+    try:
+        async with bank_db() as bdb:
+            acc = await bdb.scalar(
+                select(Account)
+                .where(Account.id == req.bank_account_id)
+                .with_for_update()
+            )
+            if not acc: raise HTTPException(404, "Банковский счет не найден")
+            
+            acc.balance = Decimal(str(acc.balance)) + req.amount
+            tx = Transaction(
+                account_id=acc.id,
+                category='income',
+                operation_type='transfer_in_ruble',
+                amount=req.amount,
+                description="Вывод из кошелька цифрового рубля"
+            )
+            bdb.add(tx)
+            await bdb.commit()
+    except Exception as e:
+        log_error("RubleAPI", f"Ошибка зачисления при выводе из кошелька {wallet_id}: {e}. Компенсация цифровых рублей...")
+        await _compensate_wallet_withdraw(
+            wallet_id=wallet_id,
             amount=req.amount,
-            description="Вывод из кошелька цифрового рубля"
+            reason="Сбой зачисления на банковский счет"
         )
-        bdb.add(tx)
-        await bdb.commit()
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(500, f"Ошибка зачисления на банковский счет. Цифровые рубли возвращены в кошелек: {e}")
         
     log_success("RubleAPI", f"С кошелька {wallet_id} выведено {req.amount} на счет {req.bank_account_id}")
     return {"status": "success"}
 
-@router.post("/wallets/{wallet_id}/transfers")
-async def transfer_rubles(wallet_id: str, req: RubleTransferRequest):
+@router.post("/wallets/{wallet_id}/transfers", response_model=RubleTransactionResponse)
+async def transfer_rubles(wallet_id: str, req: RubleTransferRequest) -> RubleTransactionResponse:
     """
     P2P перевод цифровых рублей между двумя кошельками.
+    Использует пессимистическую блокировку строк (SELECT FOR UPDATE)
+    в детерминированном порядке ID для защиты от race condition и deadlocks.
     """
+    if str(wallet_id) == str(req.to_wallet_id):
+        raise HTTPException(400, "Перевод на тот же самый кошелек невозможен")
+
     async with ruble_db() as db:
-        sender = await db.scalar(select(Wallet).where(Wallet.id == wallet_id))
+        lock_ids = sorted([str(wallet_id), str(req.to_wallet_id)])
+        wallets_res = await db.execute(
+            select(Wallet)
+            .where(Wallet.id.in_(lock_ids))
+            .order_by(Wallet.id)
+            .with_for_update()
+        )
+        wallets_map = {str(w.id): w for w in wallets_res.scalars().all()}
+
+        sender = wallets_map.get(str(wallet_id))
         if not sender: raise HTTPException(404, "Отправитель не найден")
-        if float(sender.balance) < req.amount:
+        if sender.status and sender.status != "active":
+            raise HTTPException(400, f"Кошелек отправителя недоступен (статус: {sender.status})")
+
+        receiver = wallets_map.get(str(req.to_wallet_id))
+        if not receiver: raise HTTPException(404, "Получатель не найден")
+        if receiver.status and receiver.status != "active":
+            raise HTTPException(400, f"Кошелек получателя недоступен (статус: {receiver.status})")
+
+        sender_balance = Decimal(str(sender.balance))
+        if sender_balance < req.amount:
             raise HTTPException(400, "Недостаточно цифровых рублей")
 
-        receiver = await db.scalar(select(Wallet).where(Wallet.id == req.to_wallet_id))
-        if not receiver: raise HTTPException(404, "Получатель не найден")
-
-        sender.balance = float(sender.balance) - req.amount
-        receiver.balance = float(receiver.balance) + req.amount
+        sender.balance = sender_balance - req.amount
+        receiver.balance = Decimal(str(receiver.balance)) + req.amount
 
         rtx = RubleTransaction(
             sender_wallet_id=sender.id,
@@ -164,23 +290,35 @@ async def transfer_rubles(wallet_id: str, req: RubleTransferRequest):
         await db.refresh(rtx)
         
         log_success("RubleAPI", f"P2P Перевод ЦР: {req.amount} от {wallet_id} к {req.to_wallet_id}")
-        return to_dict(rtx)
+        return RubleTransactionResponse.model_validate(rtx)
 
-@router.post("/wallets/{wallet_id}/smart-contracts")
-async def create_smart_contract(wallet_id: str, req: CreateContractRequest):
+@router.post("/wallets/{wallet_id}/smart-contracts", response_model=SmartContractResponse)
+async def create_smart_contract(wallet_id: str, req: CreateContractRequest) -> SmartContractResponse:
     """
     Создать смарт-контракт. Средства замораживаются на счету инициатора 
     до момента исполнения контракта.
+    Использует with_for_update() для защиты баланса создателя от гонки.
     """
+    if str(wallet_id) == str(req.receiver_wallet_id):
+        raise HTTPException(400, "Создатель и получатель смарт-контракта не могут совпадать")
+
     async with ruble_db() as db:
-        creator = await db.scalar(select(Wallet).where(Wallet.id == wallet_id))
+        creator = await db.scalar(
+            select(Wallet)
+            .where(Wallet.id == wallet_id)
+            .with_for_update()
+        )
         if not creator: raise HTTPException(404, "Создатель контракта не найден")
-        if float(creator.balance) < req.amount:
+        if creator.status and creator.status != "active":
+            raise HTTPException(400, f"Кошелек создателя недоступен (статус: {creator.status})")
+        
+        creator_balance = Decimal(str(creator.balance))
+        if creator_balance < req.amount:
             raise HTTPException(400, "Недостаточно средств для заморозки под контракт")
         
         # Замораживаем средства
-        creator.balance = float(creator.balance) - req.amount
-        creator.frozen_balance = float(creator.frozen_balance) + req.amount
+        creator.balance = creator_balance - req.amount
+        creator.frozen_balance = Decimal(str(creator.frozen_balance)) + req.amount
 
         contract = SmartContract(
             creator_wallet_id=creator.id,
@@ -194,10 +332,10 @@ async def create_smart_contract(wallet_id: str, req: CreateContractRequest):
         await db.refresh(contract)
         
         log_info("RubleAPI", f"Создан смарт-контракт от {wallet_id} для {req.receiver_wallet_id} на {req.amount}")
-        return to_dict(contract)
+        return SmartContractResponse.model_validate(contract)
 
-@router.get("/wallets/{wallet_id}/smart-contracts")
-async def get_smart_contracts(wallet_id: str):
+@router.get("/wallets/{wallet_id}/smart-contracts", response_model=List[SmartContractResponse])
+async def get_smart_contracts(wallet_id: str) -> List[SmartContractResponse]:
     """
     Получить список смарт-контрактов, связанных с кошельком (как инициатор или получатель).
     """
@@ -206,26 +344,46 @@ async def get_smart_contracts(wallet_id: str):
             select(SmartContract)
             .where((SmartContract.creator_wallet_id == wallet_id) | (SmartContract.receiver_wallet_id == wallet_id))
         )
-        return to_dict_list(result.scalars().all())
+        return [SmartContractResponse.model_validate(c) for c in result.scalars().all()]
 
-@router.post("/smart-contracts/{contract_id}/condition")
-async def update_contract_condition(contract_id: str, status: str):
+@router.post("/smart-contracts/{contract_id}/condition", dependencies=[Depends(verify_oracle_token)])
+async def update_contract_condition(contract_id: str, req: ConditionUpdateRequest):
     """
-    Оракул: обновить внешнее условие контракта.
-    Статус должен быть 'fulfilled' или 'failed'. После этого воркер (ruble_eod) 
-    исполнит контракт ночью.
+    Оракул: доверенное обновление внешнего условия смарт-контракта.
+    Доступ разрешен только доверенному оракулу (ORACLE_BOOTSTRAP_TOKEN),
+    агенту цифрового рубля или главному оркестратору.
     """
-    if status not in ['fulfilled', 'failed']:
-        raise HTTPException(400, "Неверный статус. Используйте 'fulfilled' или 'failed'")
+    if req.status not in ['fulfilled', 'failed']:
+        raise HTTPException(400, "Неверный статус условия. Разрешены только 'fulfilled' или 'failed'")
     
     async with ruble_db() as db:
-        contract = await db.scalar(select(SmartContract).where(SmartContract.id == contract_id))
-        if not contract: raise HTTPException(404, "Контракт не найден")
+        contract = await db.scalar(
+            select(SmartContract)
+            .where(SmartContract.id == contract_id)
+            .with_for_update()
+        )
+        if not contract:
+            log_error("RubleAPI", f"Оракул запросил несуществующий контракт {contract_id}")
+            raise HTTPException(404, "Смарт-контракт не найден")
+            
         if contract.status != "active":
             raise HTTPException(400, f"Контракт не активен (текущий статус: {contract.status})")
+
+        if contract.condition_status in ['fulfilled', 'failed']:
+            raise HTTPException(409, f"Условие контракта уже зафиксировано со статусом '{contract.condition_status}'")
         
-        contract.condition_status = status
+        contract.condition_status = req.status
         await db.commit()
+        await db.refresh(contract)
         
-        log_info("RubleAPI", f"Статус условия смарт-контракта {contract_id} обновлен оракулом на: {status}")
-        return {"status": "success", "new_condition_status": status}
+        log_info(
+            "RubleAPI",
+            f"Оракул '{req.oracle_name}' обновил статус условия контракта {contract_id} на '{req.status}' "
+            f"(причина: {req.reason or 'не указана'})"
+        )
+        return {
+            "status": "success",
+            "contract_id": contract_id,
+            "new_condition_status": req.status,
+            "oracle_name": req.oracle_name
+        }

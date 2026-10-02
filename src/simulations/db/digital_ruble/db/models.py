@@ -8,16 +8,16 @@ def generate_uuid():
     return str(uuid.uuid4())
 
 def get_moscow_now():
-    return datetime.utcnow() + timedelta(hours=3)
+    return (datetime.now(timezone.utc) + timedelta(hours=3)).replace(tzinfo=None)
 
 class Wallet(Base):
     __tablename__ = "wallets"
     id = Column(String, primary_key=True, default=generate_uuid)
-    client_id = Column(String, unique=True, nullable=False) # 1 кошелек = 1 гражданин
+    client_id = Column(String, unique=True, nullable=False, index=True) # 1 кошелек = 1 гражданин
     wallet_number = Column(String, unique=True, nullable=False)
     balance = Column(Numeric(12, 2), default=0.00)
     frozen_balance = Column(Numeric(12, 2), default=0.00)
-    status = Column(String, default="active") # active, blocked
+    status = Column(String, default="active", index=True) # active, blocked
     opened_at = Column(DateTime, default=get_moscow_now)
 
     sent_transactions = relationship("RubleTransaction", foreign_keys="[RubleTransaction.sender_wallet_id]", back_populates="sender")
@@ -29,13 +29,13 @@ class Wallet(Base):
 class RubleTransaction(Base):
     __tablename__ = "ruble_transactions"
     id = Column(String, primary_key=True, default=generate_uuid)
-    sender_wallet_id = Column(String, ForeignKey("wallets.id"), nullable=True)
-    receiver_wallet_id = Column(String, ForeignKey("wallets.id"), nullable=False)
+    sender_wallet_id = Column(String, ForeignKey("wallets.id"), nullable=True, index=True)
+    receiver_wallet_id = Column(String, ForeignKey("wallets.id"), nullable=False, index=True)
     amount = Column(Numeric(12, 2), nullable=False)
-    status = Column(String, default="completed") # completed, failed
-    smart_contract_id = Column(String, ForeignKey("smart_contracts.id"), nullable=True)
+    status = Column(String, default="completed", index=True) # completed, failed
+    smart_contract_id = Column(String, ForeignKey("smart_contracts.id"), nullable=True, index=True)
     signature = Column(String, nullable=True)
-    timestamp = Column(DateTime, default=get_moscow_now)
+    timestamp = Column(DateTime, default=get_moscow_now, index=True)
 
     sender = relationship("Wallet", foreign_keys=[sender_wallet_id], back_populates="sent_transactions")
     receiver = relationship("Wallet", foreign_keys=[receiver_wallet_id], back_populates="received_transactions")
@@ -44,13 +44,13 @@ class RubleTransaction(Base):
 class SmartContract(Base):
     __tablename__ = "smart_contracts"
     id = Column(String, primary_key=True, default=generate_uuid)
-    creator_wallet_id = Column(String, ForeignKey("wallets.id"), nullable=False)
-    receiver_wallet_id = Column(String, ForeignKey("wallets.id"), nullable=False)
+    creator_wallet_id = Column(String, ForeignKey("wallets.id"), nullable=False, index=True)
+    receiver_wallet_id = Column(String, ForeignKey("wallets.id"), nullable=False, index=True)
     amount = Column(Numeric(12, 2), nullable=False)
     condition_type = Column(String, nullable=False) # "приемка_квартиры", "наступление_даты"
     contract_code = Column(String, nullable=True) # Python DSL код контракта
-    condition_status = Column(String, default="pending") # pending, fulfilled, failed
-    status = Column(String, default="active") # active, executed, cancelled, failed
+    condition_status = Column(String, default="pending", index=True) # pending, fulfilled, failed
+    status = Column(String, default="active", index=True) # active, executed, cancelled, failed
     error_message = Column(String, nullable=True) # Полный текст ошибки, если контракт упал
     created_at = Column(DateTime, default=get_moscow_now)
     executed_at = Column(DateTime, nullable=True)

@@ -15,11 +15,11 @@ from src.simulations.core.utils.console_logger import log_info
 async def main():
     log_info("Invest EOD Worker", "Инициализация воркера...")
     
-    # Создаем асинхронный планировщик
-    scheduler = AsyncIOScheduler()
+    # Создаем асинхронный планировщик с явным указанием московского времени
+    scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
     
-    # Запуск по расписанию в 23:15, как просил пользователь
-    scheduler.add_job(run_invest_eod, 'cron', hour=23, minute=15)
+    # Запуск по расписанию в 23:15 по Москве
+    scheduler.add_job(run_invest_eod, 'cron', hour=23, minute=15, timezone="Europe/Moscow")
     
     scheduler.start()
     log_info("Invest EOD Worker", "Воркер инвестиций запущен. Ожидание 23:15...")
