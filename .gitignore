@@ -191,6 +191,8 @@ vectordb/
 raw_data/
 docs/
 datasets/
+test_docs/
+scratch_report.txt
 *.pdf
 *.jsonl
 # Игнорируем базу данных векторов
