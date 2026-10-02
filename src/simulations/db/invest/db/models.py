@@ -14,10 +14,10 @@ class InvestmentStrategy(Base):
     __tablename__ = "investment_strategies"
     id = Column(String, primary_key=True, default=generate_uuid)
     name = Column(String, nullable=False)
-    expected_yield = Column(Numeric(5, 2), default=0.00) # %
-    risk_level = Column(String, nullable=False) # Low, Medium, High
+    expected_yield = Column(Numeric(5, 2), default=0.00)  # %
+    risk_level = Column(String, nullable=False)  # Уровень риска: Low, Medium, High
     instruments = Column(String, nullable=False)
-    commission_fee = Column(Numeric(5, 2), default=0.00) # % (5 to 25)
+    commission_fee = Column(Numeric(5, 2), default=0.00)  # % комиссии (от 5 до 25)
     
     broker_accounts = relationship("BrokerAccount", back_populates="strategy")
 
@@ -28,7 +28,7 @@ class SavingsAccount(Base):
     account_number = Column(String, unique=True, nullable=False)
     balance = Column(Numeric(12, 2), default=0.00)
     interest_rate = Column(Numeric(5, 2), default=0.00)
-    status = Column(String, default="active", index=True) # active, closed
+    status = Column(String, default="active", index=True)  # Возможные значения: active, closed
     next_payment_date = Column(DateTime, nullable=True, index=True)
     next_payment_amount = Column(Numeric(12, 2), default=0.00)
     opened_at = Column(DateTime, default=get_moscow_now)
@@ -41,7 +41,7 @@ class Deposit(Base):
     balance = Column(Numeric(12, 2), default=0.00)
     interest_rate = Column(Numeric(5, 2), default=0.00)
     term_months = Column(Numeric(5, 0), default=12)
-    status = Column(String, default="active", index=True) # active, closed
+    status = Column(String, default="active", index=True)  # Возможные значения: active, closed
     next_payment_date = Column(DateTime, nullable=True, index=True)
     next_payment_amount = Column(Numeric(12, 2), default=0.00)
     opened_at = Column(DateTime, default=get_moscow_now)
@@ -52,10 +52,10 @@ class BrokerAccount(Base):
     client_id = Column(String, nullable=False, index=True)
     account_number = Column(String, unique=True, nullable=False)
     balance = Column(Numeric(12, 2), default=0.00)
-    monthly_income = Column(Numeric(12, 2), default=0.00) # Доход за месяц (для расчета комиссии)
+    monthly_income = Column(Numeric(12, 2), default=0.00)  # Доход за месяц (для расчета комиссии)
     strategy_id = Column(String, ForeignKey("investment_strategies.id"), nullable=True, index=True)
-    status = Column(String, default="active", index=True) # active, blocked, closed
-    next_commission_date = Column(DateTime, nullable=True, index=True) # Дата списания комиссии
+    status = Column(String, default="active", index=True)  # Возможные значения: active, blocked, closed
+    next_commission_date = Column(DateTime, nullable=True, index=True)  # Дата списания комиссии
     opened_at = Column(DateTime, default=get_moscow_now)
     
     strategy = relationship("InvestmentStrategy", back_populates="broker_accounts")

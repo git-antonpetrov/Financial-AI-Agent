@@ -157,7 +157,7 @@ def test_routers_define_response_models():
 
     from typing import List
 
-    # Bank routes
+    # Маршруты банковского сервиса
     assert routes[("/accounts/by-client/{client_id}", "GET")].response_model in (List[AccountResponse], list[AccountResponse])
     assert routes[("/accounts/{account_id}/tariff", "GET")].response_model == TariffResponse
     assert routes[("/accounts/{account_id}/cards", "GET")].response_model in (List[CardResponse], list[CardResponse])
@@ -166,19 +166,45 @@ def test_routers_define_response_models():
     assert routes[("/accounts/{account_id}/autopayments", "POST")].response_model == AutoPaymentResponse
     assert routes[("/accounts/{account_id}/cards/issue", "POST")].response_model == CardResponse
 
-    # Invest routes
+    # Маршруты инвестиционного сервиса
     assert routes[("/strategies", "GET")].response_model in (List[InvestmentStrategyResponse], list[InvestmentStrategyResponse])
     assert routes[("/portfolio/{client_id}", "GET")].response_model == PortfolioResponse
     assert routes[("/deposits/open", "POST")].response_model == DepositResponse
     assert routes[("/savings/open", "POST")].response_model == SavingsAccountResponse
     assert routes[("/broker-accounts/open", "POST")].response_model == BrokerAccountResponse
 
-    # Ruble routes
+    # Маршруты сервиса цифрового рубля
     assert routes[("/wallets/{client_id}", "GET")].response_model == WalletResponse
     assert routes[("/wallets/{wallet_id}/transactions", "GET")].response_model in (List[RubleTransactionResponse], list[RubleTransactionResponse])
     assert routes[("/wallets/{wallet_id}/transfers", "POST")].response_model == RubleTransactionResponse
     assert routes[("/wallets/{wallet_id}/smart-contracts", "GET")].response_model in (List[SmartContractResponse], list[SmartContractResponse])
     assert routes[("/wallets/{wallet_id}/smart-contracts", "POST")].response_model == SmartContractResponse
+
+
+def test_admin_server_response_models():
+    """
+    Проверяет, что ключевые маршруты в admin_server имеют определенные response_model.
+    """
+    import sys
+    from unittest.mock import MagicMock
+    for mod in ["redis", "minio", "litellm", "asyncpg"]:
+        if mod not in sys.modules:
+            sys.modules[mod] = MagicMock()
+    
+    from src.admin_server.fastapi.server import app
+    from src.admin_server.fastapi.db import schemas
+    
+    routes = {}
+    for route in app.routes:
+        if hasattr(route, "methods"):
+            for method in route.methods:
+                routes[(route.path, method)] = route
+
+    assert routes[("/login", "POST")].response_model.__name__ == "TokenResponse"
+    assert routes[("/api/config/contentai", "GET")].response_model.__name__ == "ContentAiConfigResponse"
+    assert routes[("/api/upload/{agent_name}/{action}", "POST")].response_model.__name__ == "UploadResponse"
+    assert routes[("/api/agent-requests/approve", "POST")].response_model.__name__ == "BatchActionResponse"
+    assert routes[("/api/agent-requests/reject", "POST")].response_model.__name__ == "BatchActionResponse"
 
 
 def test_to_dict_marked_deprecated():

@@ -80,9 +80,9 @@ fn attach_child_to_job_object(pid: u32) {
           CloseHandle(process);
         }
       }
-      // Job handle deliberately remains open for the lifetime of parent process.
-      // When the parent process terminates, Windows closes the job handle,
-      // which automatically kills the child process.
+      // Дескриптор Job Object намеренно остается открытым на протяжении работы родительского процесса.
+      // При завершении родительского процесса Windows закрывает дескриптор,
+      // что автоматически завершает дочерний процесс sidecar.
     }
   }
 }

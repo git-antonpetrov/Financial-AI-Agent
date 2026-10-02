@@ -64,7 +64,7 @@ function App() {
       // 1. Проверка на валидность URL-адреса
       try {
         new URL(baseUrl)
-      } catch (err) {
+      } catch {
         throw new Error('errorInvalidUrl')
       }
 
@@ -156,7 +156,7 @@ function App() {
   return (
     <div className="min-h-full flex flex-col relative">
 
-      {/* Header / Language Toggle */}
+      {/* Шапка интерфейса: переключатель языка */}
       <div className="p-6 flex justify-end relative z-10">
         <button
           onClick={() => setLang(lang === 'en' ? 'ru' : 'en')}
@@ -167,11 +167,11 @@ function App() {
         </button>
       </div>
 
-      {/* Main Login Form */}
+      {/* Основная форма входа в панель администратора */}
       <div className="flex-1 flex items-center justify-center p-6 relative z-10">
         <div className="w-full max-w-md">
           <div className="bg-[#1a0f3c]/60 backdrop-blur-xl border border-purple-500/20 rounded-2xl p-8 shadow-2xl">
-            {/* The key={lang} trick forces React to re-mount this block on language change, triggering the animation */}
+            {/* Ключ key={lang} перезапускает монтирование блока при смене языка для запуска анимации */}
             <div key={lang} className="animate-fade-scale">
               <div className="text-center mb-8">
                 <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-br from-purple-600 to-indigo-600 shadow-lg shadow-purple-500/30 mb-6">

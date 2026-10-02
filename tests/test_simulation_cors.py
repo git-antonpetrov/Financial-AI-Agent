@@ -14,7 +14,7 @@ def test_cors_preflight_allowed_origin():
     assert response.status_code == 200
     assert response.headers.get("access-control-allow-origin") == "http://localhost:5173"
     assert response.headers.get("access-control-allow-credentials") == "true"
-    # Wildcard origin не должен использоваться
+    # Проверяет отсутствие универсального подстановочного источника wildcard (*)
     assert response.headers.get("access-control-allow-origin") != "*"
 
 

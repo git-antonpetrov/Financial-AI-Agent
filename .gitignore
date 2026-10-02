@@ -181,6 +181,7 @@ __marimo__/
 # 1. Secrets and API keys
 .env
 .env.*
+!.env.example
 *.key
 *.pem
 # 2. Local vector databases

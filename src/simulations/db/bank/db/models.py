@@ -33,7 +33,7 @@ class Account(Base):
     balance = Column(Numeric(12, 2), default=0.00)
     currency = Column(String, default="RUB")
     tariff_id = Column(String, ForeignKey("tariffs.id"), nullable=False, index=True)
-    status = Column(String, default="active", index=True) # active, closed
+    status = Column(String, default="active", index=True)  # Возможные значения: active, closed
     created_at = Column(DateTime, default=get_moscow_now)
 
     tariff = relationship("Tariff", back_populates="accounts")
@@ -47,7 +47,7 @@ class Card(Base):
     id = Column(String, primary_key=True, default=generate_uuid)
     account_id = Column(String, ForeignKey("accounts.id"), nullable=False, index=True)
     card_number = Column(String, unique=True, nullable=False)
-    status = Column(String, default="active", index=True) # active, blocked, frozen
+    status = Column(String, default="active", index=True)  # Возможные значения: active, blocked, frozen
     created_at = Column(DateTime, default=get_moscow_now)
 
     account = relationship("Account", back_populates="cards")
@@ -57,15 +57,15 @@ class Transaction(Base):
     __tablename__ = "transactions"
     id = Column(String, primary_key=True, default=generate_uuid)
     account_id = Column(String, ForeignKey("accounts.id"), nullable=False, index=True)
-    category = Column(String, nullable=False) # 'income', 'expense'
-    operation_type = Column(String, nullable=False) # 'transfer_sbp', 'transfer_non_sbp', 'purchase', 'top_up', 'cash_deposit', 'salary', etc.
+    category = Column(String, nullable=False)  # Категория операции: 'income', 'expense'
+    operation_type = Column(String, nullable=False)  # Тип: 'transfer_sbp', 'transfer_non_sbp', 'purchase', 'top_up', 'salary' и др.
     amount = Column(Numeric(12, 2), nullable=False)
     commission = Column(Numeric(12, 2), default=0.00)
     description = Column(String)
-    status = Column(String, default="completed") # 'completed', 'failed', 'pending'
+    status = Column(String, default="completed")  # Статус: 'completed', 'failed', 'pending'
     date = Column(Date, default=date.today, index=True)
     
-    # We use a callable to set the default time correctly when the object is created
+    # Использует вызываемый объект для вычисления московского времени при создании транзакции
     time = Column(Time, default=lambda: (datetime.now(timezone.utc) + timedelta(hours=3)).time()) 
     
     account = relationship("Account", back_populates="transactions")
@@ -77,7 +77,7 @@ class AutoPayment(Base):
     account_id = Column(String, ForeignKey("accounts.id"), nullable=False, index=True)
     amount = Column(Numeric(12, 2), nullable=False)
     recipient = Column(String, nullable=False)
-    schedule = Column(String, nullable=False) # 'monthly', 'weekly'
+    schedule = Column(String, nullable=False)  # Периодичность: 'monthly', 'weekly'
     next_payment_date = Column(Date, nullable=False, index=True)
     is_active = Column(Boolean, default=True, index=True)
 

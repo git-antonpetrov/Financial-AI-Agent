@@ -1,4 +1,5 @@
 import os
+import sys
 import re
 import json
 import time
@@ -50,8 +51,8 @@ DB_HOST = os.getenv("DB_HOST", "postgres-db")
 POSTGRES_USER = os.getenv("POSTGRES_USER", "financial_ai_agent")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD")
 if not POSTGRES_PASSWORD:
-    log_error("Worker Init", "CRITICAL CONFIGURATION ERROR: POSTGRES_PASSWORD environment variable is required but not set.")
-    exit(1)
+    log_error("Инициализация воркера", "Критическая ошибка конфигурации: переменная окружения POSTGRES_PASSWORD обязательна, но не задана.")
+    sys.exit(1)
 POSTGRES_DB = os.getenv("POSTGRES_DB", "financial_agent")
 
 # Лимиты и Чанкинг
@@ -88,17 +89,17 @@ chroma_client = chromadb.HttpClient(
 )
 
 # Ожидание готовности ChromaDB
-log_info("Worker Init", "Ожидание ChromaDB...")
+log_info("Инициализация воркера", "Ожидание ChromaDB...")
 for attempt in range(30):
     try:
         chroma_client.heartbeat()
-        log_success("Worker Init", "ChromaDB доступна.")
+        log_success("Инициализация воркера", "ChromaDB доступна.")
         break
     except Exception:
         time.sleep(2)
 else:
-    log_error("Worker Init", "ChromaDB не отвечает после 30 попыток. Завершение.")
-    exit(1)
+    log_error("Инициализация воркера", "ChromaDB не отвечает после 30 попыток. Завершение работы.")
+    sys.exit(1)
 
 try:
     db_pool = SimpleConnectionPool(
@@ -109,11 +110,11 @@ try:
         dbname=POSTGRES_DB
     )
 except Exception as e:
-    log_error("Worker Init", f"Failed to initialize database pool: {e}")
-    exit(1)
+    log_error("Инициализация воркера", f"Не удалось инициализировать пул соединений с базой данных: {e}")
+    sys.exit(1)
 
 def update_document_status(file_hash: str, agent_name: str, new_status: str, message: str = ""):
-    """Обновляет статус документа в Postgres через пул соединений"""
+    """Обновляет статус документа в Postgres через пул соединений."""
     if not file_hash or not agent_name:
         return
     try:
@@ -126,14 +127,14 @@ def update_document_status(file_hash: str, agent_name: str, new_status: str, mes
         conn.commit()
         cur.close()
         db_pool.putconn(conn)
-        log_info("DB Update", f"Document status for {file_hash} ({agent_name}) set to {new_status}")
+        log_info("Обновление БД", f"Статус документа {file_hash} ({agent_name}) изменен на '{new_status}'")
     except Exception as e:
-        log_error("DB Update", f"Failed to update status in DB: {e}")
+        log_error("Обновление БД", f"Не удалось обновить статус документа в БД: {e}")
         if 'conn' in locals():
             db_pool.putconn(conn, close=True)
 
 def mark_document_repealed(short_name: str, agent_name: str, message: str = ""):
-    """Переводит отмененный документ в статус 'repealed' в таблице documents Postgres"""
+    """Переводит отмененный документ в статус 'repealed' в таблице documents Postgres."""
     if not short_name or not agent_name:
         return
     try:
@@ -148,16 +149,16 @@ def mark_document_repealed(short_name: str, agent_name: str, message: str = ""):
         cur.close()
         db_pool.putconn(conn)
         if updated_rows > 0:
-            log_info("DB Update", f"Документ '{short_name}' ({agent_name}) помечен как 'repealed' (обновлено записей: {updated_rows})")
+            log_info("Обновление БД", f"Документ '{short_name}' ({agent_name}) помечен как 'repealed' (обновлено записей: {updated_rows})")
     except Exception as e:
-        log_error("DB Update", f"Ошибка обновления статуса 'repealed' для {short_name}: {e}")
+        log_error("Обновление БД", f"Ошибка обновления статуса 'repealed' для {short_name}: {e}")
         if 'conn' in locals():
             db_pool.putconn(conn, close=True)
 
 def get_embeddings_google(texts: list[str]) -> list[list[float]]:
     """
-    Отправляет батч текстов к Vertex AI (через наш прокси) для получения эмбеддингов.
-    Использует библиотеку litellm. Делаем по одному, чтобы избежать ошибки размерности (1 к 10).
+    Отправляет батч текстов к Vertex AI (через прокси) для получения эмбеддингов.
+    Использует библиотеку litellm. Выполняет запросы по отдельности во избежание ошибки размерности (1 к 10).
     """
     embeddings = []
     for text in texts:
@@ -224,13 +225,18 @@ def sanitize_chroma_metadata(metadata: dict) -> dict:
     return sanitized
 
 def process_task(task: dict):
+    """
+    Обрабатывает задачу векторизации или удаления документа из очереди.
+    Загружает файл из MinIO, генерирует эмбеддинги, обновляет ChromaDB и статус в PostgreSQL.
+    """
     agent = task.get("agent")
     action = task.get("action")
     file_path = task.get("file_path")
     bucket = task.get("bucket")
     file_hash = task.get("file_hash")
+    task_success = False
     
-    log_info("Task Processing", f"Новая задача: [{action}] Агент: {agent}, Файл: {file_path}")
+    log_info("Обработка задачи", f"Новая задача: [{action}] Агент: {agent}, Файл: {file_path}")
     
     try:
         # 1. Скачиваем файл из MinIO
@@ -268,8 +274,9 @@ def process_task(task: dict):
                     except Exception as e:
                         log_warning("ChromaDB", f"Предупреждение при удалении '{target_short_name}': {e}")
             
-            log_success("Task Processing", f"Задача delete выполнена. Обработано имен для удаления: {deleted_count}")
+            log_success("Обработка задачи", f"Задача delete выполнена. Обработано имен для удаления: {deleted_count}")
             update_document_status(file_hash, agent, "completed", f"Успешно удалено {deleted_count} документов")
+            task_success = True
             
         elif action == "upsert":
             # 2. Парсинг и санитизация метаданных для ChromaDB
@@ -277,12 +284,12 @@ def process_task(task: dict):
             short_name = raw_metadata.get("short_name")
             
             if not short_name:
-                log_error("Metadata", "Не удалось найти 'short_name' в метаданных (YAML frontmatter) документа.")
+                log_error("Метаданные", "Не удалось найти 'short_name' в метаданных (YAML frontmatter) документа.")
                 update_document_status(file_hash, agent, "error", "Отсутствует short_name в метаданных")
                 return
                 
             short_name = str(short_name).strip()
-            log_info("Metadata", f"Документ распознан. short_name: '{short_name}'")
+            log_info("Метаданные", f"Документ распознан. short_name: '{short_name}'")
             metadata = sanitize_chroma_metadata(raw_metadata)
             metadata["short_name"] = short_name
             
@@ -302,13 +309,13 @@ def process_task(task: dict):
 
             splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
             chunks = splitter.split_text(clean_text)
-            log_info("Text Splitter", f"Текст разбит на {len(chunks)} чанков.")
+            log_info("Разбивка текста", f"Текст разбит на {len(chunks)} чанков.")
             
             # 5. Батчинг и векторизация с откатом при ошибках
             try:
                 for i in range(0, len(chunks), CHUNK_BATCH_SIZE):
                     batch_chunks = chunks[i:i + CHUNK_BATCH_SIZE]
-                    log_info("Batching", f"Обработка батча {i//CHUNK_BATCH_SIZE + 1} (чанки {i+1} - {i+len(batch_chunks)})...")
+                    log_info("Батчинг", f"Обработка батча {i//CHUNK_BATCH_SIZE + 1} (чанки {i+1} - {i+len(batch_chunks)})...")
                     
                     embeddings = get_embeddings_google(batch_chunks)
                     ids = [f"{short_name}_chunk_{i+j}" for j in range(len(batch_chunks))]
@@ -322,32 +329,37 @@ def process_task(task: dict):
                     )
                     
                     if i + CHUNK_BATCH_SIZE < len(chunks):
-                        log_info("Rate Limit", f"Ждем {CHUNK_SLEEP_SECONDS} сек. для сброса лимитов Google...")
+                        log_info("Лимит запросов", f"Ожидание {CHUNK_SLEEP_SECONDS} сек. для сброса лимитов Google...")
                         time.sleep(CHUNK_SLEEP_SECONDS)
             except Exception as e:
-                log_error("Vectorization", f"Ошибка векторизации для '{short_name}': {e}")
+                log_error("Векторизация", f"Ошибка векторизации для '{short_name}': {e}")
                 # Транзакционный откат: удаляем все добавленные частичные вектора данного документа
                 try:
                     collection.delete(where={"short_name": short_name})
-                    log_warning("ChromaDB Rollback", f"Откат: удалены частичные вектора для short_name='{short_name}'")
+                    log_warning("Откат ChromaDB", f"Откат: удалены частичные вектора для short_name='{short_name}'")
                 except Exception as rollback_err:
-                    log_error("ChromaDB Rollback", f"Ошибка при откате векторов: {rollback_err}")
+                    log_error("Откат ChromaDB", f"Ошибка при откате векторов: {rollback_err}")
                 update_document_status(file_hash, agent, "error", f"Vectorization error: {e}")
                 return
 
             log_success("ChromaDB", f"Успешно записано {len(chunks)} векторов для '{short_name}' в {collection_name}")
             update_document_status(file_hash, agent, "completed", "Успешно обработано воркером")
+            task_success = True
         else:
-            log_error("Task Processing", f"Неизвестное действие: '{action}'")
+            log_error("Обработка задачи", f"Неизвестное действие: '{action}'")
             update_document_status(file_hash, agent, "error", f"Unknown action: {action}")
-    finally:
-        # Гарантированная уборка исходного файла из MinIO при любом сценарии
-        if bucket and file_path:
+
+        # Удаление файла из MinIO выполняется ТОЛЬКО после успешной векторизации и фиксации статуса
+        if task_success and bucket and file_path:
             try:
                 minio_client.remove_object(bucket, file_path)
-                log_info("MinIO", f"Оригинальный файл {file_path} удален из MinIO.")
+                log_info("MinIO", f"Оригинальный файл {file_path} удален из MinIO после успешной обработки.")
             except Exception as e:
                 log_warning("MinIO", f"Предупреждение при удалении из MinIO {file_path}: {e}")
+    finally:
+        # Если задача завершилась с ошибкой, файл сохраняется в MinIO для возможности восстановления и повторной обработки
+        if not task_success and file_path:
+            log_warning("MinIO", f"Исходный файл {file_path} сохранен в MinIO для возможности повторной обработки.")
 
 def recover_abandoned_tasks():
     """
@@ -363,23 +375,24 @@ def recover_abandoned_tasks():
                 break
             recovered += 1
         if recovered > 0:
-            log_warning("Recovery", f"Восстановлено {recovered} незавершенных задач из {PROCESSING_QUEUE_NAME} обратно в {QUEUE_NAME}")
+            log_warning("Восстановление", f"Восстановлено {recovered} незавершенных задач из {PROCESSING_QUEUE_NAME} обратно в {QUEUE_NAME}")
     except Exception as e:
-        log_error("Recovery", f"Ошибка при восстановлении незавершенных задач: {e}")
+        log_error("Восстановление", f"Ошибка при восстановлении незавершенных задач: {e}")
 
 def fetch_task_reliable(timeout: int = 5) -> str | None:
     """
-    Атомарно перемещает задачу из очереди задач в очередь обработки (Reliable Queue pattern).
+    Атомарно перемещает задачу из очереди задач в очередь обработки (паттерн надежной очереди).
     """
     try:
-        # blmove доступен в Redis 6.2+
+        # Метод blmove доступен в Redis 6.2+
         return redis_client.blmove(QUEUE_NAME, PROCESSING_QUEUE_NAME, timeout=timeout, where_from="RIGHT", where_to="LEFT")
     except Exception:
-        # Fallback на brpoplpush для совместимости
+        # Резервный вызов brpoplpush для совместимости
         return redis_client.brpoplpush(QUEUE_NAME, PROCESSING_QUEUE_NAME, timeout=timeout)
 
 def main():
-    log_success("Worker Start", f"Воркер запущен и слушает Redis ({QUEUE_NAME})...")
+    """Запускает основной цикл воркера обработки документов."""
+    log_success("Запуск воркера", f"Воркер запущен и слушает Redis ({QUEUE_NAME})...")
     recover_abandoned_tasks()
 
     while True:
@@ -393,9 +406,9 @@ def main():
                 task = json.loads(message_json)
                 process_task(task)
             except json.JSONDecodeError as e:
-                log_error("Worker Error", f"Некорректный JSON задачи: {e}")
+                log_error("Ошибка воркера", f"Некорректный JSON задачи: {e}")
             except Exception as e:
-                log_error("Worker Error", f"Необработанная ошибка при выполнении задачи: {e}")
+                log_error("Ошибка воркера", f"Необработанная ошибка при выполнении задачи: {e}")
                 if 'task' in locals() and isinstance(task, dict):
                     update_document_status(task.get("file_hash"), task.get("agent"), "error", f"Unhandled worker error: {e}")
             finally:
@@ -405,7 +418,7 @@ def main():
                 except Exception as e:
                     log_error("Redis", f"Не удалось удалить задачу из {PROCESSING_QUEUE_NAME}: {e}")
         except Exception as e:
-            log_error("Worker Error", f"Ошибка в главном цикле воркера: {e}")
+            log_error("Ошибка воркера", f"Ошибка в главном цикле воркера: {e}")
             time.sleep(5)
 
 if __name__ == "__main__":

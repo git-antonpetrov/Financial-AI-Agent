@@ -59,7 +59,7 @@ def test_process_contract_success_full_transfer():
         assert status == "executed"
         assert contract.status == "executed"
         assert contract.error_message is None
-        # Frozen balance списан
+        # Проверяет списание замороженного баланса
         assert creator.frozen_balance == Decimal("0.00")
         # Баланс создателя не изменился (был 100, остался 100, так как 50 было во frozen)
         assert creator.balance == Decimal("100.00")

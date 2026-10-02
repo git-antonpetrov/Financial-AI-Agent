@@ -4,6 +4,8 @@ import re
 import asyncio
 import uuid
 import time
+import socket
+import ipaddress
 from concurrent.futures import ThreadPoolExecutor
 import urllib.parse
 # pyrefly: ignore [missing-import]
@@ -24,7 +26,7 @@ job_creation_times = {}
 pipeline_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="pipeline_worker")
 
 async def cleanup_stale_jobs():
-    """Фоновая задача для очистки устаревших задач (предотвращение утечки памяти)"""
+    """Выполняет периодическую фоновую очистку устаревших задач для предотвращения утечки памяти."""
     while True:
         try:
             await asyncio.sleep(300)  # Проверяем каждые 5 минут
@@ -44,6 +46,7 @@ async def cleanup_stale_jobs():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Управляет жизненным циклом приложения FastAPI, запуская и корректно останавливая фоновые задачи."""
     # Запускаем фоновую очистку при старте приложения
     cleanup_task = asyncio.create_task(cleanup_stale_jobs())
     yield
@@ -71,9 +74,7 @@ app.add_middleware(
 
 @app.middleware("http")
 async def csrf_origin_guard(request: Request, call_next):
-    """
-    Защита локального sidecar от несанкционированных Cross-Site запросов из браузера.
-    """
+    """Выполняет защиту локального sidecar от несанкционированных межсайтовых запросов из браузера."""
     origin = request.headers.get("origin")
     sec_fetch_site = request.headers.get("sec-fetch-site")
 
@@ -105,6 +106,7 @@ except Exception:
     pass
 
 def run_pipeline(job_id: str, file_path: str, agent_name: str, server_url: str, admin_token: str, contentai_username: str, contentai_password: str, contentai_api_uri: str, loop: asyncio.AbstractEventLoop):
+    """Запускает процесс обработки файла в отдельном рабочем потоке и передает события прогресса в очередь."""
     def progress_callback(filename, status, message):
         event = {
             "status": status,
@@ -141,6 +143,48 @@ def run_pipeline(job_id: str, file_path: str, agent_name: str, server_url: str, 
         except Exception:
             pass
 
+def validate_server_url(server_url: str) -> None:
+    """
+    Проверяет URL сервера на корректность формата и блокирует потенциальные SSRF-атаки.
+    
+    Разрешает стандартные схемы http/https, публичные домены и IP-адреса, а также
+    локальные адреса разработки (localhost, 127.0.0.1, ::1). Отклоняет обращения к
+    приватным подсетям, link-local, loopback (не localhost) и мультикаст адресам.
+    """
+    parsed_server = urllib.parse.urlparse(server_url)
+    if parsed_server.scheme not in ["http", "https"] or not parsed_server.netloc:
+        raise HTTPException(status_code=400, detail="Invalid server_url format")
+
+    hostname = parsed_server.hostname
+    if not hostname:
+        raise HTTPException(status_code=400, detail="Invalid server hostname")
+
+    # Разрешает локальную разработку на машине администратора
+    if hostname.lower() in {"localhost", "127.0.0.1", "::1"}:
+        return
+
+    try:
+        addr_info = socket.getaddrinfo(hostname, None)
+        for item in addr_info:
+            ip_str = item[4][0]
+            ip_obj = ipaddress.ip_address(ip_str)
+            if (
+                ip_obj.is_private
+                or ip_obj.is_link_local
+                or ip_obj.is_loopback
+                or ip_obj.is_reserved
+                or ip_obj.is_multicast
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"SSRF protection: access to private or local network ({hostname}) is forbidden",
+                )
+    except socket.gaierror:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid server_url: unable to resolve hostname {hostname}",
+        )
+
 @app.post("/api/local/process")
 async def process_document(
     agent_name: str = Form(...),
@@ -151,15 +195,14 @@ async def process_document(
     contentai_api_uri: str = Form(""),
     file: UploadFile = File(...)
 ):
+    """Принимает файл и параметры запуска, валидирует входные данные и ставит задачу обработки в очередь."""
     # Валидация агента, чтобы не тратить ресурсы впустую
     VALID_AGENTS = {"main", "bank", "invest", "digital"}
     if agent_name not in VALID_AGENTS:
         raise HTTPException(status_code=400, detail=f"Invalid agent: {agent_name}")
 
-    # Валидация server_url во избежание SSRF атак на локальные ресурсы
-    parsed_server = urllib.parse.urlparse(server_url)
-    if parsed_server.scheme not in ["http", "https"] or not parsed_server.netloc:
-        raise HTTPException(status_code=400, detail="Invalid server_url format")
+    # Валидация server_url с защитой от SSRF
+    validate_server_url(server_url)
 
     # Базовая проверка наличия и структуры JWT admin_token
     if not admin_token or len(admin_token.strip().split(".")) != 3:
@@ -210,6 +253,7 @@ async def process_document(
 
 @app.get("/api/local/progress/{job_id}", response_class=EventSourceResponse)
 async def get_progress(job_id: str):
+    """Предоставляет SSE-поток событий о ходе обработки документа для клиентского интерфейса."""
     if job_id not in job_queues:
         raise HTTPException(status_code=404, detail="Job not found")
         
@@ -234,4 +278,4 @@ async def get_progress(job_id: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8001)
+    uvicorn.run(app, host="127.0.0.1", port=8005)

@@ -53,7 +53,7 @@ async def process_auto_payments(session, current_date):
             # Обновляем дату следующего платежа
             if ap.schedule == "monthly":
                 ap.next_payment_date = ap.next_payment_date + relativedelta(months=1)
-            else: # weekly
+            else:  # Еженедельное расписание (weekly)
                 ap.next_payment_date = ap.next_payment_date + timedelta(days=7)
                 
             processed += 1

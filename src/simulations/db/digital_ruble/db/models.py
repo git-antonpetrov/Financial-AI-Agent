@@ -17,7 +17,7 @@ class Wallet(Base):
     wallet_number = Column(String, unique=True, nullable=False)
     balance = Column(Numeric(12, 2), default=0.00)
     frozen_balance = Column(Numeric(12, 2), default=0.00)
-    status = Column(String, default="active", index=True) # active, blocked
+    status = Column(String, default="active", index=True)  # Возможные значения: active, blocked
     opened_at = Column(DateTime, default=get_moscow_now)
 
     sent_transactions = relationship("RubleTransaction", foreign_keys="[RubleTransaction.sender_wallet_id]", back_populates="sender")
@@ -32,7 +32,7 @@ class RubleTransaction(Base):
     sender_wallet_id = Column(String, ForeignKey("wallets.id"), nullable=True, index=True)
     receiver_wallet_id = Column(String, ForeignKey("wallets.id"), nullable=False, index=True)
     amount = Column(Numeric(12, 2), nullable=False)
-    status = Column(String, default="completed", index=True) # completed, failed
+    status = Column(String, default="completed", index=True)  # Возможные значения: completed, failed
     smart_contract_id = Column(String, ForeignKey("smart_contracts.id"), nullable=True, index=True)
     signature = Column(String, nullable=True)
     timestamp = Column(DateTime, default=get_moscow_now, index=True)
@@ -47,11 +47,11 @@ class SmartContract(Base):
     creator_wallet_id = Column(String, ForeignKey("wallets.id"), nullable=False, index=True)
     receiver_wallet_id = Column(String, ForeignKey("wallets.id"), nullable=False, index=True)
     amount = Column(Numeric(12, 2), nullable=False)
-    condition_type = Column(String, nullable=False) # "приемка_квартиры", "наступление_даты"
-    contract_code = Column(String, nullable=True) # Python DSL код контракта
-    condition_status = Column(String, default="pending", index=True) # pending, fulfilled, failed
-    status = Column(String, default="active", index=True) # active, executed, cancelled, failed
-    error_message = Column(String, nullable=True) # Полный текст ошибки, если контракт упал
+    condition_type = Column(String, nullable=False)  # "приемка_квартиры", "наступление_даты"
+    contract_code = Column(String, nullable=True)  # Python DSL код контракта
+    condition_status = Column(String, default="pending", index=True)  # Возможные значения: pending, fulfilled, failed
+    status = Column(String, default="active", index=True)  # Возможные значения: active, executed, cancelled, failed
+    error_message = Column(String, nullable=True)  # Полный текст ошибки при сбое контракта
     created_at = Column(DateTime, default=get_moscow_now)
     executed_at = Column(DateTime, nullable=True)
 

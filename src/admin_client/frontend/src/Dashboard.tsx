@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { Users, FileText, UploadCloud, Clock, CheckCircle2, Globe, Server, Check, X, LogOut } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 
@@ -67,7 +67,7 @@ const translateStatusMessage = (msg: string | undefined, lang: 'en' | 'ru') => {
   const match = translatedMsg.match(successRegex);
   if (match) {
     translatedMsg = `Success! Document ${match[1]} sent to processing queue.`;
-    return translatedMsg; // Early return since it's fully translated
+    return translatedMsg; // Возвращает переведенную строку при совпадении с шаблоном
   }
 
   const convertRegex = /^Шаг 2: Конвертация (.*) в PDF\.\.\.$/;
@@ -94,7 +94,7 @@ const translateStatusMessage = (msg: string | undefined, lang: 'en' | 'ru') => {
     'Шаг 4: Анализ названия и типа документа (Gemini)...': 'Step 4: Title and type analysis (Gemini)...',
     'Шаг 5: Проверка актуальности версии...': 'Step 5: Version validation...',
     'Шаг 6: Поиск отмененных актов (Gemini)...': 'Step 6: Searching for repealed acts (Gemini)...',
-    'Шаг 6: Поиск отмененных документов...': 'Step 6: Searching for repealed acts (Gemini)...', // добавлено запасное значение
+    'Шаг 6: Поиск отмененных документов...': 'Step 6: Searching for repealed acts (Gemini)...', // Предоставляет запасной вариант сопоставления
     'Шаг 7: Подготовка и загрузка на сервер (Векторизация)...': 'Step 7: Preparation and upload (Vectorization)...',
     'Шаг 8: Отправка списка устаревших актов на удаление...': 'Step 8: Sending repealed acts for deletion...'
   };
@@ -116,7 +116,7 @@ const getResolvedServerUrl = (): string => {
       return '/api_proxy'
     }
   } catch {
-    // fallback to rawUrl
+    // Возвращает исходный URL при ошибке разбора
   }
   return rawUrl
 }
@@ -142,7 +142,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
     langRef.current = lang;
   }, [lang]);
 
-  const authFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+  const authFetch = useCallback(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const token = sessionStorage.getItem('admin_token')
     const headers = new Headers(init?.headers || {})
     if (token && !headers.has('Authorization')) {
@@ -154,9 +154,9 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
       throw new Error('Unauthorized (401): Session expired')
     }
     return res
-  }
+  }, [onLogout])
 
-  const fetchRequests = async () => {
+  const fetchRequests = useCallback(async () => {
     setIsLoadingRequests(true)
     try {
       const serverUrl = getResolvedServerUrl()
@@ -170,13 +170,16 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
     } finally {
       setIsLoadingRequests(false)
     }
-  }
+  }, [authFetch])
 
   useEffect(() => {
     if (activeTab === 'agents') {
-      fetchRequests()
+      const timer = setTimeout(() => {
+        void fetchRequests()
+      }, 0)
+      return () => clearTimeout(timer)
     }
-  }, [activeTab])
+  }, [activeTab, fetchRequests])
 
   const toggleSelection = (id: number) => {
     const newSet = new Set(selectedRequests)
@@ -250,13 +253,13 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
       }).filter(f => f.file !== undefined)
 
       setLocalFiles(prev => [...prev, ...newLocalFiles])
-      // Removed newLocalFiles.forEach(processFile) to let the queue handle it
+      // Передает управление запуском файлов планировщику очереди
 
       setIsApproveModalOpen(false)
       setSelectedRequests(new Set())
       setActiveTab('rag')
 
-      // Пытаемся обновить статусы на сервере
+      // Пытается обновить статусы на сервере
       const serverUrl = getResolvedServerUrl()
       const res = await authFetch(`${serverUrl}/api/agent-requests/approve`, {
         method: 'POST',
@@ -288,7 +291,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
           display_message: 'В очереди...'
         }))
         setLocalFiles((prev) => [...prev, ...newFiles])
-        // Removed newFiles.forEach(processFile) to let the queue handle it
+        // Передает управление запуском файлов планировщику очереди
       }
       if (fileInputRef.current) {
         fileInputRef.current.value = ''
@@ -298,9 +301,9 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
     }
   }
 
-  const processFile = async (fileObj: LocalFile) => {
+  const processFile = useCallback(async (fileObj: LocalFile) => {
     try {
-      // Mark as processing immediately so we don't pick it up again
+      // Устанавливает статус обработки для исключения повторного захвата
       setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'processing', display_message: 'Отправка файла...' } : f))
 
       const serverUrl = getResolvedServerUrl()
@@ -340,7 +343,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
       formData.append('contentai_password', contentaiPassword)
       formData.append('contentai_api_uri', contentaiApiUri)
 
-      const uploadRes = await fetch('http://127.0.0.1:8001/api/local/process', {
+      const uploadRes = await fetch('http://127.0.0.1:8005/api/local/process', {
         method: 'POST',
         body: formData
       })
@@ -356,8 +359,8 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
 
       setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, job_id } : f))
 
-      // Слушаем SSE для получения прогресса
-      const eventSource = new EventSource(`http://127.0.0.1:8001/api/local/progress/${job_id}`)
+      // Подключается к потоку SSE для отслеживания прогресса обработки
+      const eventSource = new EventSource(`http://127.0.0.1:8005/api/local/progress/${job_id}`)
 
       eventSource.onmessage = (event) => {
         try {
@@ -395,40 +398,41 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
       setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'error', display_message: 'Ошибка загрузки' } : f))
       processingRef.current.delete(fileObj.id)
     }
-  }
+  }, [authFetch, onLogout])
 
   const processingRef = useRef<Set<string>>(new Set());
 
-  // Отслеживаем статусную сигнатуру, чтобы не перезапускать очередь на каждый тик таймера секунд
-  const filesStatusSignature = localFiles.map(f => `${f.id}:${f.status}`).join(',');
-
   useEffect(() => {
-    const processingCount = localFiles.filter(f => f.status === 'processing').length;
-    if (processingCount >= 3) return;
+    const timer = setTimeout(() => {
+      const processingCount = localFiles.filter(f => f.status === 'processing').length;
+      if (processingCount >= 3) return;
 
-    const pendingFiles = localFiles.filter(f => f.status === 'pending');
-    const filesToStart = pendingFiles.slice(0, 3 - processingCount);
-    if (filesToStart.length === 0) return;
+      const pendingFiles = localFiles.filter(f => f.status === 'pending');
+      const filesToStart = pendingFiles.slice(0, 3 - processingCount);
+      if (filesToStart.length === 0) return;
 
-    const idsToStart = new Set(filesToStart.map(f => f.id));
+      const idsToStart = new Set(filesToStart.map(f => f.id));
 
-    // Чистое синхронное обновление состояния
-    setLocalFiles(prevFiles =>
-      prevFiles.map(f =>
-        idsToStart.has(f.id)
-          ? { ...f, status: 'processing' as const, display_message: 'Запуск...' }
-          : f
-      )
-    );
+      // Обновление состояния запускаемых задач
+      setLocalFiles(prevFiles =>
+        prevFiles.map(f =>
+          idsToStart.has(f.id)
+            ? { ...f, status: 'processing' as const, display_message: 'Запуск...' }
+            : f
+        )
+      );
 
-    // Асинхронный запуск задач вне функции обновления состояния
-    filesToStart.forEach(f => {
-      if (!processingRef.current.has(f.id)) {
-        processingRef.current.add(f.id);
-        processFile(f);
-      }
-    });
-  }, [filesStatusSignature]);
+      // Асинхронный запуск задач вне функции обновления состояния
+      filesToStart.forEach(f => {
+        if (!processingRef.current.has(f.id)) {
+          processingRef.current.add(f.id);
+          processFile(f);
+        }
+      });
+    }, 0);
+
+    return () => clearTimeout(timer);
+  }, [localFiles, processFile]);
 
   // Таймер для прошедших секунд обработки
   useEffect(() => {
@@ -446,7 +450,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
   return (
     <div className="min-h-full flex flex-col items-center p-8 relative">
 
-      {/* Header / Language Toggle & Logout */}
+      {/* Шапка интерфейса: переключатель языка и выход из системы */}
       <div className="absolute top-6 right-6 z-20 flex items-center gap-3">
         <button
           onClick={() => setLang(lang === 'en' ? 'ru' : 'en')}
@@ -467,9 +471,9 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
         )}
       </div>
 
-      {/* Main Container that remounts on language change to trigger animation */}
+      {/* Основной контейнер с перемонтированием при смене языка для запуска анимации */}
       <div key={lang} className="w-full flex flex-col items-center animate-fade-scale flex-1">
-        {/* Pill-shaped Top Slider */}
+        {/* Верхний переключатель вкладок */}
         <div className="relative flex items-center bg-[#1a0f3c] rounded-full p-1 border border-purple-500/20 shadow-xl mb-12 w-full max-w-md">
           <div
             className="absolute top-1 bottom-1 left-1 w-[calc(50%-4px)] bg-gradient-to-r from-purple-600 to-indigo-600 rounded-full transition-transform duration-500 ease-out z-0"
@@ -491,11 +495,11 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
           </button>
         </div>
 
-        {/* Main Content Area */}
+        {/* Основная область содержимого */}
         <div className="w-full max-w-5xl bg-[#1a0f3c]/60 backdrop-blur-xl border border-purple-500/20 rounded-3xl p-8 shadow-2xl relative overflow-hidden min-h-[600px]">
 
 
-          {/* Tab 1: Load to RAG */}
+          {/* Вкладка 1: Загрузка в RAG */}
           <div
             className={`absolute inset-0 p-8 transition-all duration-700 ease-in-out ${activeTab === 'rag'
                 ? 'opacity-100 translate-x-0 pointer-events-auto'
@@ -605,7 +609,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
             </div>
           </div>
 
-          {/* Tab 2: Agent Requests */}
+          {/* Вкладка 2: Заявки агентов */}
           <div
             className={`absolute inset-0 p-8 transition-all duration-700 ease-in-out ${activeTab === 'agents'
                 ? 'opacity-100 translate-x-0 pointer-events-auto'
@@ -715,7 +719,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
 
         </div>
 
-        {/* Approve Modal Overlay */}
+        {/* Модальное окно подтверждения и прикрепления файлов */}
         {isApproveModalOpen && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#0f0728]/80 backdrop-blur-sm animate-fade-scale">
             <div className="bg-[#1a0f3c] border border-purple-500/30 rounded-3xl w-full max-w-2xl shadow-2xl flex flex-col max-h-[90vh]">
@@ -743,7 +747,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
                       {lang === 'en' ? req.justification_en : req.justification_ru}
                     </p>
 
-                    {/* File Input for this request */}
+                    {/* Поле выбора файла для конкретной заявки */}
                     <div className="mt-2">
                       <label className={`flex items-center justify-center gap-2 p-3 border border-dashed rounded-xl cursor-pointer transition-colors ${requestFiles[req.id] ? 'border-green-500/50 bg-green-500/10 text-green-300' : 'border-purple-500/30 hover:border-purple-500/60 bg-purple-500/5 text-purple-300'
                         }`}>

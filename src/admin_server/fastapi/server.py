@@ -20,7 +20,7 @@ import litellm
 import jwt
 
 from security import verify_password, create_access_token, get_current_admin, verify_agent_jwt, settings, oauth2_scheme
-from db.database import engine, Base, get_db
+from db.database import engine, Base, get_db, validate_database_env
 from db import schemas, crud
 from core.utils.console_logger import log_info, log_error, log_warning, log_success
 from urllib.parse import quote_plus
@@ -69,6 +69,10 @@ RAG_DATA_REASONING_EFFORT = os.getenv("RAG_DATA_REASONING_EFFORT", "low")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Валидация обязательных настроек перед стартом сервера
+    settings.validate_production_env()
+    validate_database_env()
+
     # Инициализация бакетов MinIO
     if MINIO_ACCESS_KEY and MINIO_SECRET_KEY:
         for agent in VALID_AGENTS:
@@ -148,8 +152,9 @@ def check_rate_limit(key: str, max_requests: int = 15, window_seconds: int = 60)
         return True
 
 # --- МАРШРУТЫ: АВТОРИЗАЦИЯ ---
-@app.post("/login")
+@app.post("/login", response_model=schemas.TokenResponse)
 async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
+    """Выполняет аутентификацию администратора с выдачей JWT-токена доступа."""
     client_ip = get_client_ip(request)
     origin = request.headers.get("origin")
     log_info("Auth", f"Запрос на логин, IP: {client_ip}, Origin: {origin}")
@@ -237,16 +242,16 @@ async def logout(
     log_success("Auth", "Successful logout, token revoked in Redis")
     return {"status": "ok", "message": "Token revoked successfully"}
 
-@app.get("/api/config/contentai")
+@app.get("/api/config/contentai", response_model=schemas.ContentAiConfigResponse)
 async def get_contentai_config(current_admin: str = Depends(get_current_admin)):
-    """Возвращает учетные данные ContentAI для локального sidecar клиента"""
-    return {
-        "username": os.getenv("CONTENTAI_USERNAME"),
-        "password": os.getenv("CONTENTAI_PASSWORD"),
-        "api_uri": os.getenv("CONTENT_AI_API_URI")
-    }
+    """Возвращает учетные данные сервиса Content AI для локального sidecar клиента."""
+    return schemas.ContentAiConfigResponse(
+        username=os.getenv("CONTENTAI_USERNAME", ""),
+        password=os.getenv("CONTENTAI_PASSWORD", ""),
+        api_uri=os.getenv("CONTENT_AI_API_URI", "")
+    )
 
-# --- ROUTES: DOCUMENTS CHECK ---
+# --- МАРШРУТЫ: ПРОВЕРКА ДОКУМЕНТОВ ---
 @app.post("/api/documents/check/md5", response_model=schemas.CheckHashResponse)
 async def check_md5(
     req: schemas.CheckHashRequest,
@@ -269,8 +274,8 @@ async def check_date(
     )
     return schemas.CheckDateResponse(status=status_str)
 
-# --- ROUTES: UPLOAD ---
-@app.post("/api/upload/{agent_name}/{action}")
+# --- МАРШРУТЫ: ЗАГРУЗКА ДОКУМЕНТОВ ---
+@app.post("/api/upload/{agent_name}/{action}", response_model=schemas.UploadResponse)
 async def upload_document(
     agent_name: str,
     action: str,
@@ -282,7 +287,7 @@ async def upload_document(
     current_admin: str = Depends(get_current_admin)
 ):
     """
-    Загружает markdown документ и ставит статус completed.
+    Загружает markdown документ в MinIO и помещает задачу векторизации в очередь Redis.
     """
     if agent_name not in VALID_AGENTS:
         raise HTTPException(status_code=400, detail=f"Invalid agent name. Must be one of {VALID_AGENTS}")
@@ -379,7 +384,7 @@ async def upload_document(
     finally:
         content_stream.close()
 
-# --- ROUTES: AGENT REQUESTS ---
+# --- МАРШРУТЫ: ЗАЯВКИ АГЕНТОВ ---
 @app.get("/api/agent-requests", response_model=list[schemas.AgentRequestResponse])
 async def read_agent_requests(
     skip: int = Query(default=0, ge=0, description="Количество пропускаемых записей"),
@@ -388,8 +393,7 @@ async def read_agent_requests(
     current_admin: str = Depends(get_current_admin)
 ):
     """
-    Получение списка заявок от агентов. Поддерживает пагинацию через skip и limit.
-    Только для админа.
+    Возвращает список заявок от агентов с поддержкой пагинации через skip и limit.
     """
     requests = await crud.get_agent_requests(db, skip=skip, limit=limit)
     return requests
@@ -467,7 +471,7 @@ async def create_agent_request(
         db, verified_agent_name, document_name_ru, document_name_en, justification_ru, justification_en
     )
 
-# --- ROUTES: LLM PROXY ---
+# --- МАРШРУТЫ: ПРОКСИ LLM ---
 def extract_json_from_llm(result_text: str | None) -> dict | list:
     """
     Извлекает и парсит JSON из ответа LLM, даже если он содержит
@@ -623,25 +627,27 @@ async def llm_find_repealed(
         log_error("LLM", f"Error in find_repealed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"LLM Error: {str(e)}")
 
-# --- ROUTES: ADMIN - AGENT REQUESTS ---
+# --- МАРШРУТЫ: УПРАВЛЕНИЕ ЗАЯВКАМИ АГЕНТОВ ---
 
-@app.post("/api/agent-requests/approve")
+@app.post("/api/agent-requests/approve", response_model=schemas.BatchActionResponse)
 async def approve_agent_requests(
     req: schemas.AgentRequestBatchAction,
     db: AsyncSession = Depends(get_db),
     current_admin: str = Depends(get_current_admin)
 ):
+    """Одобряет пакет заявок агентов по переданным идентификаторам."""
     await crud.update_agent_request_status(db, req.request_ids, "approved")
-    return {"status": "ok"}
+    return schemas.BatchActionResponse(status="ok")
 
-@app.post("/api/agent-requests/reject")
+@app.post("/api/agent-requests/reject", response_model=schemas.BatchActionResponse)
 async def reject_agent_requests(
     req: schemas.AgentRequestBatchAction,
     db: AsyncSession = Depends(get_db),
     current_admin: str = Depends(get_current_admin)
 ):
+    """Отклоняет пакет заявок агентов по переданным идентификаторам."""
     await crud.update_agent_request_status(db, req.request_ids, "rejected")
-    return {"status": "ok"}
+    return schemas.BatchActionResponse(status="ok")
 
 @app.post("/api/agent-requests/bootstrap", response_model=schemas.AgentRequestResponse)
 async def create_agent_request_endpoint(
@@ -649,6 +655,7 @@ async def create_agent_request_endpoint(
     db: AsyncSession = Depends(get_db),
     authorization: str = Header(...)
 ):
+    """Создает заявку от имени агента с валидацией его bootstrap-токена."""
     expected_token = settings.get_bootstrap_token(req.agent_name)
     expected_auth = f"Bearer {expected_token}" if expected_token else ""
     if not expected_token or not secrets.compare_digest(authorization, expected_auth):

@@ -9,17 +9,30 @@ import redis  # type: ignore
 from core.utils.console_logger import log_error, log_warning
 
 class Settings:
-    SECRET_KEY: str = os.environ["JWT_SECRET_KEY"]
+    """Конфигурация параметров безопасности и аутентификации."""
+    SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "")
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 12 * 60  # 12 часов для десктопного приложения
     ADMIN_PASSWORD_HASH: str = os.getenv("ADMIN_PASSWORD_HASH", "")
     
-    AGENT_DIGITAL_BOOTSTRAP_TOKEN: str = os.environ["AGENT_DIGITAL_BOOTSTRAP_TOKEN"]
-    AGENT_BANK_BOOTSTRAP_TOKEN: str = os.environ["AGENT_BANK_BOOTSTRAP_TOKEN"]
-    AGENT_INVEST_BOOTSTRAP_TOKEN: str = os.environ["AGENT_INVEST_BOOTSTRAP_TOKEN"]
-    AGENT_MAIN_BOOTSTRAP_TOKEN: str = os.environ["AGENT_MAIN_BOOTSTRAP_TOKEN"]
+    AGENT_DIGITAL_BOOTSTRAP_TOKEN: str = os.getenv("AGENT_DIGITAL_BOOTSTRAP_TOKEN", "")
+    AGENT_BANK_BOOTSTRAP_TOKEN: str = os.getenv("AGENT_BANK_BOOTSTRAP_TOKEN", "")
+    AGENT_INVEST_BOOTSTRAP_TOKEN: str = os.getenv("AGENT_INVEST_BOOTSTRAP_TOKEN", "")
+    AGENT_MAIN_BOOTSTRAP_TOKEN: str = os.getenv("AGENT_MAIN_BOOTSTRAP_TOKEN", "")
 
-    def get_bootstrap_token(self, agent_name: str) -> str:
+    def validate_production_env(self) -> None:
+        """Проверяет наличие обязательных переменных окружения для безопасной работы в продакшене."""
+        missing = []
+        if not self.SECRET_KEY:
+            missing.append("JWT_SECRET_KEY")
+        for agent in ["DIGITAL", "BANK", "INVEST", "MAIN"]:
+            if not getattr(self, f"AGENT_{agent}_BOOTSTRAP_TOKEN"):
+                missing.append(f"AGENT_{agent}_BOOTSTRAP_TOKEN")
+        if missing:
+            raise RuntimeError(f"Отсутствуют обязательные переменные окружения безопасности: {', '.join(missing)}")
+
+    def get_bootstrap_token(self, agent_name: str) -> str | None:
+        """Возвращает bootstrap-токен для указанного агента."""
         tokens = {
             "digital": self.AGENT_DIGITAL_BOOTSTRAP_TOKEN,
             "bank": self.AGENT_BANK_BOOTSTRAP_TOKEN,
@@ -46,21 +59,24 @@ try:
         socket_connect_timeout=2.0
     )
 except Exception as e:
-    log_error("Auth", f"Failed to initialize Redis blacklist client: {e}")
+    log_error("Аутентификация", f"Не удалось инициализировать клиент Redis для черного списка: {e}")
     redis_blacklist = None
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Проверяет соответствие открытого пароля его bcrypt-хэшу."""
     try:
         return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
     except Exception:
         return False
 
 def get_password_hash(password: str) -> str:
+    """Формирует bcrypt-хэш из переданного пароля."""
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
 def create_access_token(data: dict) -> str:
+    """Создает подписанный JWT-токен доступа с уникальным идентификатором jti и сроком действия."""
     to_encode = data.copy()
     now = datetime.now(timezone.utc)
     expire = now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -73,6 +89,7 @@ def create_access_token(data: dict) -> str:
     return encoded_jwt
 
 async def get_current_admin(token: str = Depends(oauth2_scheme)):
+    """Проверяет JWT-токен администратора и валидирует его статус в черном списке Redis."""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -94,7 +111,7 @@ async def get_current_admin(token: str = Depends(oauth2_scheme)):
             if (jti and redis_blacklist.exists(f"blacklist:{jti}")) or redis_blacklist.exists(f"blacklist:{token}"):
                 is_revoked = True
         except Exception as e:
-            log_error("Auth", f"Security Alert: Redis blacklist lookup error: {e}")
+            log_error("Аутентификация", f"Предупреждение безопасности: сбой проверки черного списка в Redis: {e}")
             if os.getenv("AUTH_FAIL_CLOSED", "false").lower() == "true":
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -102,7 +119,7 @@ async def get_current_admin(token: str = Depends(oauth2_scheme)):
                     headers={"WWW-Authenticate": "Bearer"},
                 )
     else:
-        log_warning("Auth", "Redis blacklist is uninitialized; cannot verify token revocation")
+        log_warning("Аутентификация", "Черный список Redis не инициализирован; проверка отзыва токена невозможна")
             
     if is_revoked:
         raise HTTPException(
@@ -113,10 +130,11 @@ async def get_current_admin(token: str = Depends(oauth2_scheme)):
     return username
 
 def verify_agent_jwt(token: str, public_key: str) -> dict | None:
+    """Проверяет подпись JWT-токена агента с использованием публичного RSA-ключа."""
     try:
         # Проверяем подпись токена асимметричным публичным ключом RS256
         payload = jwt.decode(token, public_key, algorithms=["RS256"])
         return payload
     except Exception as e:
-        log_warning("Auth", f"Agent JWT verification failed: {e}")
+        log_warning("Аутентификация", f"Сбой проверки JWT-токена агента: {e}")
         return None

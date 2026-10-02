@@ -5,13 +5,16 @@ from sqlalchemy.orm import declarative_base
 from urllib.parse import quote_plus
 
 POSTGRES_USER = os.getenv("POSTGRES_USER", "financial_ai_agent")
-POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD")
-if not POSTGRES_PASSWORD:
-    raise ValueError("CRITICAL CONFIGURATION ERROR: POSTGRES_PASSWORD environment variable is required but not set.")
+POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")
 POSTGRES_DB = os.getenv("POSTGRES_DB", "financial_agent")
 DB_HOST = os.getenv("DB_HOST", "postgres-db")
 
-encoded_password = quote_plus(POSTGRES_PASSWORD)
+def validate_database_env() -> None:
+    """Проверяет наличие обязательных параметров подключения к базе данных PostgreSQL."""
+    if not POSTGRES_PASSWORD:
+        raise ValueError("Критическая ошибка конфигурации: переменная окружения POSTGRES_PASSWORD обязательна, но не задана.")
+
+encoded_password = quote_plus(POSTGRES_PASSWORD) if POSTGRES_PASSWORD else ""
 DATABASE_URL = f"postgresql+asyncpg://{POSTGRES_USER}:{encoded_password}@{DB_HOST}:5432/{POSTGRES_DB}"
 
 engine = create_async_engine(
@@ -28,5 +31,6 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 Base = declarative_base()
 
 async def get_db():
+    """Создает и возвращает асинхронную сессию базы данных PostgreSQL."""
     async with async_session() as session:
         yield session

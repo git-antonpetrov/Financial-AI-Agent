@@ -4,7 +4,7 @@ from datetime import datetime, timezone, timedelta
 from . import models
 
 def parse_date_from_system_name(system_name: str) -> datetime:
-    """Извлекает дату ddmmyyyy из конца системного имени, например fz_115_01012024"""
+    """Извлекает дату в формате ddmmyyyy из окончания системного имени документа."""
     try:
         if not system_name:
             return datetime.min
@@ -27,6 +27,7 @@ async def create_document(
     short_name: str = None,
     message: str = None
 ) -> models.Document:
+    """Создает новую запись о документе в базе данных."""
     doc = models.Document(
         file_hash=file_hash,
         filename=filename,
@@ -43,11 +44,10 @@ async def create_document(
 
 async def check_md5(db: AsyncSession, file_hash: str, filename: str, agent_name: str) -> str:
     """
-    Если хеш найден и статус completed/processing, возвращаем 'duplicate'.
-    Если найден со статусом 'checking', проверяем TTL (30 мин). Если проверка устарела,
-    обновляем запись и разрешаем повторную загрузку.
-    Если хеш новый — создаём запись со статусом 'checking', чтобы заблокировать
-    race condition (параллельная загрузка того же файла не пройдёт проверку).
+    Проверяет наличие MD5-хэша в базе данных и предотвращает состояние гонки при параллельной загрузке.
+    Возвращает 'duplicate', если файл уже загружен или обрабатывается.
+    Обновляет устаревшую проверку при превышении таймаута (30 минут).
+    Создает запись со статусом 'checking' для нового файла.
     """
     from sqlalchemy import text
     import hashlib
@@ -112,8 +112,8 @@ async def check_date_version(
     agent_name: str
 ) -> str:
     """
-    Сравнивает дату с уже загруженными версиями.
-    Ищем по short_name И по file_hash (fallback на случай если LLM дал другое имя).
+    Сравнивает дату редакции документа с ранее сохраненными версиями.
+    Выполняет поиск по короткому имени документа и по MD5-хэшу.
     """
     from sqlalchemy import or_
     
@@ -171,8 +171,8 @@ async def mark_document_error(
     error_message: str = None
 ) -> models.Document:
     """
-    Обновляет существующую запись в статусе checking/processing на error
-    вместо создания дублирующей строки при ошибках загрузки.
+    Переводит существующую запись в статусе checking/processing в статус error
+    во избежание создания дублирующих строк при ошибках.
     """
     query = select(models.Document).where(
         models.Document.file_hash == file_hash,
@@ -201,8 +201,8 @@ async def update_checking_to_processing(
     message: str = "Задача в очереди у воркера"
 ):
     """
-    Обновляет запись 'checking' на 'processing' после успешного прохождения всех проверок.
-    Также заполняет system_name и short_name, которые на этапе check_md5 ещё не были известны.
+    Обновляет запись со статуса 'checking' на 'processing' после успешной валидации.
+    Заполняет системное и короткое имя документа.
     """
     query = select(models.Document).where(
         models.Document.file_hash == file_hash,
@@ -224,6 +224,7 @@ async def update_checking_to_processing(
     return await create_document(db, file_hash, "", agent_name, "processing", system_name, short_name, message)
 
 async def get_agent_requests(db: AsyncSession, skip: int = 0, limit: int = 50) -> list[models.AgentRequest]:
+    """Возвращает список заявок агентов с пагинацией."""
     result = await db.execute(select(models.AgentRequest).order_by(models.AgentRequest.created_at.desc()).offset(skip).limit(limit))
     return result.scalars().all()
 
@@ -235,6 +236,7 @@ async def create_agent_request(
     justification_ru: str,
     justification_en: str
 ) -> models.AgentRequest:
+    """Создает новую заявку от агента на добавление документа."""
     db_req = models.AgentRequest(
         agent_name=agent_name,
         document_name_ru=document_name_ru,
@@ -249,6 +251,7 @@ async def create_agent_request(
     return db_req
 
 async def update_agent_request_status(db: AsyncSession, request_ids: list[int], status: str):
+    """Обновляет статус пакета заявок агентов по их идентификаторам."""
     query = select(models.AgentRequest).where(models.AgentRequest.id.in_(request_ids))
     result = await db.execute(query)
     requests = result.scalars().all()
@@ -257,10 +260,12 @@ async def update_agent_request_status(db: AsyncSession, request_ids: list[int], 
     await db.commit()
 
 async def get_agent(db: AsyncSession, agent_name: str) -> models.Agent:
+    """Возвращает данные зарегистрированного агента по его имени."""
     result = await db.execute(select(models.Agent).where(models.Agent.name == agent_name))
     return result.scalars().first()
 
 async def register_agent(db: AsyncSession, agent_name: str, public_key: str) -> models.Agent:
+    """Регистрирует нового агента и сохраняет его открытый ключ в системе."""
     if not public_key.strip().startswith("-----BEGIN"):
         raise ValueError("Public key must be in PEM format (starting with -----BEGIN...)")
 
