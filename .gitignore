@@ -229,3 +229,6 @@ dist-ssr
 src/admin_client/frontend/src-tauri/target/
 src/admin_client/frontend/src-tauri/gen/schemas/
 src/admin_client/frontend/src-tauri/bin/
+
+# Helping files
+arch.txt
