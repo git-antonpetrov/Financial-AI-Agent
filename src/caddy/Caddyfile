@@ -1,3 +1,19 @@
 admin.fin-ai-agent.ru {
-    reverse_proxy admin-server:8000
+    # Security Headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -Server
+    }
+
+    # Reverse proxy to FastAPI Admin Server with extended timeouts for LLM analysis & uploads
+    reverse_proxy admin-server:8000 {
+        transport http {
+            response_header_timeout 180s
+            read_timeout 180s
+            write_timeout 180s
+        }
+    }
 }

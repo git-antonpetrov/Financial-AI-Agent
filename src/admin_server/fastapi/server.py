@@ -1,7 +1,13 @@
 import os
+import re
 import io
 import json
-from fastapi import FastAPI, Depends, HTTPException, Request, status, UploadFile, File, Form, Header
+import secrets
+import tempfile
+import anyio
+import ipaddress
+from datetime import datetime, timezone
+from fastapi import FastAPI, Depends, HTTPException, Request, status, UploadFile, File, Form, Header, Query
 # pyrefly: ignore [missing-import]
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
@@ -11,7 +17,7 @@ from minio import Minio
 from contextlib import asynccontextmanager
 from sqlalchemy.ext.asyncio import AsyncSession
 import litellm
-from jose import jwt
+import jwt
 
 from security import verify_password, create_access_token, get_current_admin, verify_agent_jwt, settings, oauth2_scheme
 from db.database import engine, Base, get_db
@@ -43,7 +49,9 @@ redis_client = redis.Redis(
     host=REDIS_HOST,
     port=REDIS_PORT,
     password=REDIS_PASSWORD,
-    decode_responses=True
+    decode_responses=True,
+    socket_timeout=2.0,
+    socket_connect_timeout=2.0
 )
 
 # --- НАСТРОЙКА LLM (через LiteLLM) ---
@@ -100,14 +108,83 @@ async def health_check():
     return {"status": "ok"}
 
 
+def get_client_ip(request: Request) -> str:
+    """
+    Извлекает реальный IP-адрес клиента с защитой от спуфинга X-Forwarded-For.
+    За обратным прокси Caddy доверенный IP клиента добавляется в конец списка X-Forwarded-For.
+    """
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        ips = [ip.strip() for ip in forwarded.split(",") if ip.strip()]
+        if ips:
+            candidate = ips[-1]
+            try:
+                ipaddress.ip_address(candidate)
+                return candidate
+            except ValueError:
+                pass
+    if request.client and request.client.host:
+        try:
+            ipaddress.ip_address(request.client.host)
+            return request.client.host
+        except ValueError:
+            pass
+    return "127.0.0.1"
+
+def check_rate_limit(key: str, max_requests: int = 15, window_seconds: int = 60) -> bool:
+    """
+    Проверяет лимит запросов через Redis.
+    Возвращает True если лимит не превышен, False если превышен.
+    """
+    if not redis_client:
+        return True
+    try:
+        current = redis_client.incr(key)
+        if current == 1:
+            redis_client.expire(key, window_seconds)
+        return current <= max_requests
+    except Exception as e:
+        log_warning("RateLimit", f"Failed to check rate limit in Redis: {e}")
+        return True
+
 # --- МАРШРУТЫ: АВТОРИЗАЦИЯ ---
 @app.post("/login")
 async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
-    # Логируем Origin для отладки CORS в Tauri-сборке
+    client_ip = get_client_ip(request)
     origin = request.headers.get("origin")
-    log_info("Auth", f"Запрос на логин, Origin: {origin}")
-    if form_data.username != "admin":
-        log_warning("Auth", f"Failed login attempt for user: {form_data.username}")
+    log_info("Auth", f"Запрос на логин, IP: {client_ip}, Origin: {origin}")
+
+    # Защита от DoS/bcrypt CPU exhaustion: не более 15 обращений к /login в минуту с одного IP
+    if not check_rate_limit(f"ratelimit:login:{client_ip}", max_requests=15, window_seconds=60):
+        log_warning("Auth", f"Rate limit exceeded for login from IP: {client_ip}")
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many login attempts. Please try again later."
+        )
+
+    # Защита от подбора пароля: не более 5 неудачных попыток в течение 5 минут
+    failed_key = f"ratelimit:login_failed:{client_ip}"
+    try:
+        failed_count = int(redis_client.get(failed_key) or 0)
+        if failed_count >= 5:
+            log_warning("Auth", f"Account lockout: IP {client_ip} has 5+ failed login attempts")
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many failed login attempts. IP temporarily blocked for 5 minutes."
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_warning("Auth", f"Failed to check failed attempts in Redis: {e}")
+
+    if not secrets.compare_digest(form_data.username, "admin"):
+        try:
+            curr = redis_client.incr(failed_key)
+            if curr == 1:
+                redis_client.expire(failed_key, 300)
+        except Exception:
+            pass
+        log_warning("Auth", f"Failed login attempt for user: {form_data.username} from IP: {client_ip}")
         raise HTTPException(status_code=400, detail="Incorrect username or password")
     
     if not settings.ADMIN_PASSWORD_HASH:
@@ -115,11 +192,23 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
         raise HTTPException(status_code=500, detail="Server not configured: ADMIN_PASSWORD_HASH missing")
 
     if not verify_password(form_data.password, settings.ADMIN_PASSWORD_HASH):
-        log_warning("Auth", "Failed login attempt (bad password)")
+        try:
+            curr = redis_client.incr(failed_key)
+            if curr == 1:
+                redis_client.expire(failed_key, 300)
+        except Exception:
+            pass
+        log_warning("Auth", f"Failed login attempt (bad password) from IP: {client_ip}")
         raise HTTPException(status_code=400, detail="Incorrect username or password")
 
+    # Сбрасываем счетчик неудачных попыток при успешной авторизации
+    try:
+        redis_client.delete(failed_key)
+    except Exception:
+        pass
+
     access_token = create_access_token(data={"sub": "admin"})
-    log_success("Auth", "Successful login")
+    log_success("Auth", f"Successful login from IP: {client_ip}")
     return {"access_token": access_token, "token_type": "bearer"}
 
 @app.post("/api/auth/logout")
@@ -128,15 +217,20 @@ async def logout(
     current_admin: str = Depends(get_current_admin)
 ):
     """
-    Отзыв токена. Добавляет текущий токен в Redis Blacklist.
+    Отзыв токена. Добавляет jti и токен в Redis Blacklist с оставшимся TTL.
     """
     from security import redis_blacklist, settings
     if redis_blacklist:
         try:
-            # Время жизни ключа в Redis равно оставшемуся времени жизни токена
-            # Для простоты ставим полное время жизни токена
-            expires_in = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
-            redis_blacklist.setex(f"blacklist:{token}", expires_in, "revoked")
+            payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+            jti = payload.get("jti")
+            exp = payload.get("exp")
+            now_ts = int(datetime.now(timezone.utc).timestamp())
+            ttl = max(1, exp - now_ts) if exp else settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+
+            if jti:
+                redis_blacklist.setex(f"blacklist:{jti}", ttl, "revoked")
+            redis_blacklist.setex(f"blacklist:{token}", ttl, "revoked")
         except Exception as e:
             log_error("Auth", f"Failed to blacklist token in Redis: {str(e)}")
             
@@ -196,78 +290,100 @@ async def upload_document(
     if action not in VALID_ACTIONS:
         raise HTTPException(status_code=400, detail=f"Invalid action. Must be 'upsert' or 'delete'")
 
-    if not file.filename.endswith(".md"):
+    if not file.filename or not file.filename.endswith(".md"):
         raise HTTPException(status_code=400, detail="Only markdown (.md) files are allowed")
 
     # Ограничение размера до 50 МБ для Markdown файлов (защита от OOM DoS)
     MAX_SIZE = 50 * 1024 * 1024
     
-    # Читаем частями, чтобы не забить память сразу
-    content_stream = io.BytesIO()
+    # SpooledTemporaryFile: буферизует до 5 МБ в памяти, свыше — автоматически сбрасывает во временный файл на диске
+    content_stream = tempfile.SpooledTemporaryFile(max_size=5 * 1024 * 1024, mode="w+b")
     bytes_read = 0
-    while True:
-        chunk = await file.read(1024 * 1024) # читаем по 1 МБ
-        if not chunk:
-            break
-        bytes_read += len(chunk)
-        if bytes_read > MAX_SIZE:
-            raise HTTPException(status_code=413, detail="File too large. Maximum size for markdown is 50MB.")
-        content_stream.write(chunk)
-        
-    content = content_stream.getvalue()
-    content_stream.seek(0)
-
-    # Очистка имени файла для предотвращения path traversal
-    safe_filename = os.path.basename(file.filename)
-    bucket_name = f"knowledge-{agent_name}"
-    object_name = f"{action}/{safe_filename}"
-
     try:
-        minio_client.put_object(
-            bucket_name=bucket_name,
-            object_name=object_name,
-            data=content_stream,
-            length=len(content),
-            content_type="text/markdown"
-        )
-        log_success("MinIO", f"Uploaded {file.filename} to {bucket_name}")
-    except Exception as e:
-        log_error("MinIO", f"Failed to upload {file.filename}: {str(e)}")
-        await crud.create_document(db, file_hash, file.filename, agent_name, "error", system_name, short_name, str(e))
-        raise HTTPException(status_code=500, detail=f"MinIO error: {str(e)}")
-        
-    try:
-        message = {
+        while True:
+            chunk = await file.read(1024 * 1024) # читаем по 1 МБ
+            if not chunk:
+                break
+            bytes_read += len(chunk)
+            if bytes_read > MAX_SIZE:
+                raise HTTPException(status_code=413, detail="File too large. Maximum size for markdown is 50MB.")
+            content_stream.write(chunk)
+            
+        content_stream.seek(0)
+
+        # Очистка имени файла для предотвращения path traversal (кроссплатформенная, включая Windows \ на Linux)
+        raw_name = (file.filename or "").replace("\\", "/").split("/")[-1]
+        safe_filename = re.sub(r'[^a-zA-Z0-9_.-]', '_', raw_name)
+        if not safe_filename or not safe_filename.strip("_.") or safe_filename.startswith("."):
+            safe_filename = f"upload_{file_hash[:8]}.md"
+        if not safe_filename.endswith(".md"):
+            safe_filename += ".md"
+
+        bucket_name = f"knowledge-{agent_name}"
+        object_name = f"{action}/{safe_filename}"
+
+        try:
+            await anyio.to_thread.run_sync(
+                lambda: minio_client.put_object(
+                    bucket_name=bucket_name,
+                    object_name=object_name,
+                    data=content_stream,
+                    length=bytes_read,
+                    content_type="text/markdown"
+                )
+            )
+            log_success("MinIO", f"Uploaded {file.filename} to {bucket_name}")
+        except Exception as e:
+            log_error("MinIO", f"Failed to upload {file.filename}: {str(e)}")
+            await crud.mark_document_error(db, file_hash, file.filename, agent_name, system_name, short_name, str(e))
+            raise HTTPException(status_code=500, detail=f"MinIO error: {str(e)}")
+            
+        try:
+            message = {
+                "agent": agent_name,
+                "action": action,
+                "file_path": object_name,
+                "bucket": bucket_name,
+                "file_hash": file_hash,
+                "system_name": system_name,
+                "short_name": short_name,
+                "filename": file.filename
+            }
+            await anyio.to_thread.run_sync(redis_client.lpush, "document_tasks", json.dumps(message))
+            log_success("Redis", f"Task queued for {file.filename}")
+        except Exception as e:
+            log_error("Redis", f"Failed to queue task for {file.filename}: {str(e)}")
+            await crud.mark_document_error(db, file_hash, file.filename, agent_name, system_name, short_name, str(e))
+            raise HTTPException(status_code=500, detail=f"Redis error: {str(e)}")
+
+        if action == "delete":
+            await crud.create_document(
+                db,
+                file_hash=file_hash,
+                filename=safe_filename,
+                agent_name=agent_name,
+                status="processing",
+                system_name=system_name,
+                short_name=short_name,
+                message="Служебная задача удаления устаревших актов в очереди"
+            )
+        else:
+            await crud.update_checking_to_processing(db, file_hash, agent_name, system_name, short_name, "Задача в очереди у воркера")
+
+        return {
+            "status": "success", 
+            "message": f"File {file.filename} uploaded to {bucket_name}/{object_name}",
             "agent": agent_name,
-            "action": action,
-            "file_path": object_name,
-            "bucket": bucket_name,
-            "file_hash": file_hash,
-            "system_name": system_name,
-            "short_name": short_name,
-            "filename": file.filename
+            "action": action
         }
-        redis_client.lpush("document_tasks", json.dumps(message))
-        log_success("Redis", f"Task queued for {file.filename}")
-    except Exception as e:
-        log_error("Redis", f"Failed to queue task for {file.filename}: {str(e)}")
-        await crud.create_document(db, file_hash, file.filename, agent_name, "error", system_name, short_name, str(e))
-        raise HTTPException(status_code=500, detail=f"Redis error: {str(e)}")
-
-    await crud.update_checking_to_processing(db, file_hash, agent_name, system_name, short_name, "Задача в очереди у воркера")
-
-    return {
-        "status": "success", 
-        "message": f"File {file.filename} uploaded to {bucket_name}/{object_name}",
-        "agent": agent_name,
-        "action": action
-    }
+    finally:
+        content_stream.close()
 
 # --- ROUTES: AGENT REQUESTS ---
 @app.get("/api/agent-requests", response_model=list[schemas.AgentRequestResponse])
 async def read_agent_requests(
-    skip: int = 0,
-    limit: int = 50,
+    skip: int = Query(default=0, ge=0, description="Количество пропускаемых записей"),
+    limit: int = Query(default=50, ge=1, le=100, description="Количество возвращаемых записей (максимум 100)"),
     db: AsyncSession = Depends(get_db),
     current_admin: str = Depends(get_current_admin)
 ):
@@ -288,7 +404,7 @@ async def register_agent(
     Регистрация публичного ключа агента. Защищено Bootstrap токеном.
     """
     expected_token = settings.get_bootstrap_token(req.agent_name)
-    if not expected_token or x_bootstrap_token != expected_token:
+    if not expected_token or not secrets.compare_digest(x_bootstrap_token, expected_token):
         log_warning("Agent Registration", f"Invalid bootstrap token for {req.agent_name}")
         raise HTTPException(status_code=403, detail="Invalid bootstrap token")
     
@@ -311,18 +427,14 @@ async def create_agent_request(
     Эндпоинт проверяет JWT подпись (RS256) используя зарегистрированный публичный ключ агента.
     """
     try:
-        # Сначала декодируем без проверки подписи, чтобы узнать, от какого агента токен
-        unverified_payload = jwt.get_unverified_claims(req.token)
+        # Декодируем claims без проверки подписи только для определения имени агента
+        unverified_payload = jwt.decode(req.token, options={"verify_signature": False})
         agent_name = unverified_payload.get("agent_name")
-        document_name_ru = unverified_payload.get("document_name_ru")
-        document_name_en = unverified_payload.get("document_name_en")
-        justification_ru = unverified_payload.get("justification_ru")
-        justification_en = unverified_payload.get("justification_en")
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JWT format")
 
-    if not agent_name or not document_name_ru or not justification_ru:
-        raise HTTPException(status_code=400, detail="Missing required claims in JWT")
+    if not agent_name:
+        raise HTTPException(status_code=400, detail="Missing 'agent_name' claim in JWT")
 
     # Достаем публичный ключ агента из базы
     agent = await crud.get_agent(db, agent_name)
@@ -336,12 +448,70 @@ async def create_agent_request(
         log_warning("Agent Request", f"Invalid RSA signature from agent {agent_name}")
         raise HTTPException(status_code=403, detail="Invalid RSA signature")
 
-    log_info("Agent Request", f"Verified request from {agent_name} for {document_name_ru}")
+    # Извлекаем все поля заявки строго из верифицированного payload
+    verified_agent_name = verified_payload.get("agent_name")
+    if verified_agent_name != agent_name:
+        log_warning("Agent Request", f"Agent name mismatch between unverified ({agent_name}) and verified ({verified_agent_name}) claims")
+        raise HTTPException(status_code=403, detail="Agent name mismatch")
+
+    document_name_ru = verified_payload.get("document_name_ru")
+    document_name_en = verified_payload.get("document_name_en") or ""
+    justification_ru = verified_payload.get("justification_ru")
+    justification_en = verified_payload.get("justification_en") or ""
+
+    if not document_name_ru or not justification_ru:
+        raise HTTPException(status_code=400, detail="Missing required claims (document_name_ru, justification_ru) in verified JWT")
+
+    log_info("Agent Request", f"Verified request from {verified_agent_name} for {document_name_ru}")
     return await crud.create_agent_request(
-        db, agent_name, document_name_ru, document_name_en, justification_ru, justification_en
+        db, verified_agent_name, document_name_ru, document_name_en, justification_ru, justification_en
     )
 
 # --- ROUTES: LLM PROXY ---
+def extract_json_from_llm(result_text: str | None) -> dict | list:
+    """
+    Извлекает и парсит JSON из ответа LLM, даже если он содержит
+    markdown-блоки (```json ... ```), теги рассуждений (<think>...) или поясняющий текст.
+    """
+    if not result_text or not result_text.strip():
+        raise ValueError("Пустой ответ от LLM")
+    
+    # 1. Удаляем теги <think>...</think>, если они присутствуют
+    cleaned = re.sub(r'<think>.*?</think>', '', result_text, flags=re.DOTALL).strip()
+    
+    # 2. Проверяем наличие markdown fenced block: ```json ... ``` или ``` ... ```
+    fence_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', cleaned, re.IGNORECASE)
+    if fence_match:
+        content_candidate = fence_match.group(1).strip()
+        try:
+            return json.loads(content_candidate)
+        except json.JSONDecodeError:
+            pass
+
+    # 3. Ищем самый внешний JSON-объект {...} или массив [...]
+    start_brace = cleaned.find('{')
+    start_bracket = cleaned.find('[')
+    
+    if start_brace != -1 and (start_bracket == -1 or start_brace < start_bracket):
+        end_brace = cleaned.rfind('}')
+        if end_brace != -1 and end_brace > start_brace:
+            candidate = cleaned[start_brace:end_brace + 1]
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                pass
+    elif start_bracket != -1:
+        end_bracket = cleaned.rfind(']')
+        if end_bracket != -1 and end_bracket > start_bracket:
+            candidate = cleaned[start_bracket:end_bracket + 1]
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                pass
+
+    # 4. В качестве fallback пробуем распарсить очищенную строку напрямую
+    return json.loads(cleaned)
+
 @app.post("/api/llm/analyze", response_model=schemas.LLMAnalyzeResponse)
 async def llm_analyze(
     req: schemas.LLMAnalyzeRequest,
@@ -386,9 +556,10 @@ async def llm_analyze(
         )
         
         result_text = response.choices[0].message.content
-        clean_json = result_text.replace("```json", "").replace("```", "").strip()
-        data = json.loads(clean_json)
-        return schemas.LLMAnalyzeResponse(**data)
+        parsed = extract_json_from_llm(result_text)
+        if not isinstance(parsed, dict):
+            raise ValueError(f"Ожидался JSON-объект, получен {type(parsed)}")
+        return schemas.LLMAnalyzeResponse(**parsed)
         
     except Exception as e:
         log_error("LLM", f"Error in analyze: {str(e)}")
@@ -432,8 +603,20 @@ async def llm_find_repealed(
         )
         
         result_text = response.choices[0].message.content
-        clean_json = result_text.replace("```json", "").replace("```", "").strip()
-        data = json.loads(clean_json)
+        parsed = extract_json_from_llm(result_text)
+        if isinstance(parsed, list):
+            data = {"short_names": parsed}
+        elif isinstance(parsed, dict):
+            if "short_names" not in parsed and len(parsed) == 1:
+                val = next(iter(parsed.values()))
+                if isinstance(val, list):
+                    data = {"short_names": val}
+                else:
+                    data = parsed
+            else:
+                data = parsed
+        else:
+            raise ValueError(f"Неожиданный формат данных от LLM: {type(parsed)}")
         return schemas.LLMRepealedResponse(**data)
         
     except Exception as e:
@@ -467,7 +650,8 @@ async def create_agent_request_endpoint(
     authorization: str = Header(...)
 ):
     expected_token = settings.get_bootstrap_token(req.agent_name)
-    if not expected_token or authorization != f"Bearer {expected_token}":
+    expected_auth = f"Bearer {expected_token}" if expected_token else ""
+    if not expected_token or not secrets.compare_digest(authorization, expected_auth):
         log_warning("API", f"Invalid bootstrap token for agent {req.agent_name}")
         raise HTTPException(status_code=401, detail="Invalid token")
         

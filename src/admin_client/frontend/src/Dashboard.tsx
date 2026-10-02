@@ -26,10 +26,16 @@ interface AgentRequest {
   status: string
 }
 
+interface ContentAiConfig {
+  username: string
+  password: string
+  api_uri: string
+}
+
 interface DashboardProps {
   lang: 'en' | 'ru'
   setLang: (lang: 'en' | 'ru') => void
-  onLogout?: () => void
+  onLogout?: (reason?: string) => void
 }
 
 const formatAgentName = (name: string, lang: 'en' | 'ru') => {
@@ -64,6 +70,12 @@ const translateStatusMessage = (msg: string | undefined, lang: 'en' | 'ru') => {
     return translatedMsg; // Early return since it's fully translated
   }
 
+  const convertRegex = /^Шаг 2: Конвертация (.*) в PDF\.\.\.$/;
+  const convertMatch = translatedMsg.match(convertRegex);
+  if (convertMatch) {
+    return `Step 2: Converting ${convertMatch[1]} to PDF...`;
+  }
+
   const translations: Record<string, string> = {
     'В очереди...': 'In queue...',
     'Отправка файла...': 'Sending file...',
@@ -71,6 +83,7 @@ const translateStatusMessage = (msg: string | undefined, lang: 'en' | 'ru') => {
     'Соединение прервано': 'Connection lost',
     'Ошибка загрузки': 'Upload Failed',
     'Успешно! Документ отправлен в очередь на обработку.': 'Success! Document sent to processing queue.',
+    'Пропущен: Точная копия файла уже находится в процессе обработки локально': 'Skipped: Exact copy is already being processed locally',
     'Пропущен: Точная копия файла уже загружена (дубликат)': 'Skipped: Exact copy already loaded (duplicate)',
     'Пропущен: У нас уже загружена более новая версия этого документа': 'Skipped: A newer version is already loaded',
     'Ошибка сети при связи с сервером': 'Network error communicating with server',
@@ -95,6 +108,19 @@ const translateStatusMessage = (msg: string | undefined, lang: 'en' | 'ru') => {
   return translatedMsg;
 };
 
+const getResolvedServerUrl = (): string => {
+  const rawUrl = localStorage.getItem('admin_server') || ''
+  try {
+    const parsedUrl = new URL(rawUrl || 'http://127.0.0.1:8000')
+    if (import.meta.env.DEV && parsedUrl.hostname === 'admin.fin-ai-agent.ru') {
+      return '/api_proxy'
+    }
+  } catch {
+    // fallback to rawUrl
+  }
+  return rawUrl
+}
+
 export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
   const [activeTab, setActiveTab] = useState<Tab>('rag')
   const [localFiles, setLocalFiles] = useState<LocalFile[]>([])
@@ -109,22 +135,32 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
   const [approvingRequests, setApprovingRequests] = useState<AgentRequest[]>([])
   const [requestFiles, setRequestFiles] = useState<Record<number, File>>({})
   const [selectedAgent, setSelectedAgent] = useState('main')
+  const contentAiConfigPromiseRef = useRef<Promise<ContentAiConfig> | null>(null)
 
   const langRef = useRef(lang);
   useEffect(() => {
     langRef.current = lang;
   }, [lang]);
 
+  const authFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const token = sessionStorage.getItem('admin_token')
+    const headers = new Headers(init?.headers || {})
+    if (token && !headers.has('Authorization')) {
+      headers.set('Authorization', `Bearer ${token}`)
+    }
+    const res = await fetch(input, { ...init, headers })
+    if (res.status === 401) {
+      onLogout?.('errorSessionExpired')
+      throw new Error('Unauthorized (401): Session expired')
+    }
+    return res
+  }
+
   const fetchRequests = async () => {
     setIsLoadingRequests(true)
     try {
-      const token = localStorage.getItem('admin_token')
-      const serverUrl = localStorage.getItem('admin_server') || ''
-      const res = await fetch(`${serverUrl}/api/agent-requests`, {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      })
+      const serverUrl = getResolvedServerUrl()
+      const res = await authFetch(`${serverUrl}/api/agent-requests`)
       if (res.ok) {
         const data = await res.json()
         setRequests(data)
@@ -153,22 +189,25 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
   }
 
   const rejectRequests = async (ids: number[]) => {
+    const prevRequests = requests
     setRequests(prev => prev.map(r => ids.includes(r.id) ? { ...r, status: 'rejected' } : r))
     setSelectedRequests(new Set())
     try {
-      const token = localStorage.getItem('admin_token')
-      const serverUrl = localStorage.getItem('admin_server') || ''
-      await fetch(`${serverUrl}/api/agent-requests/reject`, {
+      const serverUrl = getResolvedServerUrl()
+      const res = await authFetch(`${serverUrl}/api/agent-requests/reject`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({ request_ids: ids })
       })
+      if (!res.ok) {
+        throw new Error(`Reject failed with status ${res.status}`)
+      }
       fetchRequests()
     } catch (e) {
       console.error(e)
+      setRequests(prevRequests)
     }
   }
 
@@ -191,8 +230,9 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
   }
 
   const confirmApprove = async () => {
+    const prevRequests = requests
+    const ids = approvingRequests.map(r => r.id)
     try {
-      const ids = approvingRequests.map(r => r.id)
       setRequests(prev => prev.map(r => ids.includes(r.id) ? { ...r, status: 'approved' } : r))
 
       // Добавляем файлы в очередь вкладки RAG
@@ -217,19 +257,21 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
       setActiveTab('rag')
 
       // Пытаемся обновить статусы на сервере
-      const token = localStorage.getItem('admin_token')
-      const serverUrl = localStorage.getItem('admin_server') || ''
-      await fetch(`${serverUrl}/api/agent-requests/approve`, {
+      const serverUrl = getResolvedServerUrl()
+      const res = await authFetch(`${serverUrl}/api/agent-requests/approve`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({ request_ids: ids })
       })
+      if (!res.ok) {
+        throw new Error(`Approve failed with status ${res.status}`)
+      }
       fetchRequests()
     } catch (e: any) {
       console.error('Error in confirmApprove:', e)
+      setRequests(prevRequests)
     }
   }
 
@@ -261,38 +303,39 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
       // Mark as processing immediately so we don't pick it up again
       setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'processing', display_message: 'Отправка файла...' } : f))
 
-      let serverUrl = localStorage.getItem('admin_server') || ''
-      const parsedUrl = new URL(serverUrl || 'http://127.0.0.1:8000')
-      if (import.meta.env.DEV && parsedUrl.hostname === 'admin.fin-ai-agent.ru') {
-        serverUrl = '/api_proxy'
+      const serverUrl = getResolvedServerUrl()
+
+      if (!contentAiConfigPromiseRef.current) {
+        contentAiConfigPromiseRef.current = (async () => {
+          const configRes = await authFetch(`${serverUrl}/api/config/contentai`)
+
+          if (!configRes.ok) {
+            throw new Error('Не удалось получить учетные данные Content AI с сервера. Возможно, сервер еще обновляется.')
+          }
+
+          const config = await configRes.json()
+          const username = config.username || ''
+          const password = config.password || ''
+          const api_uri = config.api_uri || ''
+
+          if (!username || !password) {
+            throw new Error('Учетные данные Content AI не настроены на главном сервере (.env)')
+          }
+
+          return { username, password, api_uri }
+        })().catch(err => {
+          contentAiConfigPromiseRef.current = null
+          throw err
+        })
       }
 
-      let contentaiUsername = ''
-      let contentaiPassword = ''
-      let contentaiApiUri = ''
-
-      const configRes = await fetch(`${serverUrl}/api/config/contentai`, {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('admin_token') || ''}` }
-      })
-
-      if (!configRes.ok) {
-        throw new Error('Не удалось получить учетные данные Content AI с сервера. Возможно, сервер еще обновляется.')
-      }
-
-      const config = await configRes.json()
-      contentaiUsername = config.username || ''
-      contentaiPassword = config.password || ''
-      contentaiApiUri = config.api_uri || ''
-
-      if (!contentaiUsername || !contentaiPassword) {
-        throw new Error('Учетные данные Content AI не настроены на главном сервере (.env)')
-      }
+      const { username: contentaiUsername, password: contentaiPassword, api_uri: contentaiApiUri } = await contentAiConfigPromiseRef.current
 
       const formData = new FormData()
       formData.append('file', fileObj.file)
       formData.append('agent_name', fileObj.agent_name || 'main')
       formData.append('server_url', localStorage.getItem('admin_server') || '')
-      formData.append('admin_token', localStorage.getItem('admin_token') || '')
+      formData.append('admin_token', sessionStorage.getItem('admin_token') || '')
       formData.append('contentai_username', contentaiUsername)
       formData.append('contentai_password', contentaiPassword)
       formData.append('contentai_api_uri', contentaiApiUri)
@@ -301,6 +344,11 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
         method: 'POST',
         body: formData
       })
+
+      if (uploadRes.status === 401) {
+        onLogout?.('errorSessionExpired')
+        throw new Error('Session expired (401)')
+      }
 
       if (!uploadRes.ok) throw new Error('Upload failed with status ' + uploadRes.status)
 
@@ -318,12 +366,15 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
 
           if (data.status === 'done' || data.status === 'completed') {
             setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'sent', display_message: msg } : f))
+            processingRef.current.delete(fileObj.id)
             eventSource.close()
           } else if (data.status === 'error') {
             setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'error', display_message: msg } : f))
+            processingRef.current.delete(fileObj.id)
             eventSource.close()
           } else if (data.status === 'skipped') {
             setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'skipped', display_message: msg } : f))
+            processingRef.current.delete(fileObj.id)
             eventSource.close()
           } else {
             setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, display_message: msg } : f))
@@ -335,52 +386,49 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
 
       eventSource.onerror = () => {
         setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'error', display_message: 'Соединение прервано' } : f))
+        processingRef.current.delete(fileObj.id)
         eventSource.close()
       }
 
     } catch (e: any) {
       console.error('Error in processFile:', e)
       setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'error', display_message: 'Ошибка загрузки' } : f))
+      processingRef.current.delete(fileObj.id)
     }
   }
 
   const processingRef = useRef<Set<string>>(new Set());
 
-  const processQueue = () => {
-    setLocalFiles(prevFiles => {
-      const processingCount = prevFiles.filter(f => f.status === 'processing').length;
-      if (processingCount >= 3) return prevFiles;
-
-      const pendingFiles = prevFiles.filter(f => f.status === 'pending');
-      const filesToStart = pendingFiles.slice(0, 3 - processingCount);
-
-      if (filesToStart.length === 0) return prevFiles;
-
-      const idsToStart = filesToStart.map(f => f.id);
-
-      const newFiles = prevFiles.map(f =>
-        idsToStart.includes(f.id)
-          ? { ...f, status: 'processing' as const, display_message: 'Запуск...' }
-          : f
-      );
-
-      // Асинхронный процесс
-      setTimeout(() => {
-        filesToStart.forEach(f => {
-          if (!processingRef.current.has(f.id)) {
-            processingRef.current.add(f.id);
-            processFile(f);
-          }
-        });
-      }, 0);
-
-      return newFiles;
-    });
-  };
+  // Отслеживаем статусную сигнатуру, чтобы не перезапускать очередь на каждый тик таймера секунд
+  const filesStatusSignature = localFiles.map(f => `${f.id}:${f.status}`).join(',');
 
   useEffect(() => {
-    processQueue();
-  }, [localFiles.map(f => f.status).join(',')]);
+    const processingCount = localFiles.filter(f => f.status === 'processing').length;
+    if (processingCount >= 3) return;
+
+    const pendingFiles = localFiles.filter(f => f.status === 'pending');
+    const filesToStart = pendingFiles.slice(0, 3 - processingCount);
+    if (filesToStart.length === 0) return;
+
+    const idsToStart = new Set(filesToStart.map(f => f.id));
+
+    // Чистое синхронное обновление состояния
+    setLocalFiles(prevFiles =>
+      prevFiles.map(f =>
+        idsToStart.has(f.id)
+          ? { ...f, status: 'processing' as const, display_message: 'Запуск...' }
+          : f
+      )
+    );
+
+    // Асинхронный запуск задач вне функции обновления состояния
+    filesToStart.forEach(f => {
+      if (!processingRef.current.has(f.id)) {
+        processingRef.current.add(f.id);
+        processFile(f);
+      }
+    });
+  }, [filesStatusSignature]);
 
   // Таймер для прошедших секунд обработки
   useEffect(() => {
@@ -409,7 +457,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
         </button>
         {onLogout && (
           <button
-            onClick={onLogout}
+            onClick={() => onLogout()}
             className="flex items-center gap-2 px-4 py-2 rounded-full bg-red-500/10 hover:bg-red-500/20 text-red-400 transition-colors border border-red-500/20 text-sm font-medium backdrop-blur-sm"
             title={lang === 'en' ? 'Logout' : 'Выйти'}
           >

@@ -18,6 +18,7 @@ const translations = {
     errorEmptyPassword: 'Password cannot be empty',
     errorInvalidDomain: 'Please enter a valid domain',
     errorUnknown: 'An unexpected error occurred',
+    errorSessionExpired: 'Session expired. Please log in again.',
   },
   ru: {
     title: 'Доступ администратора',
@@ -33,17 +34,18 @@ const translations = {
     errorEmptyPassword: 'Пароль не может быть пустым',
     errorInvalidDomain: 'Пожалуйста, введите корректный домен',
     errorUnknown: 'Произошла неизвестная ошибка',
+    errorSessionExpired: 'Сессия истекла. Пожалуйста, войдите снова.',
   }
 }
 
 function App() {
   const [lang, setLang] = useState<'en' | 'ru'>('ru')
-  const [serverUrl, setServerUrl] = useState('')
+  const [serverUrl, setServerUrl] = useState(() => localStorage.getItem('admin_server') || '')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState('')
-  const [isAuthenticated, setIsAuthenticated] = useState(false)
+  const [isAuthenticated, setIsAuthenticated] = useState(() => !!sessionStorage.getItem('admin_token'))
 
   const t = translations[lang]
 
@@ -105,8 +107,8 @@ function App() {
       const data = await response.json()
       
       if (data.access_token) {
-        // Сохраняем токен (в localStorage)
-        localStorage.setItem('admin_token', data.access_token)
+        // Сохраняем токен в sessionStorage (автоматически очищается при закрытии сессии/окна)
+        sessionStorage.setItem('admin_token', data.access_token)
         localStorage.setItem('admin_server', baseUrl)
         setIsAuthenticated(true)
       } else {
@@ -124,11 +126,11 @@ function App() {
     }
   }
 
-  const handleLogout = async () => {
+  const handleLogout = async (reason?: string) => {
     try {
-      const token = localStorage.getItem('admin_token')
+      const token = sessionStorage.getItem('admin_token')
       const serverUrl = localStorage.getItem('admin_server') || ''
-      if (token && serverUrl) {
+      if (token && serverUrl && reason !== 'errorSessionExpired') {
         await fetch(`${serverUrl}/api/auth/logout`, {
           method: 'POST',
           headers: {
@@ -139,8 +141,11 @@ function App() {
     } catch (e) {
       console.error('Logout error:', e)
     } finally {
-      localStorage.removeItem('admin_token')
+      sessionStorage.removeItem('admin_token')
       setIsAuthenticated(false)
+      if (reason) {
+        setError(reason)
+      }
     }
   }
 

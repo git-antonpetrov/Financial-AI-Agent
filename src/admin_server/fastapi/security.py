@@ -1,10 +1,12 @@
 import os
+import uuid
 from datetime import datetime, timedelta, timezone
-from jose import JWTError, jwt
+import jwt
 import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 import redis  # type: ignore
+from core.utils.console_logger import log_error, log_warning
 
 class Settings:
     SECRET_KEY: str = os.environ["JWT_SECRET_KEY"]
@@ -39,9 +41,12 @@ try:
         host=REDIS_HOST,
         port=REDIS_PORT,
         password=REDIS_PASSWORD,
-        decode_responses=True
+        decode_responses=True,
+        socket_timeout=2.0,
+        socket_connect_timeout=2.0
     )
-except Exception:
+except Exception as e:
+    log_error("Auth", f"Failed to initialize Redis blacklist client: {e}")
     redis_blacklist = None
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
@@ -57,8 +62,13 @@ def get_password_hash(password: str) -> str:
 
 def create_access_token(data: dict) -> str:
     to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire})
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({
+        "iat": now,
+        "exp": expire,
+        "jti": str(uuid.uuid4())
+    })
     encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
     return encoded_jwt
 
@@ -68,14 +78,31 @@ async def get_current_admin(token: str = Depends(oauth2_scheme)):
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    # Проверяем токен в Redis
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        username: str = payload.get("sub")
+        if username != "admin":
+            raise credentials_exception
+    except jwt.PyJWTError:
+        raise credentials_exception
+
+    # Проверяем отзыв токена в Redis по jti или токену целиком
+    jti = payload.get("jti")
     is_revoked = False
     if redis_blacklist:
         try:
-            if redis_blacklist.exists(f"blacklist:{token}"):
+            if (jti and redis_blacklist.exists(f"blacklist:{jti}")) or redis_blacklist.exists(f"blacklist:{token}"):
                 is_revoked = True
-        except Exception:
-            pass
+        except Exception as e:
+            log_error("Auth", f"Security Alert: Redis blacklist lookup error: {e}")
+            if os.getenv("AUTH_FAIL_CLOSED", "false").lower() == "true":
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Authentication service temporarily unavailable",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+    else:
+        log_warning("Auth", "Redis blacklist is uninitialized; cannot verify token revocation")
             
     if is_revoked:
         raise HTTPException(
@@ -83,19 +110,13 @@ async def get_current_admin(token: str = Depends(oauth2_scheme)):
             detail="Token has been revoked",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    try:
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
-        username: str = payload.get("sub")
-        if username != "admin":
-            raise credentials_exception
-    except JWTError:
-        raise credentials_exception
     return username
 
-def verify_agent_jwt(token: str, public_key: str) -> dict:
+def verify_agent_jwt(token: str, public_key: str) -> dict | None:
     try:
         # Проверяем подпись токена асимметричным публичным ключом RS256
         payload = jwt.decode(token, public_key, algorithms=["RS256"])
         return payload
-    except JWTError:
+    except Exception as e:
+        log_warning("Auth", f"Agent JWT verification failed: {e}")
         return None

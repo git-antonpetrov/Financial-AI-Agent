@@ -4,7 +4,10 @@ import requests
 
 # Добавляем путь к backend, чтобы импорты из pipeline.py работали
 backend_path = os.path.join(os.path.dirname(__file__), '..', 'src', 'admin_client', 'backend')
-sys.path.append(backend_path)
+sys.path.insert(0, backend_path)
+for mod in list(sys.modules.keys()):
+    if mod == 'core' or mod.startswith('core.'):
+        del sys.modules[mod]
 
 # pyrefly: ignore [missing-import]
 from pipeline import DocumentPipeline
@@ -13,9 +16,12 @@ def get_admin_token(server_url: str) -> str:
     """Делает реальный запрос к API для авторизации и получения JWT"""
     login_url = f"{server_url}/login"
     # Для OAuth2PasswordRequestForm данные передаются как x-www-form-urlencoded
+    admin_password = os.getenv("ADMIN_PASSWORD")
+    if not admin_password:
+        raise ValueError("Переменная окружения ADMIN_PASSWORD не задана")
     data = {
         "username": "admin",
-        "password": "[REDACTED_ADMIN_PASSWORD]"
+        "password": admin_password
     }
     
     print(f"Авторизация на сервере: {login_url}...")

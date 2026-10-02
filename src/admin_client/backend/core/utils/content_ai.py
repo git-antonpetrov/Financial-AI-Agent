@@ -71,6 +71,8 @@ class ContentCaptureRecognizer:
         self.project_name = os.getenv('CONTENT_AI_PROJECT', 'FullText')
         
         self.delete_batch_after = delete_batch_after
+        self.max_wait_seconds = int(os.getenv("CONTENTAI_MAX_WAIT_SECONDS", "3600"))
+        self.idle_timeout_seconds = int(os.getenv("CONTENTAI_IDLE_TIMEOUT_SECONDS", "600"))
         self.session = requests.Session()
         self.session.auth = HTTPBasicAuth(self.username, self.password)
         self.headers = {"Content-Type": "text/xml; charset=utf-8"}
@@ -103,16 +105,31 @@ class ContentCaptureRecognizer:
             log_error("Content AI: Ошибка", f"Файл не найден: {file_path}")
             raise FileNotFoundError(f"Файл не найден: {file_path}")
             
-        file_name = escape(os.path.basename(file_path))
+        original_file_name = os.path.basename(file_path)
+        xml_file_name = escape(original_file_name)
+
+        # Защита от OOM: ограничение размера файла для SOAP base64 передачи (100 МБ)
+        MAX_RECOGNIZE_SIZE = 100 * 1024 * 1024
+        file_size = os.path.getsize(file_path)
+        if file_size > MAX_RECOGNIZE_SIZE:
+            size_mb = file_size // (1024 * 1024)
+            error_msg = f"Файл {original_file_name} слишком большой для распознавания ({size_mb} МБ > 100 МБ)"
+            log_error("Content AI: Ошибка", error_msg)
+            raise ValueError(error_msg)
+
         with open(file_path, "rb") as f:
             raw_file_bytes = f.read()
             file_bytes = base64.b64encode(raw_file_bytes).decode("ascii")
+        del raw_file_bytes
             
-        log_info("Content AI: Сессия", "Открытие сессии SOAP...")
-        res = self._call("#OpenSession", '<OpenSession xmlns="urn:https://www.contentai.ru/ContentCapture"><roleType>1</roleType><stationType>10</stationType></OpenSession>')
-        session_id = res.find('.//{urn:https://www.contentai.ru/ContentCapture}sessionId').text
-        
+        session_id = None
         try:
+            log_info("Content AI: Сессия", "Открытие сессии SOAP...")
+            res = self._call("#OpenSession", '<OpenSession xmlns="urn:https://www.contentai.ru/ContentCapture"><roleType>1</roleType><stationType>10</stationType></OpenSession>')
+            session_node = res.find('.//{urn:https://www.contentai.ru/ContentCapture}sessionId')
+            if session_node is None or not session_node.text:
+                raise Exception("Content AI не вернул sessionId при вызове OpenSession")
+            session_id = session_node.text
             log_info("Content AI: Проекты", "Получение списка проектов...")
             res = self._call("#GetProjects", '<GetProjects xmlns="urn:https://www.contentai.ru/ContentCapture"></GetProjects>')
             project_guid = None
@@ -170,16 +187,18 @@ class ContentCaptureRecognizer:
             log_info("Content AI: Пакет", f"Открытие пакета {batch_id}...")
             self._call("#OpenBatch", f'<OpenBatch xmlns="urn:https://www.contentai.ru/ContentCapture"><sessionId>{session_id}</sessionId><batchId>{batch_id}</batchId></OpenBatch>')
 
-            log_info("Content AI: Загрузка", f"Отправка файла {file_name} на сервер...")
+            log_info("Content AI: Загрузка", f"Отправка файла {original_file_name} на сервер...")
             img_xml = f"""<AddNewImage xmlns="urn:https://www.contentai.ru/ContentCapture">
 <sessionId>{session_id}</sessionId>
 <batchId>{batch_id}</batchId>
 <file>
-  <Name>{file_name}</Name>
+  <Name>{xml_file_name}</Name>
   <Bytes>{file_bytes}</Bytes>
 </file>
 </AddNewImage>"""
             self._call("#AddNewImage", img_xml)
+            del file_bytes
+            del img_xml
             
             log_info("Content AI: Загрузка", f"Закрытие пакета {batch_id} для начала обработки...")
             self._call("#CloseBatch", f'<CloseBatch xmlns="urn:https://www.contentai.ru/ContentCapture"><sessionId>{session_id}</sessionId><batchId>{batch_id}</batchId></CloseBatch>')
@@ -188,14 +207,44 @@ class ContentCaptureRecognizer:
             self._call("#ProcessBatch", f'<ProcessBatch xmlns="urn:https://www.contentai.ru/ContentCapture"><sessionId>{session_id}</sessionId><batchId>{batch_id}</batchId></ProcessBatch>')
             
             log_info("Content AI: Распознавание", "Ожидание завершения обработки...")
-            max_wait = 600
+            max_wait = self.max_wait_seconds
+            idle_timeout = self.idle_timeout_seconds
             elapsed = 0
+            idle_seconds = 0
+            last_percent = -1
             while elapsed < max_wait:
                 res = self._call("#GetBatchPercentCompleted", f'<GetBatchPercentCompleted xmlns="urn:https://www.contentai.ru/ContentCapture"><batchId>{batch_id}</batchId></GetBatchPercentCompleted>')
-                percent = int(res.find('.//{urn:https://www.contentai.ru/ContentCapture}result').text)
-                log_info("Content AI: Статус", f"Прогресс распознавания... {percent}%")
+                result_node = res.find('.//{urn:https://www.contentai.ru/ContentCapture}result')
+                if result_node is None or result_node.text is None:
+                    raise Exception("Content AI вернул некорректный ответ при проверке прогресса пакета")
+                
+                percent = int(result_node.text)
+                if percent != last_percent:
+                    log_info("Content AI: Статус", f"Прогресс распознавания: {percent}% (прошло {elapsed}с)")
+                    last_percent = percent
+                    idle_seconds = 0
+                else:
+                    idle_seconds += 2
+
                 if percent == 100:
                     break
+                if percent < 0:
+                    raise RuntimeError(f"Content AI сообщил о сбое обработки пакета (статус: {percent})")
+
+                if idle_seconds >= idle_timeout:
+                    raise TimeoutError(f"Content AI завис: прогресс не меняется ({percent}%) более {idle_timeout} секунд")
+                
+                # Периодически проверяем наличие ошибок в пакете
+                if elapsed > 0 and elapsed % 10 == 0:
+                    try:
+                        batch_res = self._call("#GetBatch", f'<GetBatch xmlns="urn:https://www.contentai.ru/ContentCapture"><sessionId>{session_id}</sessionId><batchId>{batch_id}</batchId></GetBatch>')
+                        err_node = batch_res.find('.//{urn:https://www.contentai.ru/ContentCapture}ErrorText')
+                        if err_node is not None and err_node.text and err_node.text.strip():
+                            raise RuntimeError(f"Content AI ошибка пакета: {err_node.text.strip()}")
+                    except Exception as err:
+                        if "Content AI ошибка пакета" in str(err):
+                            raise err
+
                 time.sleep(2)
                 elapsed += 2
             else:
@@ -233,7 +282,7 @@ class ContentCaptureRecognizer:
                                 doc_content = xml_bytes.decode('utf-8', errors='replace')
                     
                     if doc_content:
-                        results[file_name] = {
+                        results[original_file_name] = {
                             "parsed_dict": parse_result_xml(doc_content),
                             "raw_xml": doc_content
                         }
@@ -247,5 +296,9 @@ class ContentCaptureRecognizer:
             return results
                 
         finally:
-            log_info("Content AI: Сессия", "Закрытие SOAP сессии...")
-            self._call("#CloseSession", f'<CloseSession xmlns="urn:https://www.contentai.ru/ContentCapture"><sessionId>{session_id}</sessionId></CloseSession>')
+            if session_id:
+                try:
+                    log_info("Content AI: Сессия", "Закрытие SOAP сессии...")
+                    self._call("#CloseSession", f'<CloseSession xmlns="urn:https://www.contentai.ru/ContentCapture"><sessionId>{session_id}</sessionId></CloseSession>')
+                except Exception as ex:
+                    log_warning("Content AI: Сессия", f"Ошибка при закрытии SOAP сессии: {ex}")

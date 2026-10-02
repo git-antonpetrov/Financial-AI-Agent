@@ -1,6 +1,6 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from . import models
 
 def parse_date_from_system_name(system_name: str) -> datetime:
@@ -43,7 +43,9 @@ async def create_document(
 
 async def check_md5(db: AsyncSession, file_hash: str, filename: str, agent_name: str) -> str:
     """
-    Если хеш найден и статус completed/processing/checking, возвращаем 'duplicate'.
+    Если хеш найден и статус completed/processing, возвращаем 'duplicate'.
+    Если найден со статусом 'checking', проверяем TTL (30 мин). Если проверка устарела,
+    обновляем запись и разрешаем повторную загрузку.
     Если хеш новый — создаём запись со статусом 'checking', чтобы заблокировать
     race condition (параллельная загрузка того же файла не пройдёт проверку).
     """
@@ -54,20 +56,50 @@ async def check_md5(db: AsyncSession, file_hash: str, filename: str, agent_name:
     lock_id = int(hashlib.md5(file_hash.encode()).hexdigest()[:16], 16) - 2**63
     await db.execute(text("SELECT pg_advisory_xact_lock(:lock_id)"), {"lock_id": lock_id})
 
-    query = select(models.Document).where(
+    # 1. Проверяем завершенные или обрабатываемые воркером файлы
+    query_completed = select(models.Document).where(
         models.Document.file_hash == file_hash,
         models.Document.agent_name == agent_name,
-        models.Document.status.in_(['completed', 'processing', 'checking'])
+        models.Document.status.in_(['completed', 'processing'])
     )
-    result = await db.execute(query)
-    existing = result.scalars().first()
-    
-    if existing:
-        await create_document(db, file_hash, filename, agent_name, "duplicate", existing.system_name, existing.short_name, "Файл является полным дубликатом по хешу")
+    result_completed = await db.execute(query_completed)
+    completed_doc = result_completed.scalars().first()
+    if completed_doc:
         return "duplicate"
-    
-    # Сразу создаём запись 'checking', чтобы следующий параллельный запрос
-    # с тем же хэшем уже нашёл её и вернул 'duplicate'
+
+    # 2. Проверяем наличие временной записи 'checking'
+    query_checking = select(models.Document).where(
+        models.Document.file_hash == file_hash,
+        models.Document.agent_name == agent_name,
+        models.Document.status == 'checking'
+    ).order_by(models.Document.created_at.desc())
+    result_checking = await db.execute(query_checking)
+    checking_doc = result_checking.scalars().first()
+
+    now = datetime.now(timezone.utc)
+    STALE_TIMEOUT_SECONDS = 1800  # 30 минут
+
+    if checking_doc:
+        doc_time = checking_doc.created_at
+        if doc_time:
+            if doc_time.tzinfo is None:
+                doc_time = doc_time.replace(tzinfo=timezone.utc)
+            is_stale = (now - doc_time).total_seconds() > STALE_TIMEOUT_SECONDS
+        else:
+            is_stale = True
+
+        if is_stale:
+            # Предыдущая проверка зависла или оборвалась — перезапускаем ее для нового файла
+            checking_doc.created_at = now
+            checking_doc.filename = filename
+            checking_doc.message = "Файл принят на повторную проверку (предыдущая проверка истекла по таймауту)"
+            await db.commit()
+            return "ok"
+        else:
+            # Активная проверка в рамках последних 30 минут
+            return "duplicate"
+
+    # Свежий файл — создаём запись 'checking'
     await create_document(db, file_hash, filename, agent_name, "checking", None, None, "Файл принят на проверку")
     return "ok"
 
@@ -106,13 +138,59 @@ async def check_date_version(
             continue
         existing_date = parse_date_from_system_name(doc.system_name)
         if new_date <= existing_date:
-            await create_document(
-                db, file_hash, filename, agent_name, "old_version", 
-                system_name, short_name, message=f"Найдена версия с датой {existing_date.strftime('%d.%m.%Y')}, которая новее или равна текущей."
-            )
+            message_text = f"Найдена версия с датой {existing_date.strftime('%d.%m.%Y')}, которая новее или равна текущей."
+            query_current = select(models.Document).where(
+                models.Document.file_hash == file_hash,
+                models.Document.agent_name == agent_name,
+                models.Document.status == 'checking'
+            ).order_by(models.Document.created_at.desc())
+            res = await db.execute(query_current)
+            checking_doc = res.scalars().first()
+            if checking_doc:
+                checking_doc.status = "old_version"
+                checking_doc.system_name = system_name
+                checking_doc.short_name = short_name
+                checking_doc.message = message_text
+                await db.commit()
+            else:
+                await create_document(
+                    db, file_hash, filename, agent_name, "old_version", 
+                    system_name, short_name, message=message_text
+                )
             return "old_version"
             
     return "ok"
+
+async def mark_document_error(
+    db: AsyncSession,
+    file_hash: str,
+    filename: str,
+    agent_name: str,
+    system_name: str = None,
+    short_name: str = None,
+    error_message: str = None
+) -> models.Document:
+    """
+    Обновляет существующую запись в статусе checking/processing на error
+    вместо создания дублирующей строки при ошибках загрузки.
+    """
+    query = select(models.Document).where(
+        models.Document.file_hash == file_hash,
+        models.Document.agent_name == agent_name,
+        models.Document.status.in_(['checking', 'processing'])
+    ).order_by(models.Document.created_at.desc())
+    result = await db.execute(query)
+    doc = result.scalars().first()
+    if doc:
+        doc.status = "error"
+        doc.message = error_message
+        if system_name:
+            doc.system_name = system_name
+        if short_name:
+            doc.short_name = short_name
+        await db.commit()
+        return doc
+    return await create_document(db, file_hash, filename, agent_name, "error", system_name, short_name, error_message)
 
 async def update_checking_to_processing(
     db: AsyncSession,
@@ -130,7 +208,7 @@ async def update_checking_to_processing(
         models.Document.file_hash == file_hash,
         models.Document.agent_name == agent_name,
         models.Document.status == 'checking'
-    )
+    ).order_by(models.Document.created_at.desc())
     result = await db.execute(query)
     doc = result.scalars().first()
     

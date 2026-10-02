@@ -1,4 +1,7 @@
-pywebview
+fastapi
+uvicorn
+python-multipart
 requests
 colorama
 python-dotenv
+pyyaml

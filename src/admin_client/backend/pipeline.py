@@ -2,6 +2,7 @@ import os
 import hashlib
 import requests
 import re
+import yaml
 from typing import Callable, Any
 from core.utils.console_logger import log_info, log_error, log_warning
 from core.utils.pdf_converter import convert_to_pdf
@@ -66,6 +67,7 @@ class DocumentPipeline:
         # Отправляем в React красивое уведомление о старте
         self.on_progress_update(filename, "processing", "Шаг 1: Вычисление MD5 и проверка дубликатов...")
 
+        is_hash_locked = False
         try:
             # ==========================================
             # ШАГ 1: ВЫЧИСЛЕНИЕ ХЭША И ПРОВЕРКА НА ДУБЛЬ
@@ -79,6 +81,7 @@ class DocumentPipeline:
                     self.on_progress_update(filename, "skipped", msg)
                     return {"status": "skipped", "reason": "md5_duplicate_local"}
                 _ACTIVE_MD5S.add(file_hash)
+                is_hash_locked = True
                 
             is_duplicate = self._check_duplicate_on_server(filename, file_hash, agent_name)
             if is_duplicate:
@@ -212,18 +215,27 @@ class DocumentPipeline:
             self.on_progress_update(filename, "processing", "Шаг 7: Подготовка и загрузка на сервер (Векторизация)...")
             log_info("Pipeline", "Формирование Markdown и отправка...")
             
-            # Формируем главный файл (upsert)
-            markdown_content = f'---\nshort_name: "{short_name}"\nsystem_name: "{system_name}"\n---\n\n{recognized_text}'
+            # Формируем главный файл (upsert) с безопасной сериализацией YAML frontmatter
+            frontmatter_data = {
+                "short_name": str(short_name),
+                "system_name": str(system_name)
+            }
+            frontmatter_yaml = yaml.safe_dump(frontmatter_data, allow_unicode=True, default_flow_style=False).strip()
+            markdown_content = f'---\n{frontmatter_yaml}\n---\n\n{recognized_text}'
             
+            # Санитизация system_name для безопасного имени файла в multipart-запросе
+            safe_system_name = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', str(system_name)).strip('._')
+            if not safe_system_name:
+                safe_system_name = f"doc_{file_hash[:8]}"
+
             upsert_url = f"{self.server_url}/api/upload/{agent_name}/upsert"
             upsert_data = {
                 "file_hash": file_hash,
-                "filename": filename,
                 "system_name": system_name,
                 "short_name": short_name
             }
             upsert_files = {
-                "file": (f"{system_name}.md", markdown_content.encode('utf-8'), "text/markdown")
+                "file": (f"{safe_system_name}.md", markdown_content.encode('utf-8'), "text/markdown")
             }
             
             log_info("Pipeline", "Вызов ручки /upsert...")
@@ -236,16 +248,16 @@ class DocumentPipeline:
             if repealed_short_names:
                 self.on_progress_update(filename, "processing", "Шаг 8: Отправка списка устаревших актов на удаление...")
                 delete_content = "\n".join(repealed_short_names)
+                delete_hash = hashlib.md5(f"del_{file_hash}_{delete_content}".encode('utf-8')).hexdigest()
                 
                 delete_url = f"{self.server_url}/api/upload/{agent_name}/delete"
                 delete_data = {
-                    "file_hash": file_hash,
-                    "filename": f"delete_{filename}",
-                    "system_name": system_name,
+                    "file_hash": delete_hash,
+                    "system_name": f"delete_{system_name}",
                     "short_name": short_name
                 }
                 delete_files = {
-                    "file": (f"delete_{system_name}.md", delete_content.encode('utf-8'), "text/markdown")
+                    "file": (f"delete_{safe_system_name}.md", delete_content.encode('utf-8'), "text/markdown")
                 }
                 
                 log_info("Pipeline", "Вызов ручки /delete...")
@@ -280,8 +292,8 @@ class DocumentPipeline:
             return {"status": "error", "message": str(e)}
 
         finally:
-            # Освобождаем локальную блокировку MD5
-            if 'file_hash' in locals():
+            # Освобождаем локальную блокировку MD5 только если этот поток её установил
+            if is_hash_locked and 'file_hash' in locals():
                 with _ACTIVE_MD5_LOCK:
                     _ACTIVE_MD5S.discard(file_hash)
                     
@@ -366,7 +378,7 @@ class DocumentPipeline:
         candidates = []
         for p in paragraphs:
             # Ищем юридические формулировки отмены или признания недействительным
-            pattern = r'признать?\s+утративш\w*\s+силу|утрач\w+\s+силу|отменяет(?:ся)?|считать\s+не\s+действующ'
+            pattern = r'(?:призна\w*|считать)\s+(?:утративш\w*|недействительн\w*)\s+силу|утра(?:чива\w*|тил\w*)\s+силу|отмен(?:яет(?:ся)?|ить)\b|считать\s+не\s*действующ\w*'
             if re.search(pattern, p, re.IGNORECASE):
                 cleaned_p = p.strip()
                 if cleaned_p:
