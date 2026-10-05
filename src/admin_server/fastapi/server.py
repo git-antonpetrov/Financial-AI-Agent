@@ -305,10 +305,11 @@ async def login(
                 headers={"WWW-Authenticate": "Bearer"}
             )
 
-        # Фиксируем использование одноразового пароля на 90 секунд в Redis
+        # Фиксируем использование одноразового пароля на 90 секунд в Redis и отмечаем завершение привязки 2FA
         if redis_client:
             try:
                 redis_client.setex(replay_key, 90, "used")
+                redis_client.set("auth:totp_enrolled:admin", "1")
             except Exception:
                 pass
 
@@ -368,13 +369,175 @@ async def get_role_matrix(current_user: CurrentUser = Depends(get_current_user))
         all_permissions=sorted([p.value for p in Permission])
     )
 
+async def check_totp_enrolled(db: AsyncSession) -> bool:
+    """Проверяет, завершена ли первичная привязка 2FA хотя бы одним успешным входом."""
+    if redis_client:
+        try:
+            val = redis_client.get("auth:totp_enrolled:admin")
+            if val is not None:
+                return (str(val) == "1")
+        except Exception:
+            pass
+    try:
+        from db.models import AuditLog
+        from sqlalchemy import select
+        res = await db.execute(
+            select(AuditLog.id).where(AuditLog.action == "AUTH_LOGIN_SUCCESS").limit(1)
+        )
+        has_login = res.scalar_one_or_none() is not None
+        if has_login and redis_client:
+            try:
+                redis_client.set("auth:totp_enrolled:admin", "1")
+            except Exception:
+                pass
+        return has_login
+    except Exception:
+        pass
+    return False
+
 @app.get("/api/auth/2fa/status")
-async def get_2fa_status():
+async def get_2fa_status(db: AsyncSession = Depends(get_db)):
     """Возвращает статус активности обязательной двухфакторной аутентификации 2FA."""
+    enrolled = await check_totp_enrolled(db)
     return {
         "enabled": settings.is_2fa_enabled(),
+        "enrolled": enrolled,
         "method": "TOTP_RFC_6238" if settings.is_2fa_enabled() else "none"
     }
+
+@app.post("/api/auth/2fa/pair", response_model=schemas.TwoFactorPairResponse)
+async def pair_2fa(
+    request: Request,
+    payload: schemas.TwoFactorPairRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Эндпоинт первоначальной настройки и привязки 2FA аутентификатора из десктопного клиента.
+    Требует корректный мастер-пароль администратора.
+    Разрешен, если 2FA еще не была подтверждена (initial enrollment)
+    ЛИБО если передан валидный токен восстановления / bootstrap-токен.
+    Защищен ограничением частоты запросов (rate limiting) и аудитом.
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    failed_key = f"failed_logins:{client_ip}"
+
+    # Защита от брутфорса
+    if redis_client:
+        try:
+            failed_attempts = int(redis_client.get(failed_key) or 0)
+            if failed_attempts >= 5:
+                log_warning("Auth", f"Too many failed login/2fa-pair attempts from IP: {client_ip}")
+                await audit.log_audit_event(
+                    db,
+                    actor=payload.username,
+                    action="AUTH_RATE_LIMIT_BLOCKED",
+                    status="FAILURE",
+                    actor_ip=client_ip
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Too many failed attempts. Please try again later."
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
+    if not secrets.compare_digest(payload.username, "admin"):
+        if redis_client:
+            try:
+                curr = redis_client.incr(failed_key)
+                if curr == 1:
+                    redis_client.expire(failed_key, 300)
+            except Exception:
+                pass
+        log_warning("Auth", f"Failed 2FA pair attempt for user: {payload.username} from IP: {client_ip}")
+        await audit.log_audit_event(
+            db,
+            actor=payload.username,
+            action="AUTH_2FA_PAIR_FAILED",
+            status="FAILURE",
+            actor_ip=client_ip,
+            details="Unknown username"
+        )
+        raise HTTPException(status_code=400, detail="Incorrect username or password")
+
+    if not settings.ADMIN_PASSWORD_HASH:
+        log_error("Auth", "Server not configured: ADMIN_PASSWORD_HASH missing")
+        raise HTTPException(status_code=500, detail="Server not configured: ADMIN_PASSWORD_HASH missing")
+
+    if not verify_password(payload.password, settings.ADMIN_PASSWORD_HASH):
+        if redis_client:
+            try:
+                curr = redis_client.incr(failed_key)
+                if curr == 1:
+                    redis_client.expire(failed_key, 300)
+            except Exception:
+                pass
+        log_warning("Auth", f"Failed 2FA pair attempt (bad password) from IP: {client_ip}")
+        await audit.log_audit_event(
+            db,
+            actor=payload.username,
+            action="AUTH_2FA_PAIR_FAILED",
+            status="FAILURE",
+            actor_ip=client_ip,
+            details="Incorrect password"
+        )
+        raise HTTPException(status_code=400, detail="Incorrect username or password")
+
+    is_enrolled = await check_totp_enrolled(db)
+
+    # Проверка recovery / bootstrap токена
+    expected_setup_token = os.getenv("ADMIN_SETUP_TOKEN") or settings.AGENT_MAIN_BOOTSTRAP_TOKEN
+    has_valid_setup_token = bool(
+        payload.setup_token
+        and expected_setup_token
+        and secrets.compare_digest(payload.setup_token.strip(), expected_setup_token)
+    )
+
+    if is_enrolled and not has_valid_setup_token:
+        log_warning("Auth", f"2FA pair request rejected: already enrolled for IP: {client_ip}")
+        await audit.log_audit_event(
+            db,
+            actor=payload.username,
+            action="AUTH_2FA_PAIR_REJECTED",
+            status="FAILURE",
+            actor_ip=client_ip,
+            details="2FA already enrolled"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="2FA is already enrolled. Please log in using your authenticator code, or use a recovery setup token."
+        )
+
+    # Сбрасываем счетчик неудачных попыток при успешной проверке пароля
+    if redis_client:
+        try:
+            redis_client.delete(failed_key)
+        except Exception:
+            pass
+
+    secret = settings.ADMIN_TOTP_SECRET or generate_totp_secret()
+    uri = get_totp_uri(secret, username=payload.username)
+    qr_svg = generate_qr_svg(uri)
+
+    await audit.log_audit_event(
+        db,
+        actor=payload.username,
+        action="AUTH_2FA_PAIR_PROVISIONED",
+        status="SUCCESS",
+        actor_ip=client_ip,
+        details={"issuer": "Financial-AI-Agent", "initial_enrollment": not is_enrolled}
+    )
+
+    return schemas.TwoFactorPairResponse(
+        status="ok",
+        secret=secret,
+        provisioning_uri=uri,
+        qr_svg=qr_svg,
+        issuer="Financial-AI-Agent",
+        is_enrolled=is_enrolled
+    )
 
 @app.get("/api/auth/2fa/setup")
 async def get_2fa_setup(current_admin: CurrentUser = Depends(require_permission(Permission.SECURITY_MANAGE))):

@@ -253,3 +253,20 @@ class RoleMatrixResponse(BaseModel):
     all_permissions: List[str] = Field(..., description="Полный перечень гранулярных разрешений в системе")
 
 
+class TwoFactorPairRequest(BaseModel):
+    """Схема запроса первоначальной привязки 2FA аутентификатора из клиента."""
+    username: str = Field(default="admin", description="Имя пользователя администратора")
+    password: str = Field(..., min_length=1, description="Мастер-пароль администратора")
+    setup_token: Optional[str] = Field(default=None, description="Опциональный bootstrap/recovery токен")
+
+
+class TwoFactorPairResponse(BaseModel):
+    """Схема ответа с данными привязки 2FA (SVG QR-код, текстовый ключ и URI)."""
+    status: str = Field(default="ok", description="Статус операции")
+    secret: str = Field(..., description="Секретный ключ Base32 TOTP")
+    provisioning_uri: str = Field(..., description="URI формата otpauth://totp/...")
+    qr_svg: str = Field(..., description="Векторный SVG код для встраивания без CDN")
+    issuer: str = Field(default="Financial-AI-Agent", description="Эмитент токена")
+    is_enrolled: bool = Field(default=False, description="Признак завершенности первичной настройки")
+
+

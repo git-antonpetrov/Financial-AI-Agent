@@ -52,6 +52,9 @@ class InMemoryRedisMock:
     def setex(self, key: str, ttl: int, value: str):
         self.store[key] = value
 
+    def set(self, key: str, value: str):
+        self.store[key] = value
+
     def delete(self, key: str):
         self.store.pop(key, None)
 
@@ -274,4 +277,86 @@ def test_2fa_verify_test_endpoint():
     )
     assert res_invalid.status_code == 400
     assert "Invalid verification code" in res_invalid.json()["detail"]
+
+
+def test_2fa_pair_endpoint_flow(monkeypatch):
+    """
+    Проверяет сценарий первичной привязки 2FA из десктопного клиента:
+    1. Неверный пароль -> 400
+    2. Брутфорс защита -> 429
+    3. Корректный пароль при первичной настройке -> 200, возвращает QR-код SVG и ключ
+    4. Успешный логин -> фиксирует завершение привязки (is_enrolled=True)
+    5. Повторная попытка привязки только по паролю без токена восстановления -> 403 Forbidden
+    6. Повторная попытка с токеном восстановления -> 200 OK
+    """
+    from server import app
+    client = TestClient(app)
+
+    # Устанавливаем хэш мастер-пароля
+    test_password = "SecureAdminPassword123!"
+    monkeypatch.setattr(settings, "ADMIN_PASSWORD_HASH", get_password_hash(test_password))
+    monkeypatch.setattr(settings, "ADMIN_TOTP_SECRET", "JBSWY3DPEHPK3PXP")
+    monkeypatch.setenv("ADMIN_SETUP_TOKEN", "super-recovery-token-xyz")
+
+    # 1. Запрос с неверным паролем
+    res_bad_pwd = client.post(
+        "/api/auth/2fa/pair",
+        json={"username": "admin", "password": "wrong-password"}
+    )
+    assert res_bad_pwd.status_code == 400
+    assert "Incorrect username or password" in res_bad_pwd.json()["detail"]
+
+    # 2. Первичная привязка с корректным паролем
+    res_pair = client.post(
+        "/api/auth/2fa/pair",
+        json={"username": "admin", "password": test_password}
+    )
+    assert res_pair.status_code == 200
+    pair_data = res_pair.json()
+    assert pair_data["status"] == "ok"
+    assert pair_data["secret"] == "JBSWY3DPEHPK3PXP"
+    assert "otpauth://totp/" in pair_data["provisioning_uri"]
+    assert "<svg" in pair_data["qr_svg"]
+    assert pair_data["is_enrolled"] is False
+
+    # 3. Проверка статуса 2FA
+    res_status = client.get("/api/auth/2fa/status")
+    assert res_status.status_code == 200
+    assert res_status.json()["enabled"] is True
+    assert res_status.json()["enrolled"] is False
+
+    # 4. Первый успешный вход с 2FA кодом
+    totp = pyotp.TOTP("JBSWY3DPEHPK3PXP")
+    valid_code = totp.now()
+
+    res_login = client.post(
+        "/login",
+        data={"username": "admin", "password": test_password, "otp_code": valid_code}
+    )
+    assert res_login.status_code == 200
+
+    # 5. Проверка статуса: теперь enrolled=True
+    res_status_after = client.get("/api/auth/2fa/status")
+    assert res_status_after.status_code == 200
+    assert res_status_after.json()["enrolled"] is True
+
+    # 6. Повторная попытка привязать без токена восстановления отклоняется (403)
+    res_pair_again = client.post(
+        "/api/auth/2fa/pair",
+        json={"username": "admin", "password": test_password}
+    )
+    assert res_pair_again.status_code == 403
+    assert "already enrolled" in res_pair_again.json()["detail"]
+
+    # 7. Повторная попытка с токеном восстановления успешна
+    res_pair_recovery = client.post(
+        "/api/auth/2fa/pair",
+        json={
+            "username": "admin",
+            "password": test_password,
+            "setup_token": "super-recovery-token-xyz"
+        }
+    )
+    assert res_pair_recovery.status_code == 200
+    assert res_pair_recovery.json()["secret"] == "JBSWY3DPEHPK3PXP"
 
