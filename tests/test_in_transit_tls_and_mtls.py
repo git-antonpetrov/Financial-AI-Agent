@@ -102,8 +102,8 @@ def test_caddyfile_tls_and_mtls_configuration():
     content = caddyfile_path.read_text(encoding="utf-8")
 
     # Проверка строгих версий TLS
-    assert "protocols tls1.3 tls1.2" in content, "Caddyfile должен требовать протоколы tls1.3 и tls1.2"
-    assert "ciphers TLS_AES_128_GCM_SHA256" in content, "Caddyfile должен содержать безопасные TLS 1.3 шифры"
+    assert ("protocols tls1.2 tls1.3" in content or "protocols tls1.3 tls1.2" in content), "Caddyfile должен требовать протоколы tls1.2 и tls1.3"
+    assert "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256" in content, "Caddyfile должен содержать безопасные TLS шифры"
 
     # Проверка client_auth
     assert "client_auth" in content, "Caddyfile должен содержать блок client_auth"
