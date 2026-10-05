@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { Users, FileText, UploadCloud, Clock, CheckCircle2, Globe, Server, Check, X, LogOut, ShieldCheck, Copy, RefreshCw, KeyRound } from 'lucide-react'
+import { Users, FileText, UploadCloud, Clock, CheckCircle2, Globe, Server, Check, X, LogOut, RefreshCw, KeyRound } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { invoke } from '@tauri-apps/api/core'
 
@@ -154,19 +154,6 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
   const [selectedAgent, setSelectedAgent] = useState('main')
   const contentAiConfigPromiseRef = useRef<Promise<ContentAiConfig> | null>(null)
 
-  // Состояние 2FA модального окна
-  const [show2FaModal, setShow2FaModal] = useState(false)
-  const [twoFaData, setTwoFaData] = useState<{
-    secret: string
-    provisioning_uri: string
-    qr_svg: string
-    is_configured: boolean
-  } | null>(null)
-  const [twoFaLoading, setTwoFaLoading] = useState(false)
-  const [twoFaTestCode, setTwoFaTestCode] = useState('')
-  const [twoFaTestStatus, setTwoFaTestStatus] = useState<'idle' | 'success' | 'error'>('idle')
-  const [twoFaCopied, setTwoFaCopied] = useState(false)
-
   // Состояние управления ключами и безопасностью агентов
   const [showAgentKeysModal, setShowAgentKeysModal] = useState(false)
   const [agentList, setAgentList] = useState<any[]>([])
@@ -232,47 +219,6 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
       setIsLoadingRequests(false)
     }
   }, [authFetch])
-
-  const load2FaSetup = useCallback(async (generateNew: boolean = false) => {
-    setTwoFaLoading(true)
-    setTwoFaTestStatus('idle')
-    setTwoFaTestCode('')
-    try {
-      const serverUrl = getResolvedServerUrl()
-      const res = await authFetch(`${serverUrl}/api/auth/2fa/setup`, {
-        method: generateNew ? 'POST' : 'GET'
-      })
-      if (res.ok) {
-        const data = await res.json()
-        setTwoFaData(data)
-      }
-    } catch (e) {
-      console.error('Failed to load 2FA setup:', e)
-    } finally {
-      setTwoFaLoading(false)
-    }
-  }, [authFetch])
-
-  const verify2FaTestCode = useCallback(async () => {
-    if (!twoFaTestCode || !twoFaData) return
-    try {
-      const serverUrl = getResolvedServerUrl()
-      const formData = new FormData()
-      formData.append('code', twoFaTestCode)
-      formData.append('secret', twoFaData.secret)
-      const res = await authFetch(`${serverUrl}/api/auth/2fa/verify-test`, {
-        method: 'POST',
-        body: formData
-      })
-      if (res.ok) {
-        setTwoFaTestStatus('success')
-      } else {
-        setTwoFaTestStatus('error')
-      }
-    } catch {
-      setTwoFaTestStatus('error')
-    }
-  }, [authFetch, twoFaTestCode, twoFaData])
 
   const fetchAgentList = useCallback(async () => {
     setLoadingAgents(true)
@@ -603,16 +549,8 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
   return (
     <div className="min-h-full flex flex-col items-center p-8 relative">
 
-      {/* Шапка интерфейса: переключатель языка, 2FA и выход из системы */}
+      {/* Шапка интерфейса: переключатель языка и выход из системы */}
       <div className="absolute top-6 right-6 z-20 flex items-center gap-3">
-        <button
-          onClick={() => { setShow2FaModal(true); void load2FaSetup(false); }}
-          className="flex items-center gap-2 px-4 py-2 rounded-full bg-purple-500/10 hover:bg-purple-500/20 text-purple-300 transition-colors border border-purple-500/20 text-sm font-medium backdrop-blur-sm"
-          title={lang === 'en' ? '2FA Authenticator Setup' : 'Настройка 2FA / QR-код'}
-        >
-          <ShieldCheck className="w-4 h-4 text-purple-400" />
-          <span>2FA</span>
-        </button>
         <button
           onClick={() => setLang(lang === 'en' ? 'ru' : 'en')}
           className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 hover:bg-white/10 transition-colors border border-white/10 text-sm font-medium backdrop-blur-sm"
@@ -959,139 +897,9 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
           </div>
         )}
 
-        {/* Модальное окно настройки 2FA / QR-кода */}
-        {show2FaModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-md">
-            <div className="bg-[#140b2b] border border-purple-500/30 rounded-3xl max-w-md w-full p-6 shadow-2xl relative text-white">
-              <button
-                onClick={() => setShow2FaModal(false)}
-                className="absolute top-5 right-5 text-purple-300/60 hover:text-white transition-colors"
-              >
-                <X className="w-5 h-5" />
-              </button>
-
-              <div className="flex items-center gap-3 mb-4">
-                <div className="w-10 h-10 rounded-xl bg-purple-500/20 border border-purple-500/30 flex items-center justify-center text-purple-300">
-                  <ShieldCheck className="w-6 h-6 text-purple-400" />
-                </div>
-                <div>
-                  <h3 className="text-base font-bold text-white">
-                    {lang === 'en' ? 'Two-Factor Authentication (2FA)' : 'Двухфакторная аутентификация (2FA)'}
-                  </h3>
-                  <p className="text-xs text-purple-300/70">
-                    {lang === 'en' ? 'RFC 6238 TOTP (Google Authenticator, Apple)' : 'RFC 6238 TOTP (Google Authenticator, Apple)'}
-                  </p>
-                </div>
-              </div>
-
-              {twoFaLoading ? (
-                <div className="py-12 flex flex-col items-center justify-center gap-3 text-purple-300">
-                  <RefreshCw className="w-8 h-8 animate-spin text-purple-400" />
-                  <span className="text-sm">{lang === 'en' ? 'Loading 2FA details...' : 'Загрузка данных 2FA...'}</span>
-                </div>
-              ) : twoFaData ? (
-                <div className="space-y-4">
-                  {/* Контейнер QR-кода */}
-                  <div className="flex flex-col items-center justify-center p-4 bg-white/5 rounded-2xl border border-purple-500/20">
-                    {twoFaData.qr_svg ? (
-                      <div
-                        className="w-48 h-48 bg-white p-3 rounded-xl flex items-center justify-center shadow-lg"
-                        dangerouslySetInnerHTML={{ __html: twoFaData.qr_svg }}
-                      />
-                    ) : (
-                      <div className="w-48 h-48 bg-white/10 rounded-xl flex items-center justify-center text-purple-300 text-xs text-center p-4">
-                        {lang === 'en' ? 'Scan URI below in authenticator app' : 'Используйте секрет или ссылку ниже'}
-                      </div>
-                    )}
-                    <span className="text-xs text-purple-300/60 mt-3 text-center">
-                      {lang === 'en' ? 'Scan QR code in authenticator app on your phone' : 'Отсканируйте QR-код в приложении аутентификатора'}
-                    </span>
-                  </div>
-
-                  {/* Ключ для ручного ввода */}
-                  <div className="p-3 bg-black/40 rounded-xl border border-purple-500/20">
-                    <div className="flex justify-between items-center mb-1">
-                      <span className="text-xs text-purple-300/70">
-                        {lang === 'en' ? 'Secret key for manual entry:' : 'Ключ для ручного ввода:'}
-                      </span>
-                      <button
-                        onClick={() => {
-                          void navigator.clipboard.writeText(twoFaData.secret)
-                          setTwoFaCopied(true)
-                          setTimeout(() => setTwoFaCopied(false), 2000)
-                        }}
-                        className="text-xs text-purple-400 hover:text-purple-300 flex items-center gap-1"
-                      >
-                        {twoFaCopied ? <Check className="w-3.5 h-3.5 text-green-400" /> : <Copy className="w-3.5 h-3.5" />}
-                        {twoFaCopied ? (lang === 'en' ? 'Copied' : 'Скопировано') : (lang === 'en' ? 'Copy' : 'Копировать')}
-                      </button>
-                    </div>
-                    <div className="font-mono text-sm tracking-widest text-cyan-300 break-all select-all font-semibold">
-                      {twoFaData.secret}
-                    </div>
-                  </div>
-
-                  {/* Тестирование кода */}
-                  <div className="p-3 bg-purple-950/30 rounded-xl border border-purple-500/20">
-                    <label className="block text-xs font-medium text-purple-200 mb-2">
-                      {lang === 'en' ? 'Test setup (enter 6 digits):' : 'Проверка привязки (введите 6 цифр):'}
-                    </label>
-                    <div className="flex gap-2">
-                      <input
-                        type="text"
-                        maxLength={6}
-                        value={twoFaTestCode}
-                        onChange={(e) => setTwoFaTestCode(e.target.value.replace(/\D/g, ''))}
-                        placeholder="123456"
-                        className="flex-1 px-3 py-2 bg-black/40 border border-purple-500/30 rounded-lg text-white font-mono tracking-widest text-center text-sm outline-none focus:border-purple-400"
-                      />
-                      <button
-                        onClick={() => void verify2FaTestCode()}
-                        disabled={twoFaTestCode.length !== 6}
-                        className="px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white rounded-lg text-xs font-semibold transition-all cursor-pointer"
-                      >
-                        {lang === 'en' ? 'Verify' : 'Проверить'}
-                      </button>
-                    </div>
-                    {twoFaTestStatus === 'success' && (
-                      <p className="text-xs text-green-400 mt-2 flex items-center gap-1 font-medium">
-                        <CheckCircle2 className="w-3.5 h-3.5" />
-                        {lang === 'en' ? 'Code is valid! Authenticator is connected.' : 'Код подтвержден! Аутентификатор успешно подключен.'}
-                      </p>
-                    )}
-                    {twoFaTestStatus === 'error' && (
-                      <p className="text-xs text-red-400 mt-2 font-medium">
-                        {lang === 'en' ? 'Invalid code. Check device clock sync.' : 'Неверный код. Проверьте время на телефоне и компьютере.'}
-                      </p>
-                    )}
-                  </div>
-
-                  {/* Нижние кнопки управления */}
-                  <div className="flex justify-between items-center pt-2">
-                    <button
-                      onClick={() => void load2FaSetup(true)}
-                      className="text-xs text-purple-400/80 hover:text-purple-300 flex items-center gap-1 transition-colors cursor-pointer"
-                      title={lang === 'en' ? 'Generate new secret' : 'Создать новый секрет'}
-                    >
-                      <RefreshCw className="w-3 h-3" />
-                      {lang === 'en' ? 'Regenerate Key' : 'Сгенерировать новый ключ'}
-                    </button>
-                    <button
-                      onClick={() => setShow2FaModal(false)}
-                      className="px-5 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-medium transition-colors cursor-pointer"
-                    >
-                      {lang === 'en' ? 'Close' : 'Закрыть'}
-                    </button>
-                  </div>
-                </div>
-              ) : null}
-            </div>
-          </div>
-        )}
-
         {/* Модальное окно управления ключами и статусом агентов */}
         {showAgentKeysModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
             <div className="bg-[#140b2b] border border-purple-500/30 rounded-3xl max-w-2xl w-full p-6 shadow-2xl relative text-white max-h-[85vh] flex flex-col">
               <button
                 onClick={() => setShowAgentKeysModal(false)}
