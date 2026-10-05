@@ -1,8 +1,10 @@
 from decimal import Decimal
 from typing import Optional, List
-# pyrefly: ignore [missing-import]
-from fastapi import APIRouter, HTTPException, Depends
+from datetime import datetime, timezone
+import os
+from fastapi import APIRouter, HTTPException, Depends, Request, Response
 from sqlalchemy.future import select
+
 from pydantic import BaseModel, Field
 
 from src.simulations.db.digital_ruble.db.client import get_async_session_maker as get_ruble_session
@@ -11,6 +13,11 @@ from src.simulations.db.digital_ruble.db.models import Wallet, RubleTransaction,
 from src.simulations.db.bank.db.models import Account, Transaction
 from src.simulations.core.utils.console_logger import log_info, log_error, log_success
 from src.simulations.api.core.auth import verify_digital_token, verify_oracle_token
+from src.simulations.core.crypto import (
+    get_receipt_signer,
+    get_digital_platform_signer,
+    get_oracle_verifier,
+)
 from src.simulations.api.schemas.responses import (
     WalletResponse,
     RubleTransactionResponse,
@@ -18,6 +25,7 @@ from src.simulations.api.schemas.responses import (
 )
 
 router = APIRouter(dependencies=[Depends(verify_digital_token)])
+
 
 def ruble_db():
     """Фабрика для получения сессии БД цифрового рубля."""
@@ -127,12 +135,18 @@ async def get_transactions(wallet_id: str) -> List[RubleTransactionResponse]:
         return [RubleTransactionResponse.model_validate(tx) for tx in result.scalars().all()]
 
 @router.post("/wallets/{wallet_id}/fund")
-async def fund_wallet(wallet_id: str, req: FundWithdrawRequest):
+async def fund_wallet(
+    wallet_id: str,
+    req: FundWithdrawRequest,
+    request: Request = None,
+    response: Response = None,
+):
     """
     Пополнить кошелек цифрового рубля со счета в банке.
     Кросс-доменная операция: Банк -> Цифровой Рубль.
     Использует with_for_update() для блокировки счета и кошелька.
     Реализует Saga-паттерн с автоматической компенсацией на банковский счет при сбое.
+    Подписывает сформированный чек-ответ приватным ключом Банка (Блок 5 схемы arch.txt).
     """
     # 1. Списание из банка
     async with bank_db() as bdb:
@@ -183,15 +197,35 @@ async def fund_wallet(wallet_id: str, req: FundWithdrawRequest):
         raise HTTPException(500, f"Ошибка пополнения цифрового кошелька. Средства компенсированы на банковский счет: {e}")
         
     log_success("RubleAPI", f"Кошелек {wallet_id} пополнен на {req.amount} со счета {req.bank_account_id}")
-    return {"status": "success"}
+    request_nonce = None
+    if request is not None:
+        request_nonce = getattr(request.state, "enclave_nonce", None) or request.headers.get("X-Nonce")
+    receipt = get_receipt_signer().create_and_sign_receipt(
+        action="ruble_wallet_fund",
+        data={
+            "wallet_id": wallet_id,
+            "bank_account_id": req.bank_account_id,
+            "amount": str(req.amount),
+        },
+        request_nonce=request_nonce,
+    )
+    if response is not None:
+        response.headers["X-Bank-Signature"] = receipt["signature"]
+    return {"status": "success", "signed_receipt": receipt}
 
 @router.post("/wallets/{wallet_id}/withdraw")
-async def withdraw_wallet(wallet_id: str, req: FundWithdrawRequest):
+async def withdraw_wallet(
+    wallet_id: str,
+    req: FundWithdrawRequest,
+    request: Request = None,
+    response: Response = None,
+):
     """
     Вывести цифровые рубли на банковский счет.
     Кросс-доменная операция: Цифровой Рубль -> Банк.
     Использует with_for_update() для блокировки кошелька и счета.
     Реализует Saga-паттерн с автоматической компенсацией в кошелек при сбое зачисления в банк.
+    Подписывает сформированный чек-ответ приватным ключом Банка (Блок 5 схемы arch.txt).
     """
     # 1. Списание из кошелька
     async with ruble_db() as rdb:
@@ -241,14 +275,36 @@ async def withdraw_wallet(wallet_id: str, req: FundWithdrawRequest):
         raise HTTPException(500, f"Ошибка зачисления на банковский счет. Цифровые рубли возвращены в кошелек: {e}")
         
     log_success("RubleAPI", f"С кошелька {wallet_id} выведено {req.amount} на счет {req.bank_account_id}")
-    return {"status": "success"}
+    request_nonce = None
+    if request is not None:
+        request_nonce = getattr(request.state, "enclave_nonce", None) or request.headers.get("X-Nonce")
+    receipt = get_receipt_signer().create_and_sign_receipt(
+        action="ruble_wallet_withdraw",
+        data={
+            "wallet_id": wallet_id,
+            "bank_account_id": req.bank_account_id,
+            "amount": str(req.amount),
+        },
+        request_nonce=request_nonce,
+    )
+    if response is not None:
+        response.headers["X-Bank-Signature"] = receipt["signature"]
+    return {"status": "success", "signed_receipt": receipt}
+
+
 
 @router.post("/wallets/{wallet_id}/transfers", response_model=RubleTransactionResponse)
-async def transfer_rubles(wallet_id: str, req: RubleTransferRequest) -> RubleTransactionResponse:
+async def transfer_rubles(
+    wallet_id: str,
+    req: RubleTransferRequest,
+    request: Request = None,
+    response: Response = None,
+) -> RubleTransactionResponse:
     """
     P2P перевод цифровых рублей между двумя кошельками.
     Использует пессимистическую блокировку строк (SELECT FOR UPDATE)
     в детерминированном порядке ID для защиты от race condition и deadlocks.
+    Криптографически подписывает транзакцию приватным ключом платформы Банка (Блок 5 схемы arch.txt).
     """
     if str(wallet_id) == str(req.to_wallet_id):
         raise HTTPException(400, "Перевод на тот же самый кошелек невозможен")
@@ -280,17 +336,31 @@ async def transfer_rubles(wallet_id: str, req: RubleTransferRequest) -> RubleTra
         sender.balance = sender_balance - req.amount
         receiver.balance = Decimal(str(receiver.balance)) + req.amount
 
+        # Криптографическая подпись транзакции ключом платформы ЦР
+        sig_ts = int(datetime.now(timezone.utc).timestamp())
+        sig = get_digital_platform_signer().sign_transaction(
+            sender_id=sender.id,
+            receiver_id=receiver.id,
+            amount=req.amount,
+            contract_id="direct_p2p",
+            timestamp=sig_ts,
+        )
+
         rtx = RubleTransaction(
             sender_wallet_id=sender.id,
             receiver_wallet_id=receiver.id,
-            amount=req.amount
+            amount=req.amount,
+            signature=sig,
         )
         db.add(rtx)
         await db.commit()
         await db.refresh(rtx)
         
-        log_success("RubleAPI", f"P2P Перевод ЦР: {req.amount} от {wallet_id} к {req.to_wallet_id}")
+        if response is not None:
+            response.headers["X-Bank-Signature"] = sig
+        log_success("RubleAPI", f"P2P Перевод ЦР: {req.amount} от {wallet_id} к {req.to_wallet_id} (sig={sig[:16]}...)")
         return RubleTransactionResponse.model_validate(rtx)
+
 
 @router.post("/wallets/{wallet_id}/smart-contracts", response_model=SmartContractResponse)
 async def create_smart_contract(wallet_id: str, req: CreateContractRequest) -> SmartContractResponse:
@@ -347,14 +417,34 @@ async def get_smart_contracts(wallet_id: str) -> List[SmartContractResponse]:
         return [SmartContractResponse.model_validate(c) for c in result.scalars().all()]
 
 @router.post("/smart-contracts/{contract_id}/condition", dependencies=[Depends(verify_oracle_token)])
-async def update_contract_condition(contract_id: str, req: ConditionUpdateRequest):
+async def update_contract_condition(
+    contract_id: str,
+    req: ConditionUpdateRequest,
+    request: Request = None,
+    response: Response = None,
+):
     """
     Оракул: доверенное обновление внешнего условия смарт-контракта.
     Доступ разрешен только доверенному оракулу (ORACLE_BOOTSTRAP_TOKEN),
     агенту цифрового рубля или главному оркестратору.
+    Выполняет криптографическую проверку цифровой подписи оракула (Блок 5 схемы arch.txt).
     """
     if req.status not in ['fulfilled', 'failed']:
         raise HTTPException(400, "Неверный статус условия. Разрешены только 'fulfilled' или 'failed'")
+
+    # Криптографическая валидация подписи оракула
+    if req.signature:
+        is_valid, sig_err = get_oracle_verifier().verify_condition_signature(
+            contract_id=contract_id,
+            status=req.status,
+            oracle_name=req.oracle_name,
+            signature_b64=req.signature,
+        )
+        if not is_valid:
+            log_error("RubleAPI", f"Недействительная цифровая подпись оракула для контракта {contract_id}: {sig_err}")
+            raise HTTPException(403, detail=f"Недействительная цифровая подпись оракула: {sig_err}")
+    elif os.getenv("REQUIRE_ORACLE_SIGNATURE", "false").lower() == "true":
+        raise HTTPException(401, detail="Требуется цифровая подпись оракула")
     
     async with ruble_db() as db:
         contract = await db.scalar(
@@ -381,9 +471,26 @@ async def update_contract_condition(contract_id: str, req: ConditionUpdateReques
             f"Оракул '{req.oracle_name}' обновил статус условия контракта {contract_id} на '{req.status}' "
             f"(причина: {req.reason or 'не указана'})"
         )
+
+        request_nonce = None
+        if request is not None:
+            request_nonce = getattr(request.state, "enclave_nonce", None) or request.headers.get("X-Nonce")
+        receipt = get_receipt_signer().create_and_sign_receipt(
+            action="ruble_condition_update",
+            data={
+                "contract_id": contract_id,
+                "new_condition_status": req.status,
+                "oracle_name": req.oracle_name,
+            },
+            request_nonce=request_nonce,
+        )
+        if response is not None:
+            response.headers["X-Bank-Signature"] = receipt["signature"]
         return {
             "status": "success",
             "contract_id": contract_id,
             "new_condition_status": req.status,
-            "oracle_name": req.oracle_name
+            "oracle_name": req.oracle_name,
+            "signed_receipt": receipt,
         }
+

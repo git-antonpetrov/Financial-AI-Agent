@@ -13,6 +13,10 @@ from src.simulations.api.schemas.responses import (
     WalletResponse,
     RubleTransactionResponse,
     SmartContractResponse,
+    SignedReceiptData,
+    SignedReceiptResponse,
+    TransferSuccessResponse,
+    BankCertificatesInfoResponse,
 )
 
 __all__ = [
@@ -30,4 +34,9 @@ __all__ = [
     "WalletResponse",
     "RubleTransactionResponse",
     "SmartContractResponse",
+    "SignedReceiptData",
+    "SignedReceiptResponse",
+    "TransferSuccessResponse",
+    "BankCertificatesInfoResponse",
 ]
+

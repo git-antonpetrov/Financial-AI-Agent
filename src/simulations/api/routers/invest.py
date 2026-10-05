@@ -3,8 +3,7 @@ from typing import Optional, List
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 import random
-# pyrefly: ignore [missing-import]
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request, Response
 from sqlalchemy.future import select
 from pydantic import BaseModel, Field
 
@@ -14,6 +13,7 @@ from src.simulations.db.invest.db.models import InvestmentStrategy, SavingsAccou
 from src.simulations.db.bank.db.models import Account, Transaction
 from src.simulations.core.utils.console_logger import log_info, log_error, log_success
 from src.simulations.api.core.auth import verify_invest_token
+from src.simulations.core.crypto import get_receipt_signer
 from src.simulations.api.schemas.responses import (
     InvestmentStrategyResponse,
     SavingsAccountResponse,
@@ -23,6 +23,7 @@ from src.simulations.api.schemas.responses import (
 )
 
 router = APIRouter(dependencies=[Depends(verify_invest_token)])
+
 
 def invest_db():
     """Фабрика для получения сессии инвестиционной БД."""
@@ -156,7 +157,11 @@ async def get_portfolio(client_id: str) -> PortfolioResponse:
         )
 
 @router.post("/deposits/open", response_model=DepositResponse)
-async def open_deposit(req: OpenProductRequest) -> DepositResponse:
+async def open_deposit(
+    req: OpenProductRequest,
+    request: Request = None,
+    response: Response = None,
+) -> DepositResponse:
     """
     Открыть новый вклад. 
     Кросс-доменная операция: списывает средства со счета в банке и создает актив в инвестициях.
@@ -212,7 +217,27 @@ async def open_deposit(req: OpenProductRequest) -> DepositResponse:
             await idb.commit()
             await idb.refresh(dep)
             log_success("InvestAPI", f"Вклад {dep.account_number} успешно открыт для клиента {req.client_id}")
+
+            request_nonce = None
+            if request is not None:
+                request_nonce = getattr(request.state, "enclave_nonce", None) or request.headers.get("X-Nonce")
+            receipt = get_receipt_signer().create_and_sign_receipt(
+                action="invest_deposit_open",
+                data={
+                    "client_id": req.client_id,
+                    "amount": str(req.initial_amount),
+                    "term_months": req.term_months,
+                    "deposit_id": str(dep.id),
+                    "account_number": dep.account_number,
+                },
+                request_nonce=request_nonce,
+            )
+            if response is not None:
+                response.headers["X-Bank-Signature"] = receipt["signature"]
+                response.headers["X-Receipt-ID"] = receipt["receipt"]["receipt_id"]
             return DepositResponse.model_validate(dep)
+
+
     except Exception as e:
         log_error("InvestAPI", f"Ошибка при открытии вклада: {e}. Запуск компенсационной транзакции...")
         await _compensate_bank_transfer(
@@ -226,7 +251,11 @@ async def open_deposit(req: OpenProductRequest) -> DepositResponse:
         raise HTTPException(500, f"Ошибка создания вклада. Средства компенсированы на банковский счет: {e}")
 
 @router.post("/savings/open", response_model=SavingsAccountResponse)
-async def open_savings(req: OpenProductRequest) -> SavingsAccountResponse:
+async def open_savings(
+    req: OpenProductRequest,
+    request: Request = None,
+    response: Response = None,
+) -> SavingsAccountResponse:
     """
     Открыть накопительный счет (копилку).
     Кросс-доменная операция: Банк -> Инвестиции.
@@ -276,6 +305,23 @@ async def open_savings(req: OpenProductRequest) -> SavingsAccountResponse:
             await idb.commit()
             await idb.refresh(sav)
             log_success("InvestAPI", f"Накопительный счет {sav.account_number} успешно открыт")
+
+            request_nonce = None
+            if request is not None:
+                request_nonce = getattr(request.state, "enclave_nonce", None) or request.headers.get("X-Nonce")
+            receipt = get_receipt_signer().create_and_sign_receipt(
+                action="invest_savings_open",
+                data={
+                    "client_id": req.client_id,
+                    "amount": str(req.initial_amount),
+                    "savings_id": str(sav.id),
+                    "account_number": sav.account_number,
+                },
+                request_nonce=request_nonce,
+            )
+            if response is not None:
+                response.headers["X-Bank-Signature"] = receipt["signature"]
+                response.headers["X-Receipt-ID"] = receipt["receipt"]["receipt_id"]
             return SavingsAccountResponse.model_validate(sav)
     except Exception as e:
         log_error("InvestAPI", f"Ошибка при открытии накопительного счета: {e}. Запуск компенсационной транзакции...")
@@ -290,7 +336,11 @@ async def open_savings(req: OpenProductRequest) -> SavingsAccountResponse:
         raise HTTPException(500, f"Ошибка создания накопительного счета. Средства компенсированы на банковский счет: {e}")
 
 @router.post("/broker-accounts/open", response_model=BrokerAccountResponse)
-async def open_broker_account(req: OpenProductRequest) -> BrokerAccountResponse:
+async def open_broker_account(
+    req: OpenProductRequest,
+    request: Request = None,
+    response: Response = None,
+) -> BrokerAccountResponse:
     """
     Открыть брокерский счет.
     Кросс-доменная операция: Банк -> Инвестиции.
@@ -335,6 +385,23 @@ async def open_broker_account(req: OpenProductRequest) -> BrokerAccountResponse:
             await idb.commit()
             await idb.refresh(broker)
             log_success("InvestAPI", f"Брокерский счет {broker.account_number} успешно открыт")
+
+            request_nonce = None
+            if request is not None:
+                request_nonce = getattr(request.state, "enclave_nonce", None) or request.headers.get("X-Nonce")
+            receipt = get_receipt_signer().create_and_sign_receipt(
+                action="invest_broker_open",
+                data={
+                    "client_id": req.client_id,
+                    "amount": str(req.initial_amount),
+                    "broker_id": str(broker.id),
+                    "account_number": broker.account_number,
+                },
+                request_nonce=request_nonce,
+            )
+            if response is not None:
+                response.headers["X-Bank-Signature"] = receipt["signature"]
+                response.headers["X-Receipt-ID"] = receipt["receipt"]["receipt_id"]
             return BrokerAccountResponse.model_validate(broker)
     except Exception as e:
         log_error("InvestAPI", f"Ошибка при открытии брокерского счета: {e}. Запуск компенсационной транзакции...")
@@ -348,12 +415,20 @@ async def open_broker_account(req: OpenProductRequest) -> BrokerAccountResponse:
             raise e
         raise HTTPException(500, f"Ошибка создания брокерского счета. Средства компенсированы на банковский счет: {e}")
 
+
+
 @router.post("/deposits/{deposit_id}/close")
-async def close_deposit(deposit_id: str, req: CloseProductRequest):
+async def close_deposit(
+    deposit_id: str,
+    req: CloseProductRequest,
+    request: Request = None,
+    response: Response = None,
+):
     """
     Закрыть вклад.
     Кросс-доменная операция: Инвестиции -> Банк. Баланс вклада переводится на банковский счет.
     Реализует Saga-паттерн с компенсацией восстановления вклада в случае сбоя зачисления в банк.
+    Подписывает сформированный чек-ответ приватным ключом Банка (Блок 5 схемы arch.txt).
     """
     amount_to_return = Decimal("0.00")
     
@@ -398,14 +473,38 @@ async def close_deposit(deposit_id: str, req: CloseProductRequest):
         raise HTTPException(500, f"Ошибка зачисления средств в банк. Вклад восстановлен: {e}")
     
     log_info("InvestAPI", f"Вклад {deposit_id} закрыт. На счет возвращено: {amount_to_return}")
-    return {"status": "success", "returned_amount": amount_to_return}
+    request_nonce = None
+    if request is not None:
+        request_nonce = getattr(request.state, "enclave_nonce", None) or request.headers.get("X-Nonce")
+    receipt = get_receipt_signer().create_and_sign_receipt(
+        action="invest_deposit_close",
+        data={
+            "deposit_id": deposit_id,
+            "returned_amount": str(amount_to_return),
+            "to_bank_account_id": req.to_bank_account_id,
+        },
+        request_nonce=request_nonce,
+    )
+    if response is not None:
+        response.headers["X-Bank-Signature"] = receipt["signature"]
+    return {
+        "status": "success",
+        "returned_amount": amount_to_return,
+        "signed_receipt": receipt,
+    }
 
 @router.post("/savings/{savings_id}/close")
-async def close_savings(savings_id: str, req: CloseProductRequest):
+async def close_savings(
+    savings_id: str,
+    req: CloseProductRequest,
+    request: Request = None,
+    response: Response = None,
+):
     """
     Закрыть накопительный счет (копилку).
     Кросс-доменная операция: Инвестиции -> Банк. Баланс переводится на банковский счет.
     Реализует Saga-паттерн с компенсацией восстановления копилки в случае сбоя зачисления в банк.
+    Подписывает сформированный чек-ответ приватным ключом Банка (Блок 5 схемы arch.txt).
     """
     amount_to_return = Decimal("0.00")
     
@@ -450,7 +549,27 @@ async def close_savings(savings_id: str, req: CloseProductRequest):
         raise HTTPException(500, f"Ошибка зачисления средств в банк. Копилка восстановлена: {e}")
     
     log_info("InvestAPI", f"Копилка {savings_id} закрыта. На счет возвращено: {amount_to_return}")
-    return {"status": "success", "returned_amount": amount_to_return}
+    request_nonce = None
+    if request is not None:
+        request_nonce = getattr(request.state, "enclave_nonce", None) or request.headers.get("X-Nonce")
+    receipt = get_receipt_signer().create_and_sign_receipt(
+        action="invest_savings_close",
+        data={
+            "savings_id": savings_id,
+            "returned_amount": str(amount_to_return),
+            "to_bank_account_id": req.to_bank_account_id,
+        },
+        request_nonce=request_nonce,
+    )
+    if response is not None:
+        response.headers["X-Bank-Signature"] = receipt["signature"]
+    return {
+        "status": "success",
+        "returned_amount": amount_to_return,
+        "signed_receipt": receipt,
+    }
+
+
 
 @router.post("/broker-accounts/{account_id}/strategy/subscribe")
 async def subscribe_strategy(account_id: str, req: StrategySubscription):

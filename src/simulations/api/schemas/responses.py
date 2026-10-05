@@ -169,3 +169,40 @@ class SmartContractResponse(BaseResponseModel):
     error_message: Optional[str] = None
     created_at: Optional[datetime] = None
     executed_at: Optional[datetime] = None
+
+
+# ============================================================================
+# СХЕМЫ КРИПТОГРАФИЧЕСКИХ ЧЕКОВ И СЕРТИФИКАТОВ (БЛОК 5 АРХИТЕКТУРЫ)
+# ============================================================================
+
+class SignedReceiptData(BaseResponseModel):
+    receipt_id: str
+    action: str
+    status: str = "completed"
+    timestamp: str
+    request_nonce: Optional[str] = None
+    data: dict = Field(default_factory=dict)
+
+
+class SignedReceiptResponse(BaseResponseModel):
+    receipt: SignedReceiptData
+    signature: str
+    algorithm: str = "SHA256withRSA-PSS"
+    signer_cn: str = "Financial AI Simulation Bank"
+    cert_fingerprint: str
+    bank_cert_pem: str
+    ca_cert_pem: Optional[str] = None
+
+
+class TransferSuccessResponse(BaseResponseModel):
+    status: str = "success"
+    transaction_id: Optional[str] = None
+    signed_receipt: Optional[SignedReceiptResponse] = None
+
+
+class BankCertificatesInfoResponse(BaseResponseModel):
+    root_ca_pem: str
+    bank_cert_pem: str
+    bank_fingerprint: str
+    signer_cn: str
+

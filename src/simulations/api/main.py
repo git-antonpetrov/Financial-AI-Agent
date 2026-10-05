@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.simulations.core.utils.console_logger import log_info
 
 # Здесь будут импорты роутеров
-from src.simulations.api.routers.bank import router as bank_router
+from src.simulations.api.routers.bank import router as bank_router, pki_router as bank_pki_router
 from src.simulations.api.routers.invest import router as invest_router
 from src.simulations.api.routers.ruble import router as ruble_router
 
@@ -47,13 +47,28 @@ app.add_middleware(
     allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Bootstrap-Token", "x-bootstrap-token"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "X-Bootstrap-Token",
+        "x-bootstrap-token",
+        "X-Enclave-Signature",
+        "x-enclave-signature",
+        "X-Nonce",
+        "x-nonce",
+        "X-Timestamp",
+        "x-timestamp",
+        "X-Bank-Signature",
+    ],
+    expose_headers=["X-Bank-Signature", "X-Nonce", "X-Timestamp"],
 )
 
 # Подключение роутеров
+app.include_router(bank_pki_router, prefix="/bank", tags=["Bank PKI"])
 app.include_router(bank_router, prefix="/bank", tags=["Bank"])
 app.include_router(invest_router, prefix="/invest", tags=["Invest"])
 app.include_router(ruble_router, prefix="/ruble", tags=["Digital Ruble"])
+
 
 @app.get("/health")
 async def health_check():

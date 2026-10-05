@@ -2,8 +2,8 @@ from decimal import Decimal
 from typing import Optional, List
 import random
 from datetime import date
-# pyrefly: ignore [missing-import]
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request, Response
+from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from pydantic import BaseModel, Field
@@ -12,17 +12,48 @@ from src.simulations.db.bank.db.client import get_async_session_maker
 from src.simulations.db.bank.db.models import Account, Card, Transaction, Tariff, AutoPayment
 from src.simulations.core.utils.console_logger import log_info, log_error, log_success
 from src.simulations.api.core.auth import verify_bank_token
+from src.simulations.core.crypto import get_bank_ca, get_receipt_signer
 from src.simulations.api.schemas.responses import (
     AccountResponse,
     TariffResponse,
     CardResponse,
     TransactionResponse,
     AutoPaymentResponse,
+    BankCertificatesInfoResponse,
 )
 
 router = APIRouter(dependencies=[Depends(verify_bank_token)])
+pki_router = APIRouter(tags=["Bank PKI"])
+
+
+@pki_router.get("/ca/certificate", response_model=BankCertificatesInfoResponse)
+async def get_bank_certificate_info():
+    """
+    Публичный эндпоинт сертификатов Root CA и Банка для верификации Анклавом.
+    """
+    ca = get_bank_ca()
+    return {
+        "root_ca_pem": ca.get_ca_cert_pem(),
+        "bank_cert_pem": ca.get_bank_cert_pem(),
+        "bank_fingerprint": ca.get_bank_cert_fingerprint(),
+        "signer_cn": "Financial AI Simulation Bank",
+    }
+
+
+@pki_router.get("/ca/root-cert.pem", response_class=PlainTextResponse)
+async def get_root_ca_pem():
+    """Возвращает сертификат Root CA в PEM-формате."""
+    return get_bank_ca().get_ca_cert_pem()
+
+
+@pki_router.get("/ca/bank-cert.pem", response_class=PlainTextResponse)
+async def get_bank_cert_pem():
+    """Возвращает сертификат Банка в PEM-формате."""
+    return get_bank_ca().get_bank_cert_pem()
+
 
 def get_db():
+
     """
     Фабрика для получения асинхронной сессии подключения к банковской БД.
     """
@@ -184,10 +215,15 @@ async def reissue_card(card_id: str) -> CardResponse:
         return CardResponse.model_validate(new_card)
 
 @router.post("/accounts/{account_id}/close")
-async def close_account(account_id: str):
+async def close_account(
+    account_id: str,
+    request: Request = None,
+    response: Response = None,
+):
     """
     Закрыть банковский счет. 
     Требует, чтобы баланс счета был равен нулю.
+    Подписывает чек-квитанцию закрытия счета приватным ключом Банка.
     """
     async with get_db() as db:
         acc = await db.scalar(
@@ -207,7 +243,20 @@ async def close_account(account_id: str):
         acc.status = "closed"
         await db.commit()
         log_info("BankAPI", f"Счет {account_id} закрыт")
-        return {"status": "success"}
+
+        request_nonce = None
+        if request is not None:
+            request_nonce = getattr(request.state, "enclave_nonce", None) or request.headers.get("X-Nonce")
+        receipt = get_receipt_signer().create_and_sign_receipt(
+            action="bank_account_close",
+            data={"account_id": account_id, "status": "closed"},
+            request_nonce=request_nonce,
+        )
+        if response is not None:
+            response.headers["X-Bank-Signature"] = receipt["signature"]
+        return {"status": "success", "signed_receipt": receipt}
+
+
 
 @router.post("/accounts/{account_id}/autopayments", response_model=AutoPaymentResponse)
 async def create_autopayment(account_id: str, data: AutoPaymentCreate) -> AutoPaymentResponse:
@@ -229,12 +278,17 @@ async def create_autopayment(account_id: str, data: AutoPaymentCreate) -> AutoPa
         return AutoPaymentResponse.model_validate(ap)
 
 @router.post("/transfers")
-async def transfer_money(data: TransferRequest):
+async def transfer_money(
+    data: TransferRequest,
+    request: Request = None,
+    response: Response = None,
+):
     """
     Универсальный эндпоинт для перевода средств внутри банка.
     Поддерживает переводы по номеру счета, карты или телефона.
     Использует пессимистическую блокировку строк (SELECT FOR UPDATE) 
     в детерминированном порядке ID для защиты от состояния гонки и взаимных блокировок.
+    Подписывает сформированный чек-ответ приватным ключом Банка (Блок 5 схемы arch.txt).
     """
     async with get_db() as db:
         receiver_acc = None
@@ -312,4 +366,29 @@ async def transfer_money(data: TransferRequest):
         await db.commit()
 
         log_success("BankAPI", f"Успешный перевод {data.amount} от {sender.id} к {receiver.id}")
-        return {"status": "success", "transaction_id": tx_out.id}
+
+        # Криптографическое подписание чека приватным ключом Банка (Блок 5 схемы arch.txt)
+        request_nonce = None
+        if request is not None:
+            request_nonce = getattr(request.state, "enclave_nonce", None) or request.headers.get("X-Nonce")
+        receipt = get_receipt_signer().create_and_sign_receipt(
+            action="bank_transfer",
+            data={
+                "transaction_id": str(tx_out.id),
+                "from_account_id": str(sender.id),
+                "to_account_id": str(receiver.id),
+                "amount": str(data.amount),
+                "transfer_type": data.transfer_type,
+                "destination": data.destination,
+            },
+            request_nonce=request_nonce,
+        )
+        if response is not None:
+            response.headers["X-Bank-Signature"] = receipt["signature"]
+        return {
+            "status": "success",
+            "transaction_id": tx_out.id,
+            "signed_receipt": receipt,
+        }
+
+

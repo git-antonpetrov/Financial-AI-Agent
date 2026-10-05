@@ -9,6 +9,8 @@ from src.simulations.db.digital_ruble.db.models import SmartContract, Wallet, Ru
 from src.simulations.smart_contracts.dsl.context import ContractContext
 from src.simulations.smart_contracts.sandbox.executor import SmartContractSandbox
 from src.simulations.core.utils.console_logger import log_info, log_error, log_success
+from src.simulations.core.crypto import get_digital_platform_signer
+
 
 
 def get_moscow_now() -> datetime:
@@ -91,9 +93,15 @@ async def process_single_contract(session, contract: SmartContract) -> str:
 
             transferred_total += amount_to_send
 
-            # Записываем операцию в историю транзакций
+            # Записываем операцию в историю транзакций с реальной криптографической подписью платформы
             sig_ts = int(datetime.now(timezone.utc).timestamp())
-            signature = f"simulated_sig_{contract.id}_{sig_ts}"
+            signature = get_digital_platform_signer().sign_transaction(
+                sender_id=creator.id,
+                receiver_id=to_wallet.id,
+                amount=amount_to_send,
+                contract_id=contract.id,
+                timestamp=sig_ts,
+            )
             new_tx = RubleTransaction(
                 sender_wallet_id=creator.id,
                 receiver_wallet_id=to_wallet.id,
@@ -104,6 +112,7 @@ async def process_single_contract(session, contract: SmartContract) -> str:
                 timestamp=get_moscow_now()
             )
             session.add(new_tx)
+
 
         # Снимаем из frozen_balance фактический объем переводов
         escrow_release = min(creator_frozen, contract_amount)
