@@ -1,5 +1,5 @@
-Write-Host "Building backend with PyInstaller..."
-pyinstaller --noconfirm admin-backend-x86_64-pc-windows-msvc.spec
+Write-Host "Building hardened backend with PyInstaller (bytecode optimization level 2, debug stripping)..."
+pyinstaller --noconfirm --clean admin-backend-x86_64-pc-windows-msvc.spec
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
 
 Write-Host "Copying backend executable to src-tauri/bin..."

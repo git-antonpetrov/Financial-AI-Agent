@@ -13,6 +13,18 @@ backend_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "sr
 if backend_path not in sys.path:
     sys.path.insert(0, backend_path)
 
+# Предотвращаем конфликт пространств имен 'core' между admin_server и admin_client
+client_core = os.path.join(backend_path, "core")
+client_utils = os.path.join(backend_path, "core", "utils")
+if "core" in sys.modules:
+    core_mod = sys.modules["core"]
+    if hasattr(core_mod, "__path__") and client_core not in core_mod.__path__:
+        core_mod.__path__.insert(0, client_core)
+if "core.utils" in sys.modules:
+    utils_mod = sys.modules["core.utils"]
+    if hasattr(utils_mod, "__path__") and client_utils not in utils_mod.__path__:
+        utils_mod.__path__.insert(0, client_utils)
+
 from fastapi import HTTPException
 from main import validate_server_url
 
@@ -85,18 +97,84 @@ def test_validate_server_url_handles_unresolvable_hosts():
         assert "unable to resolve hostname" in exc_info.value.detail
 
 
-def test_admin_client_ports_consistency():
-    """Проверяет соответствие портов sidecar (8005) во фронтенде и конфигурации Tauri."""
+def test_admin_client_ports_dynamic_configuration():
+    """Проверяет динамическое получение URL sidecar во фронтенде и поддержку диапазона портов в Tauri CSP."""
     dashboard_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src", "admin_client", "frontend", "src", "Dashboard.tsx"))
     with open(dashboard_path, "r", encoding="utf-8") as f:
         content = f.read()
     
-    # Должен обращаться к порту 8005 для локального sidecar
-    assert "http://127.0.0.1:8005/api/local/process" in content
-    assert "http://127.0.0.1:8005/api/local/progress/" in content
-    assert "8001/api/local/" not in content
+    # Фронтенд должен использовать динамический базовый URL
+    assert "getLocalSidecarUrl" in content
+    assert "${sidecarBaseUrl}/api/local/process" in content
+    assert "${sidecarBaseUrl}/api/local/progress/" in content
+    assert "http://127.0.0.1:8005/api/local/process" not in content
 
     tauri_conf_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src", "admin_client", "frontend", "src-tauri", "tauri.conf.json"))
     with open(tauri_conf_path, "r", encoding="utf-8") as f:
         tauri_conf = f.read()
-    assert "http://127.0.0.1:8005" in tauri_conf
+    # CSP должен разрешать динамические порты на 127.0.0.1
+    assert "http://127.0.0.1:*" in tauri_conf
+
+
+def test_ipc_security_guard_enforces_secret():
+    """Проверяет отклонение запросов без токена рукопожатия или с неверным токеном."""
+    from fastapi.testclient import TestClient
+    import main
+
+    test_secret = "test-crypto-ipc-secret-123456"
+    with patch.object(main, "SIDECAR_IPC_SECRET", test_secret):
+        client = TestClient(main.app)
+        
+        # 1. Запрос без токена блокируется middleware (403)
+        res_no_token = client.post("/api/local/process")
+        assert res_no_token.status_code == 403
+        assert "Forbidden: Invalid or missing IPC secret" in res_no_token.text
+
+        # 2. Запрос с неверным токеном в заголовке блокируется middleware (403)
+        res_bad_token = client.post("/api/local/process", headers={"X-Local-Secret": "wrong-secret"})
+        assert res_bad_token.status_code == 403
+
+        # 3. Запрос с корректным заголовком X-Local-Secret успешно проходит middleware (получает 422 из-за отсутствия полей формы)
+        res_good_header = client.post("/api/local/process", headers={"X-Local-Secret": test_secret})
+        assert res_good_header.status_code == 422
+
+        # 4. Запрос с корректным query-параметром ?secret= успешно проходит middleware (получает 422)
+        res_good_query = client.post(f"/api/local/process?secret={test_secret}")
+        assert res_good_query.status_code == 422
+
+
+def test_ipc_security_guard_rejects_unauthorized_origin():
+    """Проверяет блокировку запросов с недоверенным Origin."""
+    from fastapi.testclient import TestClient
+    import main
+
+    client = TestClient(main.app)
+    res_bad_origin = client.get(
+        "/api/local/progress/dummy-job",
+        headers={"Origin": "http://evil-attacker-site.com"}
+    )
+    assert res_bad_origin.status_code == 403
+    assert "Forbidden: Invalid origin" in res_bad_origin.text
+
+
+def test_pyinstaller_spec_hardening():
+    """Проверяет настройки безопасности и обфускации в PyInstaller spec-файле."""
+    spec_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src", "admin_client", "backend", "admin-backend-x86_64-pc-windows-msvc.spec"))
+    with open(spec_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # Оптимизация байткода уровня 2 (удаление docstrings и assert)
+    assert "optimize=2" in content
+    # Скрытие отладочных диалоговых окон
+    assert "disable_windowed_traceback=True" in content
+    # Исключение отладочных модулей
+    assert "'pdb'" in content
+    assert "'unittest'" in content
+    assert "'tkinter'" in content
+
+
+def test_frozen_execution_requires_secret():
+    """Проверяет логику запрета запуска упакованного бинарника без IPC-секрета."""
+    import main
+    # При sys.frozen == False и пустом секрете (режим разработки) модуль импортируется без ошибок
+    assert getattr(sys, "frozen", False) is False

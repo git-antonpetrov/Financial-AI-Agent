@@ -1,6 +1,8 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy.orm import selectinload
 from datetime import datetime, timezone, timedelta
+import hashlib
 from . import models
 
 def parse_date_from_system_name(system_name: str) -> datetime:
@@ -259,22 +261,213 @@ async def update_agent_request_status(db: AsyncSession, request_ids: list[int], 
         req.status = status
     await db.commit()
 
-async def get_agent(db: AsyncSession, agent_name: str) -> models.Agent:
+async def get_agent(db: AsyncSession, agent_name: str, include_keys: bool = False) -> models.Agent | None:
     """Возвращает данные зарегистрированного агента по его имени."""
-    result = await db.execute(select(models.Agent).where(models.Agent.name == agent_name))
+    stmt = select(models.Agent).where(models.Agent.name == agent_name)
+    if include_keys:
+        stmt = stmt.options(selectinload(models.Agent.keys))
+    result = await db.execute(stmt)
     return result.scalars().first()
 
-async def register_agent(db: AsyncSession, agent_name: str, public_key: str) -> models.Agent:
-    """Регистрирует нового агента и сохраняет его открытый ключ в системе."""
+async def get_active_agent_key(db: AsyncSession, agent_name: str, kid: str | None = None) -> models.AgentKey | None:
+    """
+    Возвращает активный, не отозванный и не просроченный ключ агента.
+    Если указан kid, ищет конкретный ключ; иначе возвращает актуальный активный ключ.
+    """
+    agent = await get_agent(db, agent_name)
+    if not agent or agent.status != "active":
+        return None
+
+    query = select(models.AgentKey).where(
+        models.AgentKey.agent_id == agent.id,
+        models.AgentKey.is_revoked == False,
+        models.AgentKey.status == "active"
+    )
+    if kid:
+        query = query.where(models.AgentKey.kid == kid)
+    else:
+        query = query.order_by(models.AgentKey.created_at.desc())
+
+    result = await db.execute(query)
+    key = result.scalars().first()
+    if not key:
+        return None
+
+    # Проверка истечения срока действия ключа (TTL)
+    now = datetime.now(timezone.utc)
+    key_exp = key.expires_at
+    if key_exp.tzinfo is None:
+        key_exp = key_exp.replace(tzinfo=timezone.utc)
+
+    if now > key_exp:
+        key.status = "expired"
+        if agent.public_key == key.public_key:
+            agent.public_key = None
+        await db.commit()
+        return None
+
+    return key
+
+async def register_agent(db: AsyncSession, agent_name: str, public_key: str, ttl_days: int = 90) -> models.Agent:
+    """Регистрирует нового агента или выполняет ротацию ключа для уже существующего."""
     if not public_key.strip().startswith("-----BEGIN"):
         raise ValueError("Public key must be in PEM format (starting with -----BEGIN...)")
 
     agent = await get_agent(db, agent_name)
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(days=ttl_days)
+    kid = f"{agent_name}-{hashlib.sha256(public_key.strip().encode('utf-8')).hexdigest()[:12]}"
+
     if agent:
-        raise ValueError("Agent already registered. Key rotation is not supported in MVP.")
+        # Плавная ротация ключа: переводим старые активные ключи в статус superseded
+        old_keys_query = select(models.AgentKey).where(
+            models.AgentKey.agent_id == agent.id,
+            models.AgentKey.status == "active",
+            models.AgentKey.is_revoked == False
+        )
+        old_keys_res = await db.execute(old_keys_query)
+        for old_k in old_keys_res.scalars().all():
+            old_k.status = "superseded"
+
+        agent.public_key = public_key
+        agent.status = "active"
+        new_key = models.AgentKey(
+            agent_id=agent.id,
+            kid=kid,
+            public_key=public_key,
+            status="active",
+            is_revoked=False,
+            created_at=now,
+            expires_at=expires_at
+        )
+        db.add(new_key)
     else:
-        agent = models.Agent(name=agent_name, public_key=public_key)
+        agent = models.Agent(name=agent_name, status="active", public_key=public_key)
         db.add(agent)
+        await db.flush()
+
+        new_key = models.AgentKey(
+            agent_id=agent.id,
+            kid=kid,
+            public_key=public_key,
+            status="active",
+            is_revoked=False,
+            created_at=now,
+            expires_at=expires_at
+        )
+        db.add(new_key)
+
     await db.commit()
     await db.refresh(agent)
     return agent
+
+async def rotate_agent_key(db: AsyncSession, agent_name: str, new_public_key: str, ttl_days: int = 90) -> tuple[models.Agent, models.AgentKey]:
+    """Выполняет плановую ротацию ключа агента с архивацией предыдущего."""
+    if not new_public_key.strip().startswith("-----BEGIN"):
+        raise ValueError("Public key must be in PEM format (starting with -----BEGIN...)")
+
+    agent = await get_agent(db, agent_name)
+    if not agent:
+        raise ValueError(f"Agent {agent_name} not found")
+
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(days=ttl_days)
+    kid = f"{agent_name}-{hashlib.sha256(new_public_key.strip().encode('utf-8')).hexdigest()[:12]}"
+
+    old_keys_query = select(models.AgentKey).where(
+        models.AgentKey.agent_id == agent.id,
+        models.AgentKey.status == "active",
+        models.AgentKey.is_revoked == False
+    )
+    old_keys_res = await db.execute(old_keys_query)
+    for old_k in old_keys_res.scalars().all():
+        old_k.status = "superseded"
+
+    agent.public_key = new_public_key
+    agent.status = "active"
+    new_key = models.AgentKey(
+        agent_id=agent.id,
+        kid=kid,
+        public_key=new_public_key,
+        status="active",
+        is_revoked=False,
+        created_at=now,
+        expires_at=expires_at
+    )
+    db.add(new_key)
+    await db.commit()
+    await db.refresh(agent)
+    await db.refresh(new_key)
+    return agent, new_key
+
+async def revoke_agent_key(
+    db: AsyncSession,
+    agent_name: str,
+    kid: str | None = None,
+    reason: str = "Compromised"
+) -> list[models.AgentKey]:
+    """Отзывает конкретный или все активные ключи агента."""
+    agent = await get_agent(db, agent_name)
+    if not agent:
+        raise ValueError(f"Agent {agent_name} not found")
+
+    query = select(models.AgentKey).where(
+        models.AgentKey.agent_id == agent.id,
+        models.AgentKey.is_revoked == False
+    )
+    if kid:
+        query = query.where(models.AgentKey.kid == kid)
+    else:
+        query = query.where(models.AgentKey.status == "active")
+
+    result = await db.execute(query)
+    keys_to_revoke = result.scalars().all()
+    if not keys_to_revoke:
+        raise ValueError(f"No active unrevoked keys found for agent {agent_name}")
+
+    now = datetime.now(timezone.utc)
+    for k in keys_to_revoke:
+        k.is_revoked = True
+        k.status = "revoked"
+        k.revoked_at = now
+        k.revocation_reason = reason
+        if agent.public_key == k.public_key:
+            agent.public_key = None
+
+    await db.commit()
+    return keys_to_revoke
+
+async def suspend_agent(db: AsyncSession, agent_name: str) -> models.Agent:
+    """Аварийная приостановка активности агента (Emergency Kill Switch)."""
+    agent = await get_agent(db, agent_name)
+    if not agent:
+        raise ValueError(f"Agent {agent_name} not found")
+    agent.status = "suspended"
+    await db.commit()
+    await db.refresh(agent)
+    return agent
+
+async def reactivate_agent(db: AsyncSession, agent_name: str) -> models.Agent:
+    """Возобновление активности ранее приостановленного агента."""
+    agent = await get_agent(db, agent_name)
+    if not agent:
+        raise ValueError(f"Agent {agent_name} not found")
+    agent.status = "active"
+    await db.commit()
+    await db.refresh(agent)
+    return agent
+
+async def list_all_agents(db: AsyncSession) -> list[models.Agent]:
+    """Возвращает список всех зарегистрированных агентов с их ключами."""
+    query = select(models.Agent).options(selectinload(models.Agent.keys)).order_by(models.Agent.id)
+    result = await db.execute(query)
+    return result.scalars().all()
+
+async def list_agent_keys(db: AsyncSession, agent_name: str) -> list[models.AgentKey]:
+    """Возвращает историю всех ключей агента."""
+    agent = await get_agent(db, agent_name)
+    if not agent:
+        return []
+    query = select(models.AgentKey).where(models.AgentKey.agent_id == agent.id).order_by(models.AgentKey.created_at.desc())
+    result = await db.execute(query)
+    return result.scalars().all()

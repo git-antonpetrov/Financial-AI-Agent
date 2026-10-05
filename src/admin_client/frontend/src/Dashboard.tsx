@@ -1,6 +1,23 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { Users, FileText, UploadCloud, Clock, CheckCircle2, Globe, Server, Check, X, LogOut } from 'lucide-react'
+import { Users, FileText, UploadCloud, Clock, CheckCircle2, Globe, Server, Check, X, LogOut, ShieldCheck, Copy, RefreshCw, KeyRound } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { invoke } from '@tauri-apps/api/core'
+
+const getLocalSidecarSecret = async (): Promise<string> => {
+  try {
+    return await invoke<string>('get_sidecar_secret')
+  } catch {
+    return ''
+  }
+}
+
+const getLocalSidecarUrl = async (): Promise<string> => {
+  try {
+    return await invoke<string>('get_sidecar_url')
+  } catch {
+    return 'http://127.0.0.1:8005'
+  }
+}
 
 type Tab = 'rag' | 'agents'
 
@@ -137,6 +154,24 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
   const [selectedAgent, setSelectedAgent] = useState('main')
   const contentAiConfigPromiseRef = useRef<Promise<ContentAiConfig> | null>(null)
 
+  // Состояние 2FA модального окна
+  const [show2FaModal, setShow2FaModal] = useState(false)
+  const [twoFaData, setTwoFaData] = useState<{
+    secret: string
+    provisioning_uri: string
+    qr_svg: string
+    is_configured: boolean
+  } | null>(null)
+  const [twoFaLoading, setTwoFaLoading] = useState(false)
+  const [twoFaTestCode, setTwoFaTestCode] = useState('')
+  const [twoFaTestStatus, setTwoFaTestStatus] = useState<'idle' | 'success' | 'error'>('idle')
+  const [twoFaCopied, setTwoFaCopied] = useState(false)
+
+  // Состояние управления ключами и безопасностью агентов
+  const [showAgentKeysModal, setShowAgentKeysModal] = useState(false)
+  const [agentList, setAgentList] = useState<any[]>([])
+  const [loadingAgents, setLoadingAgents] = useState(false)
+
   const langRef = useRef(lang);
   useEffect(() => {
     langRef.current = lang;
@@ -150,6 +185,32 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
     }
     const res = await fetch(input, { ...init, headers })
     if (res.status === 401) {
+      // Пытаемся прозрачно обновить токен через Refresh Token Rotation (RTR)
+      const refreshToken = sessionStorage.getItem('admin_refresh_token')
+      const serverUrl = getResolvedServerUrl()
+      if (refreshToken && serverUrl) {
+        try {
+          const refreshRes = await fetch(`${serverUrl}/api/auth/refresh`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ refresh_token: refreshToken })
+          })
+          if (refreshRes.ok) {
+            const data = await refreshRes.json()
+            if (data.access_token) {
+              sessionStorage.setItem('admin_token', data.access_token)
+              if (data.refresh_token) {
+                sessionStorage.setItem('admin_refresh_token', data.refresh_token)
+              }
+              const retryHeaders = new Headers(init?.headers || {})
+              retryHeaders.set('Authorization', `Bearer ${data.access_token}`)
+              return await fetch(input, { ...init, headers: retryHeaders })
+            }
+          }
+        } catch {
+          // Игнорируем сетевые ошибки рефреша и переходим к логауту
+        }
+      }
       onLogout?.('errorSessionExpired')
       throw new Error('Unauthorized (401): Session expired')
     }
@@ -171,6 +232,86 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
       setIsLoadingRequests(false)
     }
   }, [authFetch])
+
+  const load2FaSetup = useCallback(async (generateNew: boolean = false) => {
+    setTwoFaLoading(true)
+    setTwoFaTestStatus('idle')
+    setTwoFaTestCode('')
+    try {
+      const serverUrl = getResolvedServerUrl()
+      const res = await authFetch(`${serverUrl}/api/auth/2fa/setup`, {
+        method: generateNew ? 'POST' : 'GET'
+      })
+      if (res.ok) {
+        const data = await res.json()
+        setTwoFaData(data)
+      }
+    } catch (e) {
+      console.error('Failed to load 2FA setup:', e)
+    } finally {
+      setTwoFaLoading(false)
+    }
+  }, [authFetch])
+
+  const verify2FaTestCode = useCallback(async () => {
+    if (!twoFaTestCode || !twoFaData) return
+    try {
+      const serverUrl = getResolvedServerUrl()
+      const formData = new FormData()
+      formData.append('code', twoFaTestCode)
+      formData.append('secret', twoFaData.secret)
+      const res = await authFetch(`${serverUrl}/api/auth/2fa/verify-test`, {
+        method: 'POST',
+        body: formData
+      })
+      if (res.ok) {
+        setTwoFaTestStatus('success')
+      } else {
+        setTwoFaTestStatus('error')
+      }
+    } catch {
+      setTwoFaTestStatus('error')
+    }
+  }, [authFetch, twoFaTestCode, twoFaData])
+
+  const fetchAgentList = useCallback(async () => {
+    setLoadingAgents(true)
+    try {
+      const serverUrl = getResolvedServerUrl()
+      const res = await authFetch(`${serverUrl}/api/agents`)
+      if (res.ok) {
+        const data = await res.json()
+        setAgentList(data)
+      }
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setLoadingAgents(false)
+    }
+  }, [authFetch])
+
+  const handleSuspendAgent = async (agentName: string) => {
+    const serverUrl = getResolvedServerUrl()
+    await authFetch(`${serverUrl}/api/agents/${agentName}/suspend`, { method: 'POST' })
+    void fetchAgentList()
+  }
+
+  const handleReactivateAgent = async (agentName: string) => {
+    const serverUrl = getResolvedServerUrl()
+    await authFetch(`${serverUrl}/api/agents/${agentName}/reactivate`, { method: 'POST' })
+    void fetchAgentList()
+  }
+
+  const handleRevokeKey = async (agentName: string, kid?: string) => {
+    const reason = prompt(lang === 'en' ? 'Revocation reason:' : 'Причина отзыва:') || 'Compromised'
+    const serverUrl = getResolvedServerUrl()
+    await authFetch(`${serverUrl}/api/agents/${agentName}/revoke`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent_name: agentName, kid, reason })
+    })
+    void fetchAgentList()
+  }
 
   useEffect(() => {
     if (activeTab === 'agents') {
@@ -343,8 +484,17 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
       formData.append('contentai_password', contentaiPassword)
       formData.append('contentai_api_uri', contentaiApiUri)
 
-      const uploadRes = await fetch('http://127.0.0.1:8005/api/local/process', {
+      const localSecret = await getLocalSidecarSecret()
+      const sidecarBaseUrl = await getLocalSidecarUrl()
+
+      const uploadHeaders: Record<string, string> = {}
+      if (localSecret) {
+        uploadHeaders['X-Local-Secret'] = localSecret
+      }
+
+      const uploadRes = await fetch(`${sidecarBaseUrl}/api/local/process`, {
         method: 'POST',
+        headers: uploadHeaders,
         body: formData
       })
 
@@ -359,8 +509,11 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
 
       setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, job_id } : f))
 
-      // Подключается к потоку SSE для отслеживания прогресса обработки
-      const eventSource = new EventSource(`http://127.0.0.1:8005/api/local/progress/${job_id}`)
+      // Подключается к потоку SSE для отслеживания прогресса обработки с валидацией токена
+      const progressUrl = localSecret 
+        ? `${sidecarBaseUrl}/api/local/progress/${job_id}?secret=${encodeURIComponent(localSecret)}`
+        : `${sidecarBaseUrl}/api/local/progress/${job_id}`
+      const eventSource = new EventSource(progressUrl)
 
       eventSource.onmessage = (event) => {
         try {
@@ -450,8 +603,16 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
   return (
     <div className="min-h-full flex flex-col items-center p-8 relative">
 
-      {/* Шапка интерфейса: переключатель языка и выход из системы */}
+      {/* Шапка интерфейса: переключатель языка, 2FA и выход из системы */}
       <div className="absolute top-6 right-6 z-20 flex items-center gap-3">
+        <button
+          onClick={() => { setShow2FaModal(true); void load2FaSetup(false); }}
+          className="flex items-center gap-2 px-4 py-2 rounded-full bg-purple-500/10 hover:bg-purple-500/20 text-purple-300 transition-colors border border-purple-500/20 text-sm font-medium backdrop-blur-sm"
+          title={lang === 'en' ? '2FA Authenticator Setup' : 'Настройка 2FA / QR-код'}
+        >
+          <ShieldCheck className="w-4 h-4 text-purple-400" />
+          <span>2FA</span>
+        </button>
         <button
           onClick={() => setLang(lang === 'en' ? 'ru' : 'en')}
           className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 hover:bg-white/10 transition-colors border border-white/10 text-sm font-medium backdrop-blur-sm"
@@ -634,6 +795,14 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
                   {lang === 'en' ? 'Reject Selected' : 'Отклонить выбранные'}
                   {selectedRequests.size > 0 && ` (${selectedRequests.size})`}
                 </button>
+                <button
+                  onClick={() => { setShowAgentKeysModal(true); void fetchAgentList(); }}
+                  className="px-4 py-3 bg-white/5 hover:bg-white/10 text-purple-300 border border-purple-500/30 rounded-xl transition-all flex items-center gap-2 text-sm font-medium whitespace-nowrap cursor-pointer"
+                  title={lang === 'en' ? 'Agent Keys & Security' : 'Ключи и безопасность агентов'}
+                >
+                  <KeyRound className="w-4 h-4 text-purple-400" />
+                  <span>{lang === 'en' ? 'Keys & Status' : 'Ключи и статус'}</span>
+                </button>
               </div>
 
               <div className="flex-1 overflow-auto pr-2">
@@ -784,6 +953,274 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
                   className="w-full py-4 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 disabled:from-purple-900/50 disabled:to-indigo-900/50 disabled:text-white/30 disabled:cursor-not-allowed text-white font-bold rounded-xl transition-all shadow-lg shadow-purple-500/25 disabled:shadow-none"
                 >
                   {lang === 'en' ? 'Confirm and Upload to RAG' : 'Подтвердить и загрузить в RAG'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Модальное окно настройки 2FA / QR-кода */}
+        {show2FaModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-md">
+            <div className="bg-[#140b2b] border border-purple-500/30 rounded-3xl max-w-md w-full p-6 shadow-2xl relative text-white">
+              <button
+                onClick={() => setShow2FaModal(false)}
+                className="absolute top-5 right-5 text-purple-300/60 hover:text-white transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-10 h-10 rounded-xl bg-purple-500/20 border border-purple-500/30 flex items-center justify-center text-purple-300">
+                  <ShieldCheck className="w-6 h-6 text-purple-400" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">
+                    {lang === 'en' ? 'Two-Factor Authentication (2FA)' : 'Двухфакторная аутентификация (2FA)'}
+                  </h3>
+                  <p className="text-xs text-purple-300/70">
+                    {lang === 'en' ? 'RFC 6238 TOTP (Google Authenticator, Apple)' : 'RFC 6238 TOTP (Google Authenticator, Apple)'}
+                  </p>
+                </div>
+              </div>
+
+              {twoFaLoading ? (
+                <div className="py-12 flex flex-col items-center justify-center gap-3 text-purple-300">
+                  <RefreshCw className="w-8 h-8 animate-spin text-purple-400" />
+                  <span className="text-sm">{lang === 'en' ? 'Loading 2FA details...' : 'Загрузка данных 2FA...'}</span>
+                </div>
+              ) : twoFaData ? (
+                <div className="space-y-4">
+                  {/* Контейнер QR-кода */}
+                  <div className="flex flex-col items-center justify-center p-4 bg-white/5 rounded-2xl border border-purple-500/20">
+                    {twoFaData.qr_svg ? (
+                      <div
+                        className="w-48 h-48 bg-white p-3 rounded-xl flex items-center justify-center shadow-lg"
+                        dangerouslySetInnerHTML={{ __html: twoFaData.qr_svg }}
+                      />
+                    ) : (
+                      <div className="w-48 h-48 bg-white/10 rounded-xl flex items-center justify-center text-purple-300 text-xs text-center p-4">
+                        {lang === 'en' ? 'Scan URI below in authenticator app' : 'Используйте секрет или ссылку ниже'}
+                      </div>
+                    )}
+                    <span className="text-xs text-purple-300/60 mt-3 text-center">
+                      {lang === 'en' ? 'Scan QR code in authenticator app on your phone' : 'Отсканируйте QR-код в приложении аутентификатора'}
+                    </span>
+                  </div>
+
+                  {/* Ключ для ручного ввода */}
+                  <div className="p-3 bg-black/40 rounded-xl border border-purple-500/20">
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="text-xs text-purple-300/70">
+                        {lang === 'en' ? 'Secret key for manual entry:' : 'Ключ для ручного ввода:'}
+                      </span>
+                      <button
+                        onClick={() => {
+                          void navigator.clipboard.writeText(twoFaData.secret)
+                          setTwoFaCopied(true)
+                          setTimeout(() => setTwoFaCopied(false), 2000)
+                        }}
+                        className="text-xs text-purple-400 hover:text-purple-300 flex items-center gap-1"
+                      >
+                        {twoFaCopied ? <Check className="w-3.5 h-3.5 text-green-400" /> : <Copy className="w-3.5 h-3.5" />}
+                        {twoFaCopied ? (lang === 'en' ? 'Copied' : 'Скопировано') : (lang === 'en' ? 'Copy' : 'Копировать')}
+                      </button>
+                    </div>
+                    <div className="font-mono text-sm tracking-widest text-cyan-300 break-all select-all font-semibold">
+                      {twoFaData.secret}
+                    </div>
+                  </div>
+
+                  {/* Тестирование кода */}
+                  <div className="p-3 bg-purple-950/30 rounded-xl border border-purple-500/20">
+                    <label className="block text-xs font-medium text-purple-200 mb-2">
+                      {lang === 'en' ? 'Test setup (enter 6 digits):' : 'Проверка привязки (введите 6 цифр):'}
+                    </label>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        maxLength={6}
+                        value={twoFaTestCode}
+                        onChange={(e) => setTwoFaTestCode(e.target.value.replace(/\D/g, ''))}
+                        placeholder="123456"
+                        className="flex-1 px-3 py-2 bg-black/40 border border-purple-500/30 rounded-lg text-white font-mono tracking-widest text-center text-sm outline-none focus:border-purple-400"
+                      />
+                      <button
+                        onClick={() => void verify2FaTestCode()}
+                        disabled={twoFaTestCode.length !== 6}
+                        className="px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white rounded-lg text-xs font-semibold transition-all cursor-pointer"
+                      >
+                        {lang === 'en' ? 'Verify' : 'Проверить'}
+                      </button>
+                    </div>
+                    {twoFaTestStatus === 'success' && (
+                      <p className="text-xs text-green-400 mt-2 flex items-center gap-1 font-medium">
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        {lang === 'en' ? 'Code is valid! Authenticator is connected.' : 'Код подтвержден! Аутентификатор успешно подключен.'}
+                      </p>
+                    )}
+                    {twoFaTestStatus === 'error' && (
+                      <p className="text-xs text-red-400 mt-2 font-medium">
+                        {lang === 'en' ? 'Invalid code. Check device clock sync.' : 'Неверный код. Проверьте время на телефоне и компьютере.'}
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Нижние кнопки управления */}
+                  <div className="flex justify-between items-center pt-2">
+                    <button
+                      onClick={() => void load2FaSetup(true)}
+                      className="text-xs text-purple-400/80 hover:text-purple-300 flex items-center gap-1 transition-colors cursor-pointer"
+                      title={lang === 'en' ? 'Generate new secret' : 'Создать новый секрет'}
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                      {lang === 'en' ? 'Regenerate Key' : 'Сгенерировать новый ключ'}
+                    </button>
+                    <button
+                      onClick={() => setShow2FaModal(false)}
+                      className="px-5 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-medium transition-colors cursor-pointer"
+                    >
+                      {lang === 'en' ? 'Close' : 'Закрыть'}
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        )}
+
+        {/* Модальное окно управления ключами и статусом агентов */}
+        {showAgentKeysModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md">
+            <div className="bg-[#140b2b] border border-purple-500/30 rounded-3xl max-w-2xl w-full p-6 shadow-2xl relative text-white max-h-[85vh] flex flex-col">
+              <button
+                onClick={() => setShowAgentKeysModal(false)}
+                className="absolute top-5 right-5 text-purple-300/60 hover:text-white transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+
+              <div className="flex items-center gap-3 mb-5">
+                <div className="w-10 h-10 rounded-xl bg-purple-500/20 border border-purple-500/30 flex items-center justify-center text-purple-300">
+                  <KeyRound className="w-6 h-6 text-purple-400" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">
+                    {lang === 'en' ? 'Agent Keys & Security Lifecycle' : 'Ключи и безопасность агентов'}
+                  </h3>
+                  <p className="text-xs text-purple-300/70">
+                    {lang === 'en' ? 'Manage cryptographic RSA keys, rotation, and emergency suspension' : 'Управление RSA-ключами, плановая ротация и экстренный отзыв'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex-1 overflow-auto pr-2 space-y-4">
+                {loadingAgents ? (
+                  <div className="py-12 flex items-center justify-center gap-2 text-purple-300 text-sm">
+                    <RefreshCw className="w-5 h-5 animate-spin text-purple-400" />
+                    <span>{lang === 'en' ? 'Loading agents...' : 'Загрузка списка агентов...'}</span>
+                  </div>
+                ) : agentList.length === 0 ? (
+                  <div className="py-12 text-center text-purple-300/60 text-sm">
+                    {lang === 'en' ? 'No registered agents found.' : 'Нет зарегистрированных агентов.'}
+                  </div>
+                ) : (
+                  agentList.map(agent => (
+                    <div key={agent.id} className="p-4 bg-white/5 border border-purple-500/20 rounded-2xl space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2.5">
+                          <span className="font-semibold text-white tracking-wide capitalize">{agent.name}</span>
+                          <span className={`px-2 py-0.5 rounded-full text-[11px] font-medium uppercase tracking-wider ${
+                            agent.status === 'active' ? 'bg-green-500/20 text-green-300 border border-green-500/30' :
+                            agent.status === 'suspended' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' :
+                            'bg-red-500/20 text-red-300 border border-red-500/30'
+                          }`}>
+                            {agent.status}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {agent.status === 'active' ? (
+                            <>
+                              <button
+                                onClick={() => void handleRevokeKey(agent.name, agent.active_key_id)}
+                                className="px-2.5 py-1 text-xs bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/30 rounded-lg transition-colors cursor-pointer"
+                                title={lang === 'en' ? 'Revoke Key' : 'Отозвать ключ'}
+                              >
+                                {lang === 'en' ? 'Revoke Key' : 'Отозвать ключ'}
+                              </button>
+                              <button
+                                onClick={() => void handleSuspendAgent(agent.name)}
+                                className="px-2.5 py-1 text-xs bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 rounded-lg transition-colors cursor-pointer"
+                                title={lang === 'en' ? 'Emergency Kill Switch' : 'Приостановить агента'}
+                              >
+                                {lang === 'en' ? 'Suspend' : 'Приостановить'}
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              onClick={() => void handleReactivateAgent(agent.name)}
+                              className="px-2.5 py-1 text-xs bg-green-500/20 hover:bg-green-500/30 text-green-300 border border-green-500/30 rounded-lg transition-colors cursor-pointer"
+                            >
+                              {lang === 'en' ? 'Reactivate' : 'Возобновить'}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Ключи агента */}
+                      <div className="space-y-1.5 pt-1">
+                        <div className="text-[11px] text-purple-300/60 uppercase tracking-wider font-semibold">
+                          {lang === 'en' ? 'Keys History & TTL:' : 'История ключей и срок действия:'}
+                        </div>
+                        {agent.keys && agent.keys.length > 0 ? (
+                          agent.keys.map((k: any) => (
+                            <div key={k.kid} className="flex items-center justify-between text-xs p-2 bg-black/30 rounded-lg border border-purple-500/10 font-mono">
+                              <div className="truncate mr-2">
+                                <span className={k.status === 'active' ? 'text-cyan-300 font-semibold' : 'text-purple-300/50'}>
+                                  {k.kid}
+                                </span>
+                                <span className="text-purple-400/60 text-[10px] ml-2 font-sans">
+                                  ({k.fingerprint})
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2 whitespace-nowrap text-[11px]">
+                                <span className={`px-1.5 py-0.5 rounded text-[10px] ${
+                                  k.status === 'active' ? 'bg-green-500/20 text-green-300' :
+                                  k.status === 'revoked' ? 'bg-red-500/20 text-red-300 line-through' :
+                                  'bg-purple-500/10 text-purple-300/50'
+                                }`}>
+                                  {k.status}
+                                </span>
+                                <span className="text-purple-300/50 text-[10px] font-sans">
+                                  {k.expires_at ? new Date(k.expires_at).toLocaleDateString() : ''}
+                                </span>
+                              </div>
+                            </div>
+                          ))
+                        ) : (
+                          <div className="text-xs text-purple-300/40 italic">
+                            {lang === 'en' ? 'No keys registered.' : 'Ключи отсутствуют.'}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div className="pt-4 border-t border-purple-500/20 flex justify-between items-center mt-3">
+                <button
+                  onClick={() => void fetchAgentList()}
+                  className="text-xs text-purple-400 hover:text-purple-300 flex items-center gap-1 cursor-pointer"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  <span>{lang === 'en' ? 'Refresh' : 'Обновить'}</span>
+                </button>
+                <button
+                  onClick={() => setShowAgentKeysModal(false)}
+                  className="px-5 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-medium transition-colors cursor-pointer"
+                >
+                  {lang === 'en' ? 'Close' : 'Закрыть'}
                 </button>
               </div>
             </div>

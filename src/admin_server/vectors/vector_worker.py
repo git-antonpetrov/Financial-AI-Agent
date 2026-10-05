@@ -14,12 +14,44 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from core.utils.console_logger import log_info, log_success, log_warning, log_error
 import psycopg2
 from psycopg2.pool import SimpleConnectionPool
+try:
+    from chroma_envelope import (
+        is_envelope_encryption_enabled,
+        encrypt_batch,
+        decrypt_chroma_results,
+        encrypt_chroma_chunk,
+        decrypt_chroma_chunk,
+        encrypt_chroma_metadata,
+        decrypt_chroma_metadata,
+    )
+except ImportError:
+    try:
+        from .chroma_envelope import (
+            is_envelope_encryption_enabled,
+            encrypt_batch,
+            decrypt_chroma_results,
+            encrypt_chroma_chunk,
+            decrypt_chroma_chunk,
+            encrypt_chroma_metadata,
+            decrypt_chroma_metadata,
+        )
+    except ImportError:
+        from src.admin_server.vectors.chroma_envelope import (
+            is_envelope_encryption_enabled,
+            encrypt_batch,
+            decrypt_chroma_results,
+            encrypt_chroma_chunk,
+            decrypt_chroma_chunk,
+            encrypt_chroma_metadata,
+            decrypt_chroma_metadata,
+        )
 
 # --- Настройки окружения ---
 # Redis
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
+REDIS_SSL = os.getenv("REDIS_SSL", "false").lower() in ("true", "1", "yes")
 QUEUE_NAME = "document_tasks"
 PROCESSING_QUEUE_NAME = "document_tasks_processing"
 
@@ -27,6 +59,41 @@ PROCESSING_QUEUE_NAME = "document_tasks_processing"
 MINIO_URL = os.getenv("MINIO_URL", "minio:9000")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "")
+MINIO_SECURE = os.getenv("MINIO_SECURE", "false").lower() in ("true", "1", "yes")
+MINIO_SSE_C_KEY = os.getenv("MINIO_SSE_C_KEY", "")
+
+
+def get_minio_ssec():
+    """
+    Возвращает объект ServerSideEncryptionCustomerKey (SSE-C) для MinIO, если настроен ключ шифрования.
+    При использовании SSE-S3 MinIO расшифровывает объекты автоматически на стороне сервера.
+    """
+    key_source = MINIO_SSE_C_KEY or os.getenv("MINIO_SSE_C_KEY", "")
+    if not key_source:
+        return None
+    try:
+        from minio.sse import SseCustomerKey
+        key_raw = key_source.strip()
+        if len(key_raw) == 64:
+            try:
+                key_bytes = bytes.fromhex(key_raw)
+            except ValueError:
+                key_bytes = key_raw.encode("utf-8")
+        else:
+            try:
+                import base64
+                key_bytes = base64.b64decode(key_raw)
+                if len(key_bytes) != 32:
+                    key_bytes = key_raw.encode("utf-8")
+            except Exception:
+                key_bytes = key_raw.encode("utf-8")
+        if len(key_bytes) != 32:
+            import hashlib
+            key_bytes = hashlib.sha256(key_bytes).digest()
+        return SseCustomerKey(key_bytes)
+    except Exception as e:
+        log_warning("MinIO SSE", f"Не удалось инициализировать SSE-C ключ: {e}")
+        return None
 
 # ChromaDB
 CHROMA_HOST = os.getenv("CHROMA_HOST", "chromadb")
@@ -54,6 +121,7 @@ if not POSTGRES_PASSWORD:
     log_error("Инициализация воркера", "Критическая ошибка конфигурации: переменная окружения POSTGRES_PASSWORD обязательна, но не задана.")
     sys.exit(1)
 POSTGRES_DB = os.getenv("POSTGRES_DB", "financial_agent")
+POSTGRES_SSLMODE = os.getenv("POSTGRES_SSLMODE", "").strip()
 
 # Лимиты и Чанкинг
 CHUNK_BATCH_SIZE = int(os.getenv("CHUNK_BATCH_SIZE", "10"))
@@ -68,6 +136,7 @@ redis_client = redis.Redis(
     host=REDIS_HOST,
     port=REDIS_PORT,
     password=REDIS_PASSWORD,
+    ssl=REDIS_SSL,
     decode_responses=True
 )
 
@@ -75,7 +144,7 @@ minio_client = Minio(
     MINIO_URL,
     access_key=MINIO_ACCESS_KEY,
     secret_key=MINIO_SECRET_KEY,
-    secure=False
+    secure=MINIO_SECURE
 )
 
 # Подключаемся к запущенному контейнеру Chroma
@@ -102,13 +171,17 @@ else:
     sys.exit(1)
 
 try:
-    db_pool = SimpleConnectionPool(
-        1, 10,
-        host=DB_HOST,
-        user=POSTGRES_USER,
-        password=POSTGRES_PASSWORD,
-        dbname=POSTGRES_DB
-    )
+    pool_kwargs = {
+        "minconn": 1,
+        "maxconn": 10,
+        "host": DB_HOST,
+        "user": POSTGRES_USER,
+        "password": POSTGRES_PASSWORD,
+        "dbname": POSTGRES_DB,
+    }
+    if POSTGRES_SSLMODE:
+        pool_kwargs["sslmode"] = POSTGRES_SSLMODE
+    db_pool = SimpleConnectionPool(**pool_kwargs)
 except Exception as e:
     log_error("Инициализация воркера", f"Не удалось инициализировать пул соединений с базой данных: {e}")
     sys.exit(1)
@@ -241,7 +314,11 @@ def process_task(task: dict):
     try:
         # 1. Скачиваем файл из MinIO
         try:
-            response = minio_client.get_object(bucket, file_path)
+            get_kwargs = {}
+            ssec_obj = get_minio_ssec()
+            if ssec_obj is not None:
+                get_kwargs["ssec"] = ssec_obj
+            response = minio_client.get_object(bucket, file_path, **get_kwargs)
             markdown_text = response.read().decode('utf-8')
         except Exception as e:
             log_error("MinIO", f"Ошибка скачивания файла {file_path} из MinIO: {e}")
@@ -321,11 +398,16 @@ def process_task(task: dict):
                     ids = [f"{short_name}_chunk_{i+j}" for j in range(len(batch_chunks))]
                     metadatas = [metadata.copy() for _ in batch_chunks]
                     
+                    if is_envelope_encryption_enabled():
+                        docs_to_store, metadatas_to_store = encrypt_batch(batch_chunks, metadatas)
+                    else:
+                        docs_to_store, metadatas_to_store = batch_chunks, metadatas
+
                     collection.add(
                         ids=ids,
                         embeddings=embeddings,
-                        metadatas=metadatas,
-                        documents=batch_chunks
+                        metadatas=metadatas_to_store,
+                        documents=docs_to_store
                     )
                     
                     if i + CHUNK_BATCH_SIZE < len(chunks):

@@ -1,15 +1,36 @@
 admin.fin-ai-agent.ru {
-    # Заголовки безопасности
+    # Строгие протоколы TLS 1.3 / TLS 1.2 и безопасные наборы шифров
+    tls {
+        protocols tls1.3 tls1.2
+        ciphers TLS_AES_128_GCM_SHA256 TLS_AES_256_GCM_SHA384 TLS_CHACHA20_POLY1305_SHA256 ECDHE-ECDSA-AES128-GCM-SHA256 ECDHE-RSA-AES128-GCM-SHA256 ECDHE-ECDSA-AES256-GCM-SHA384 ECDHE-RSA-AES256-GCM-SHA384
+        client_auth {
+            mode {env.CADDY_CLIENT_AUTH_MODE:request}
+            trusted_ca_cert_file /etc/caddy/certs/ca.crt
+        }
+    }
+
+    # Заголовки безопасности HTTP
     header {
-        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
         X-Content-Type-Options "nosniff"
         X-Frame-Options "DENY"
         Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
         -Server
     }
 
-    # Проксирует запросы к FastAPI Admin Server с увеличенными таймаутами для LLM-анализа и загрузок
+    # Проксирование запросов к FastAPI Admin Server с mTLS-заголовками и таймаутами для LLM
     reverse_proxy admin-server:8000 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto https
+        header_up X-Client-Cert-Verify {tls_client_verified}
+        header_up X-Client-Cert-Subject {tls_client_subject}
+        header_up X-Client-Cert-Issuer {tls_client_issuer}
+        header_up X-Client-Cert-Serial {tls_client_serial}
+        header_up X-Client-Cert-Fingerprint {tls_client_fingerprint}
+
         transport http {
             response_header_timeout 180s
             read_timeout 180s

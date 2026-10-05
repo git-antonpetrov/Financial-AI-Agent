@@ -106,3 +106,6 @@ requests==2.31.0
 colorama==0.4.6
 numpy<2.0.0
 pywebview
+pyotp>=2.9.0
+qrcode>=8.0.0
+

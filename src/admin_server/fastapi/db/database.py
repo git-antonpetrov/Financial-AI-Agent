@@ -8,6 +8,7 @@ POSTGRES_USER = os.getenv("POSTGRES_USER", "financial_ai_agent")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")
 POSTGRES_DB = os.getenv("POSTGRES_DB", "financial_agent")
 DB_HOST = os.getenv("DB_HOST", "postgres-db")
+POSTGRES_SSLMODE = os.getenv("POSTGRES_SSLMODE", "").strip()
 
 def validate_database_env() -> None:
     """Проверяет наличие обязательных параметров подключения к базе данных PostgreSQL."""
@@ -16,6 +17,8 @@ def validate_database_env() -> None:
 
 encoded_password = quote_plus(POSTGRES_PASSWORD) if POSTGRES_PASSWORD else ""
 DATABASE_URL = f"postgresql+asyncpg://{POSTGRES_USER}:{encoded_password}@{DB_HOST}:5432/{POSTGRES_DB}"
+if POSTGRES_SSLMODE:
+    DATABASE_URL += f"?ssl={POSTGRES_SSLMODE}"
 
 engine = create_async_engine(
     DATABASE_URL,

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Globe, Lock, Server, ArrowRight, Loader2, Eye, EyeOff } from 'lucide-react'
+import { Globe, Lock, Server, ArrowRight, Loader2, Eye, EyeOff, KeyRound } from 'lucide-react'
 import Dashboard from './Dashboard'
 
 // Словарь локализации
@@ -11,6 +11,8 @@ const translations = {
     serverPlaceholder: 'admin.fin-ai-agent.ru',
     passwordLabel: 'Password',
     passwordPlaceholder: 'Enter your password',
+    otpLabel: '2FA Code (TOTP)',
+    otpPlaceholder: '6 digits from authenticator (if enabled)',
     loginBtn: 'Connect',
     connecting: 'Connecting...',
     errorAuth: 'Invalid password or server error',
@@ -19,6 +21,10 @@ const translations = {
     errorInvalidDomain: 'Please enter a valid domain',
     errorUnknown: 'An unexpected error occurred',
     errorSessionExpired: 'Session expired. Please log in again.',
+    errorBadOtp: 'Invalid 2FA TOTP code',
+    errorEmptyOtp: '2FA code is required for this server',
+    errorOtpReused: 'TOTP code already used. Please wait 30 seconds.',
+    otpHelp: 'First time? Run "python scripts/setup_2fa.py" to scan QR code.',
   },
   ru: {
     title: 'Доступ администратора',
@@ -27,6 +33,8 @@ const translations = {
     serverPlaceholder: 'admin.fin-ai-agent.ru',
     passwordLabel: 'Пароль',
     passwordPlaceholder: 'Введите ваш пароль',
+    otpLabel: 'Код 2FA (TOTP)',
+    otpPlaceholder: '6 цифр из приложения (если включено 2FA)',
     loginBtn: 'Подключиться',
     connecting: 'Соединение...',
     errorAuth: 'Неверный пароль или ошибка сервера',
@@ -35,6 +43,10 @@ const translations = {
     errorInvalidDomain: 'Пожалуйста, введите корректный домен',
     errorUnknown: 'Произошла неизвестная ошибка',
     errorSessionExpired: 'Сессия истекла. Пожалуйста, войдите снова.',
+    errorBadOtp: 'Неверный одноразовый код 2FA',
+    errorEmptyOtp: 'Для входа на сервер требуется код 2FA',
+    errorOtpReused: 'Код 2FA уже использован. Подождите 30 секунд.',
+    otpHelp: 'Первый раз? Запустите "python scripts/setup_2fa.py" для сканирования QR.',
   }
 }
 
@@ -43,6 +55,7 @@ function App() {
   const [serverUrl, setServerUrl] = useState(() => localStorage.getItem('admin_server') || '')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
+  const [otpCode, setOtpCode] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState('')
   const [isAuthenticated, setIsAuthenticated] = useState(() => !!sessionStorage.getItem('admin_token'))
@@ -91,17 +104,35 @@ function App() {
       const formData = new URLSearchParams()
       formData.append('username', 'admin')
       formData.append('password', password)
+      if (otpCode.trim()) {
+        formData.append('otp_code', otpCode.trim())
+      }
+
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      }
+      if (otpCode.trim()) {
+        headers['X-OTP-Code'] = otpCode.trim()
+      }
 
       const response = await fetch(loginEndpoint, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
+        headers,
         body: formData,
       })
 
       if (!response.ok) {
-        throw new Error('errorAuth')
+        const errData = await response.json().catch(() => null)
+        const detail = errData?.detail || ''
+        if (detail === '2FA code required') {
+          throw new Error('errorEmptyOtp')
+        } else if (detail === 'Invalid 2FA TOTP code') {
+          throw new Error('errorBadOtp')
+        } else if (typeof detail === 'string' && detail.includes('already been used')) {
+          throw new Error('errorOtpReused')
+        } else {
+          throw new Error('errorAuth')
+        }
       }
 
       const data = await response.json()
@@ -109,13 +140,16 @@ function App() {
       if (data.access_token) {
         // Сохраняем токен в sessionStorage (автоматически очищается при закрытии сессии/окна)
         sessionStorage.setItem('admin_token', data.access_token)
+        if (data.refresh_token) {
+          sessionStorage.setItem('admin_refresh_token', data.refresh_token)
+        }
         localStorage.setItem('admin_server', baseUrl)
         setIsAuthenticated(true)
       } else {
         throw new Error('errorAuth')
       }
     } catch (err: any) {
-      const knownKeys = ['errorInvalidUrl', 'errorEmptyPassword', 'errorInvalidDomain', 'errorAuth']
+      const knownKeys = ['errorInvalidUrl', 'errorEmptyPassword', 'errorInvalidDomain', 'errorAuth', 'errorEmptyOtp', 'errorBadOtp', 'errorOtpReused']
       if (knownKeys.includes(err.message)) {
         setError(err.message)
       } else {
@@ -129,19 +163,23 @@ function App() {
   const handleLogout = async (reason?: string) => {
     try {
       const token = sessionStorage.getItem('admin_token')
+      const refreshToken = sessionStorage.getItem('admin_refresh_token')
       const serverUrl = localStorage.getItem('admin_server') || ''
       if (token && serverUrl && reason !== 'errorSessionExpired') {
         await fetch(`${serverUrl}/api/auth/logout`, {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${token}`
-          }
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ refresh_token: refreshToken })
         })
       }
     } catch (e) {
       console.error('Logout error:', e)
     } finally {
       sessionStorage.removeItem('admin_token')
+      sessionStorage.removeItem('admin_refresh_token')
       setIsAuthenticated(false)
       if (reason) {
         setError(reason)
@@ -231,6 +269,28 @@ function App() {
                     )}
                   </button>
                 </div>
+              </div>
+
+              <div>
+                <label className="block mb-3 text-sm font-medium text-purple-200 ml-1">
+                  {t.otpLabel}
+                </label>
+                <div className="relative">
+                  <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                    <KeyRound className="h-5 w-5 text-purple-400/50" />
+                  </div>
+                  <input
+                    type="text"
+                    maxLength={6}
+                    value={otpCode}
+                    onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ''))}
+                    placeholder={t.otpPlaceholder}
+                    className="block w-full pl-11 pr-4 py-3 bg-black/20 border border-purple-500/20 rounded-xl focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500/50 transition-all text-white placeholder-purple-300/30 outline-none tracking-widest font-mono text-center text-lg"
+                  />
+                </div>
+                <p className="text-xs text-purple-300/40 mt-1.5 ml-1">
+                  {t.otpHelp}
+                </p>
               </div>
 
               {error && (

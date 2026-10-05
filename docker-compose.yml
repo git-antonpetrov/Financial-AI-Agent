@@ -11,6 +11,9 @@ services:
       - "127.0.0.1:15432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    networks:
+      - data_net
+      - simulation_net
     restart: unless-stopped
 
   pgadmin:
@@ -25,8 +28,10 @@ services:
       - pgadmin_data:/var/lib/pgadmin
     depends_on:
       - postgres-db
+    networks:
+      - data_net
+      - simulation_net
     restart: unless-stopped
-
 
   simulations-seeder:
     profiles:
@@ -43,6 +48,8 @@ services:
       - RUBLE_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/digital_db
     env_file:
       - .env
+    networks:
+      - simulation_net
 
   bank-worker:
     build:
@@ -56,6 +63,8 @@ services:
       - TZ=Europe/Moscow
     env_file:
       - .env
+    networks:
+      - simulation_net
     restart: unless-stopped
 
   invest-worker:
@@ -70,6 +79,8 @@ services:
       - TZ=Europe/Moscow
     env_file:
       - .env
+    networks:
+      - simulation_net
     restart: unless-stopped
 
   digital-worker:
@@ -85,6 +96,8 @@ services:
       - TZ=Europe/Moscow
     env_file:
       - .env
+    networks:
+      - simulation_net
     restart: unless-stopped
 
   simulation-api:
@@ -102,19 +115,25 @@ services:
       - RUBLE_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/digital_db
     env_file:
       - .env
+    networks:
+      - simulation_net
     restart: unless-stopped
+
   minio:
     image: elestio/minio:latest
     container_name: minio-server
     environment:
       - MINIO_ROOT_USER=${MINIO_ACCESS_KEY}
       - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}
+      - MINIO_KMS_SECRET_KEY=${MINIO_KMS_SECRET_KEY}
     ports:
       - "127.0.0.1:9000:9000"
       - "127.0.0.1:9001:9001"
     volumes:
       - minio_data:/data
     command: server /data --console-address ":9001"
+    networks:
+      - data_net
     restart: unless-stopped
     
   redis:
@@ -125,6 +144,8 @@ services:
       - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
+    networks:
+      - backend_net
     restart: unless-stopped
 
   admin-server:
@@ -140,10 +161,23 @@ services:
       - REDIS_PORT=6379
       - DB_HOST=postgres-db
       - GOOGLE_APPLICATION_CREDENTIALS=/app/data/gcp-service-account.json
+      - DATA_ENCRYPTION_KEY=${DATA_ENCRYPTION_KEY}
+      - MINIO_SSE_ENABLED=${MINIO_SSE_ENABLED:-false}
+      - CHROMA_ENVELOPE_ENCRYPTION_ENABLED=${CHROMA_ENVELOPE_ENCRYPTION_ENABLED:-true}
+      - REQUIRE_MTLS=${REQUIRE_MTLS:-false}
+      - ALLOWED_MTLS_SUBJECTS=${ALLOWED_MTLS_SUBJECTS:-}
+      - ALLOWED_MTLS_ISSUERS=${ALLOWED_MTLS_ISSUERS:-}
+      - MINIO_SECURE=${MINIO_SECURE:-false}
+      - REDIS_SSL=${REDIS_SSL:-false}
+      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-prefer}
     volumes:
       - ./data:/app/data:ro
     env_file:
       - .env
+    networks:
+      - edge_net
+      - backend_net
+      - data_net
     restart: unless-stopped
     depends_on:
       - minio
@@ -161,6 +195,8 @@ services:
       - "127.0.0.1:8100:8000"
     volumes:
       - chroma_data:/chroma/chroma
+    networks:
+      - data_net
     restart: unless-stopped
     
   vector-worker:
@@ -180,10 +216,19 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=${POSTGRES_DB}
       - GOOGLE_APPLICATION_CREDENTIALS=/app/data/gcp-service-account.json
+      - DATA_ENCRYPTION_KEY=${DATA_ENCRYPTION_KEY}
+      - MINIO_SSE_C_KEY=${MINIO_SSE_C_KEY}
+      - CHROMA_ENVELOPE_ENCRYPTION_ENABLED=${CHROMA_ENVELOPE_ENCRYPTION_ENABLED:-true}
+      - MINIO_SECURE=${MINIO_SECURE:-false}
+      - REDIS_SSL=${REDIS_SSL:-false}
+      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-prefer}
     volumes:
       - ./data:/app/data:ro
     env_file:
       - .env
+    networks:
+      - backend_net
+      - data_net
     restart: unless-stopped
     depends_on:
       - redis
@@ -199,10 +244,26 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    environment:
+      - CADDY_CLIENT_AUTH_MODE=${CADDY_CLIENT_AUTH_MODE:-request}
     volumes:
       - ./src/caddy/Caddyfile:/etc/caddy/Caddyfile
+      - ./certs:/etc/caddy/certs:ro
       - caddy_data:/data
       - caddy_config:/config
+    networks:
+      - edge_net
+
+networks:
+  edge_net:
+    driver: bridge
+  backend_net:
+    driver: bridge
+  data_net:
+    driver: bridge
+    internal: true
+  simulation_net:
+    driver: bridge
 
 volumes:
   postgres_data:

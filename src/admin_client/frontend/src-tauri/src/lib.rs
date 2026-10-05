@@ -3,6 +3,30 @@ use std::sync::Mutex;
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 
 struct BackendProcess(Mutex<Option<CommandChild>>);
+struct SidecarSecret(String);
+struct SidecarPort(u16);
+
+#[tauri::command]
+fn get_sidecar_secret(state: tauri::State<SidecarSecret>) -> String {
+  state.0.clone()
+}
+
+#[tauri::command]
+fn get_sidecar_url(state: tauri::State<SidecarPort>) -> String {
+  format!("http://127.0.0.1:{}", state.0)
+}
+
+#[tauri::command]
+fn get_sidecar_port(state: tauri::State<SidecarPort>) -> u16 {
+  state.0
+}
+
+fn find_available_port() -> u16 {
+  std::net::TcpListener::bind("127.0.0.1:0")
+    .and_then(|listener| listener.local_addr())
+    .map(|addr| addr.port())
+    .unwrap_or(8005)
+}
 
 #[cfg(windows)]
 fn attach_child_to_job_object(pid: u32) {
@@ -89,11 +113,24 @@ fn attach_child_to_job_object(pid: u32) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+  let secret = uuid::Uuid::new_v4().to_string();
+  let secret_for_state = secret.clone();
+  let port = find_available_port();
+  let port_str = port.to_string();
+
   let app = tauri::Builder::default()
     .plugin(tauri_plugin_shell::init())
-    .setup(|app| {
+    .manage(SidecarSecret(secret_for_state))
+    .manage(SidecarPort(port))
+    .invoke_handler(tauri::generate_handler![get_sidecar_secret, get_sidecar_url, get_sidecar_port])
+    .setup(move |app| {
       use tauri_plugin_shell::ShellExt;
-      let sidecar_command = app.shell().sidecar("admin-backend").unwrap();
+      let sidecar_command = app.shell()
+        .sidecar("admin-backend")
+        .unwrap()
+        .env("SIDECAR_IPC_SECRET", &secret)
+        .env("SIDECAR_PORT", &port_str)
+        .args(["--port", &port_str]);
       let (mut receiver, child) = sidecar_command
         .spawn()
         .expect("Failed to spawn sidecar");

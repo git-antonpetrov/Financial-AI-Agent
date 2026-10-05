@@ -1,4 +1,5 @@
 import os
+import sys
 import tempfile
 import re
 import asyncio
@@ -8,6 +9,7 @@ import socket
 import ipaddress
 from concurrent.futures import ThreadPoolExecutor
 import urllib.parse
+import secrets
 # pyrefly: ignore [missing-import]
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Response, status
 # pyrefly: ignore [missing-import]
@@ -24,6 +26,14 @@ job_creation_times = {}
 
 # Пул потоков с ограничением параллельной нагрузки (максимум 3 одновременных файла)
 pipeline_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="pipeline_worker")
+
+# Секрет рукопожатия IPC, переданный родительским процессом Tauri
+SIDECAR_IPC_SECRET = os.getenv("SIDECAR_IPC_SECRET", "").strip()
+
+# Защита от автономного запуска скомпилированного бинарника в обход родительского процесса
+if getattr(sys, "frozen", False) and not SIDECAR_IPC_SECRET:
+    sys.stderr.write("FATAL: Standalone execution of frozen sidecar is prohibited. Must be spawned by Tauri with SIDECAR_IPC_SECRET.\n")
+    sys.exit(1)
 
 async def cleanup_stale_jobs():
     """Выполняет периодическую фоновую очистку устаревших задач для предотвращения утечки памяти."""
@@ -73,8 +83,14 @@ app.add_middleware(
 )
 
 @app.middleware("http")
-async def csrf_origin_guard(request: Request, call_next):
-    """Выполняет защиту локального sidecar от несанкционированных межсайтовых запросов из браузера."""
+async def ipc_security_guard(request: Request, call_next):
+    """Выполняет комплексную защиту локального sidecar:
+    1. Защита от межсайтовых атак (Origin / CSRF).
+    2. Проверка криптографического токена рукопожатия IPC (X-Local-Secret / ?secret=).
+    """
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
     origin = request.headers.get("origin")
     sec_fetch_site = request.headers.get("sec-fetch-site")
 
@@ -83,6 +99,12 @@ async def csrf_origin_guard(request: Request, call_next):
             return Response(content="Forbidden: Invalid origin", status_code=status.HTTP_403_FORBIDDEN)
     elif sec_fetch_site == "cross-site":
         return Response(content="Forbidden: Cross-site request rejected", status_code=status.HTTP_403_FORBIDDEN)
+
+    # Проверка IPC токена рукопожатия от доверенного родительского процесса
+    if SIDECAR_IPC_SECRET:
+        token = request.headers.get("x-local-secret") or request.query_params.get("secret")
+        if not token or not secrets.compare_digest(token.strip(), SIDECAR_IPC_SECRET):
+            return Response(content="Forbidden: Invalid or missing IPC secret", status_code=status.HTTP_403_FORBIDDEN)
 
     return await call_next(request)
 
@@ -278,4 +300,11 @@ async def get_progress(job_id: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8005)
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Financial MAS Admin Client Sidecar")
+    parser.add_argument("--port", type=int, default=int(os.getenv("SIDECAR_PORT", "8005")), help="Port to listen on")
+    parser.add_argument("--host", type=str, default="127.0.0.1", help="Host interface to bind to")
+    args, _ = parser.parse_known_args()
+
+    uvicorn.run(app, host=args.host, port=args.port)
