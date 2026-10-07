@@ -191,6 +191,14 @@ def test_admin_server_response_models():
         if mod not in sys.modules:
             sys.modules[mod] = MagicMock()
     
+    import os
+    admin_dir = os.path.abspath("src/admin_server")
+    fastapi_dir = os.path.abspath("src/admin_server/fastapi")
+    if admin_dir not in sys.path:
+        sys.path.insert(0, admin_dir)
+    if fastapi_dir not in sys.path:
+        sys.path.insert(0, fastapi_dir)
+
     from src.admin_server.fastapi.server import app
     from src.admin_server.fastapi.db import schemas
     
@@ -213,3 +221,63 @@ def test_to_dict_marked_deprecated():
     """
     assert "[DEPRECATED]" in to_dict.__doc__
     assert "[DEPRECATED]" in to_dict_list.__doc__
+
+
+def test_transaction_date_and_time_moscow_synchronization():
+    """
+    Проверяет, что дата и время транзакции синхронизированы по Московскому часовому поясу (UTC+3)
+    и не рассинхронизируются на стыке суток (21:00-00:00 UTC).
+    """
+    from src.simulations.db.bank.db.models import get_moscow_date, get_moscow_time
+
+    # 1. Проверяем функции по умолчанию
+    m_date = get_moscow_date()
+    m_time = get_moscow_time()
+    now_utc = datetime.now(timezone.utc)
+    expected_dt = now_utc + timedelta(hours=3)
+
+    assert m_date == expected_dt.date()
+    assert abs(m_time.hour - expected_dt.time().hour) <= 1
+
+    # 2. Проверяем, что в модели Transaction используются именно московские колбэки
+    assert BankTransaction.date.default.arg.__name__ == "get_moscow_date"
+    assert BankTransaction.time.default.arg.__name__ == "get_moscow_time"
+    assert BankTransaction.date.default.arg(None) == expected_dt.date()
+
+
+@pytest.mark.anyio
+async def test_generate_unique_card_number_collision_retry():
+    """
+    Проверяет работу механизма повторных попыток при коллизии номера карты.
+    """
+    from unittest.mock import AsyncMock
+    from src.simulations.api.routers.bank import generate_unique_card_number
+
+    mock_db = AsyncMock()
+    # 1-я попытка возвращает коллизию (существующий id), 2-я попытка возвращает None (номер свободен)
+    mock_db.scalar.side_effect = ["existing-card-id", None]
+
+    card_num = await generate_unique_card_number(mock_db, max_attempts=5)
+    assert card_num.startswith("4276")
+    assert len(card_num) == 16
+    assert mock_db.scalar.call_count == 2
+
+
+@pytest.mark.anyio
+async def test_generate_unique_invest_account_number_collision_retry():
+    """
+    Проверяет работу механизма повторных попыток при коллизии номера инвестиционного счета.
+    """
+    from unittest.mock import AsyncMock
+    from src.simulations.api.routers.invest import generate_unique_invest_account_number
+    from src.simulations.db.invest.db.models import Deposit
+
+    mock_db = AsyncMock()
+    # 1-я попытка - коллизия, 2-я попытка - свободен
+    mock_db.scalar.side_effect = ["existing-dep-id", None]
+
+    acc_num = await generate_unique_invest_account_number(mock_db, Deposit, prefix="4230", max_attempts=5)
+    assert acc_num.startswith("4230")
+    assert len(acc_num) == 20
+    assert mock_db.scalar.call_count == 2
+

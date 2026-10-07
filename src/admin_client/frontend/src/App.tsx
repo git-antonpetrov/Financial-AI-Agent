@@ -266,7 +266,7 @@ function App() {
       await executeLogin(twoFaPairCode, password)
       setOtpCode(twoFaPairCode)
       setShow2FaModal(false)
-    } catch (err: any) {
+    } catch {
       setTwoFaError(lang === 'en' ? 'Invalid 2FA code. Please check your authenticator clock.' : 'Неверный код 2FA. Проверьте код и время на устройстве.')
     } finally {
       setTwoFaVerifying(false)

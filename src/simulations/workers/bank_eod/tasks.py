@@ -7,7 +7,7 @@ from sqlalchemy.orm import selectinload
 
 from src.simulations.db.bank.db.client import get_async_session_maker
 AsyncSessionLocal = get_async_session_maker()
-from src.simulations.db.bank.db.models import Account, Transaction, AutoPayment
+from src.simulations.db.bank.db.models import Account, Transaction, AutoPayment, get_moscow_time
 from src.simulations.core.utils.console_logger import log_info, log_error
 
 async def process_auto_payments(session, current_date):
@@ -163,7 +163,7 @@ async def process_salaries(session, current_date):
             description=f"Поступление зарплаты",
             status="completed",
             date=current_date,
-            time=datetime.now(timezone.utc).time()
+            time=get_moscow_time()
         )
         session.add(tx)
         paid_clients.add(acc.client_id)

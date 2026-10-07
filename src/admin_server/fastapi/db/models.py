@@ -6,6 +6,8 @@ from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Foreign
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from .database import Base
+from .custom_types import EncryptedText
+
 
 
 class Document(Base):
@@ -85,3 +87,17 @@ class AuditLog(Base):
     details = Column(Text, nullable=True)
     prev_hash = Column(String, nullable=False)
     record_hash = Column(String, nullable=False, index=True)
+
+
+class SystemSetting(Base):
+    """
+    Хранит системные настройки и секреты безопасности, прозрачно
+    зашифрованные при хранении в базе данных с помощью AES-256-GCM.
+    """
+    __tablename__ = "system_settings"
+
+    key = Column(String, primary_key=True, index=True)
+    value = Column(EncryptedText, nullable=False)
+    description = Column(String, nullable=True)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+

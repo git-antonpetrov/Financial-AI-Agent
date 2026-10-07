@@ -117,30 +117,78 @@ def encrypt_chroma_chunk(
     return base64.urlsafe_b64encode(raw_payload).decode("ascii")
 
 
+_BASE64URL_ALPHABET = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_=")
+_MIN_ENVELOPE_BYTES_LEN = len(MAGIC_ENVELOPE_V1) + 12 + 16  # Magic (4) + Nonce (12) + Tag (16) = 32 байта
+_MIN_ENVELOPE_B64_LEN = 43  # 32 байта в Base64url кодируются в 43 символа без padding (44 с padding)
+_ENVELOPE_B64_PREFIX = "RU5DM"  # b"ENC1" в Base64url: b"ENC" -> "RU5D", b"1" + 2 бита nonce всегда дают "M"
+
+
+def is_encrypted_chunk(val: Any) -> bool:
+    """
+    Строго проверяет, является ли значение строкой зашифрованного пакета ENC1 (Envelope Encryption).
+    
+    В отличие от примитивной эвристики startswith("RU5D"), данная функция исключает
+    ложные срабатывания (false positives) для обычных строк, случайно начинающихся с 'RU5D'
+    (например, 'RU5D', 'RU5D (Текст документа)', 'RU5D-2026' и т.д.).
+    
+    Критерии:
+    1. Значение должно быть непустой строкой длиной не менее 43 символов.
+    2. Должно начинаться с детерминированного префикса 'RU5DM' (Base64url от b"ENC1").
+    3. Должно состоять строго из алфавита Base64url (без пробелов, переводов строк и спецсимволов).
+    4. Должно успешно декодироваться в Base64url и содержать заголовок b"ENC1" длиной >= 32 байт.
+    """
+    if not isinstance(val, str) or len(val) < _MIN_ENVELOPE_B64_LEN:
+        return False
+
+    if not val.startswith(_ENVELOPE_B64_PREFIX):
+        return False
+
+    if any(c not in _BASE64URL_ALPHABET for c in val):
+        return False
+
+    try:
+        raw_payload = base64.urlsafe_b64decode(val.encode("ascii"))
+    except Exception:
+        return False
+
+    return (
+        len(raw_payload) >= _MIN_ENVELOPE_BYTES_LEN
+        and raw_payload.startswith(MAGIC_ENVELOPE_V1)
+    )
+
+
 def decrypt_chroma_chunk(
     val: str,
     key: bytes | str | None = None,
-    aad: bytes | str | None = None
+    aad: bytes | str | None = None,
+    is_encrypted: bool | None = None
 ) -> str:
     """
     Расшифровывает чанк, сохраненный в ChromaDB.
     Если строка не является зашифрованным пакетом ENC1 (унаследованные данные),
     возвращает её без изменений (обратная совместимость).
+    
+    Параметр is_encrypted (опционально) позволяет использовать значение флага
+    из метаданных документа (is_encrypted в ChromaDB) для точного решения.
     """
     if not isinstance(val, str) or not val:
         return val
 
-    # Быстрая проверка: пакет ENC1 в Base64url всегда начинается с "RU5D"
-    if not val.startswith("RU5D"):
+    # Если в метаданных явно указано, что документ не зашифрован (legacy)
+    if is_encrypted is False:
+        return val
+
+    # Строгая валидация формата зашифрованного конверта ENC1 вместо наивной эвристики "RU5D"
+    if not is_encrypted_chunk(val):
+        if is_encrypted is True:
+            raise ValueError("Ошибка расшифровки чанка ChromaDB: нарушена структура зашифрованного пакета ENC1.")
         return val
 
     try:
         raw_payload = base64.urlsafe_b64decode(val.encode("ascii"))
-    except Exception:
-        return val
-
-    min_len = len(MAGIC_ENVELOPE_V1) + 12 + 16  # Magic (4) + Nonce (12) + Tag (16)
-    if len(raw_payload) < min_len or not raw_payload.startswith(MAGIC_ENVELOPE_V1):
+    except Exception as e:
+        if is_encrypted is True:
+            raise ValueError("Ошибка расшифровки чанка ChromaDB: невалидная Base64url строка.") from e
         return val
 
     header_len = len(MAGIC_ENVELOPE_V1)
@@ -158,7 +206,7 @@ def decrypt_chroma_chunk(
         decrypted_bytes = aesgcm.decrypt(nonce, ciphertext_and_tag, aad_bytes)
         return decrypted_bytes.decode("utf-8")
     except Exception as e:
-        raise ValueError(f"Ошибка расшифровки чанка ChromaDB: нарушена целостность, неверный ключ или поврежден тег аутентификации.") from e
+        raise ValueError("Ошибка расшифровки чанка ChromaDB: нарушена целостность, неверный ключ или поврежден тег аутентификации.") from e
 
 
 def encrypt_chroma_metadata(
@@ -194,7 +242,8 @@ def encrypt_chroma_metadata(
 
 def decrypt_chroma_metadata(
     metadata: dict[str, Any],
-    key: bytes | str | None = None
+    key: bytes | str | None = None,
+    preserve_keys: set[str] | None = None
 ) -> dict[str, Any]:
     """
     Расшифровывает все зашифрованные поля в словаре метаданных ChromaDB.
@@ -202,9 +251,19 @@ def decrypt_chroma_metadata(
     if not isinstance(metadata, dict):
         return metadata
 
+    is_enc = metadata.get("is_encrypted")
+    if is_enc is None:
+        is_enc = metadata.get("_encrypted")
+
+    if is_enc is False:
+        return metadata
+
+    preserved = preserve_keys or DEFAULT_PRESERVED_KEYS
     decrypted_meta: dict[str, Any] = {}
     for k, v in metadata.items():
-        if isinstance(v, str):
+        if k in preserved:
+            decrypted_meta[k] = v
+        elif isinstance(v, str):
             decrypted_meta[k] = decrypt_chroma_chunk(v, key=key)
         else:
             decrypted_meta[k] = v
@@ -239,30 +298,41 @@ def decrypt_chroma_results(
 
     decrypted = dict(results)
 
-    # 1. Расшифровка документов (чанков)
-    docs = decrypted.get("documents")
-    if docs and isinstance(docs, list):
-        if docs and isinstance(docs[0], list):
-            decrypted["documents"] = [
-                [decrypt_chroma_chunk(doc, key=key) for doc in doc_list]
-                for doc_list in docs
-            ]
-        else:
-            decrypted["documents"] = [
-                decrypt_chroma_chunk(doc, key=key) for doc in docs
-            ]
-
-    # 2. Расшифровка метаданных
+    # 1. Расшифровка метаданных
     metas = decrypted.get("metadatas")
+    decrypted_metas = metas
     if metas and isinstance(metas, list):
         if metas and isinstance(metas[0], list):
-            decrypted["metadatas"] = [
+            decrypted_metas = [
                 [decrypt_chroma_metadata(meta, key=key) if isinstance(meta, dict) else meta for meta in meta_list]
                 for meta_list in metas
             ]
         else:
-            decrypted["metadatas"] = [
+            decrypted_metas = [
                 decrypt_chroma_metadata(meta, key=key) if isinstance(meta, dict) else meta for meta in metas
             ]
+        decrypted["metadatas"] = decrypted_metas
+
+    # 2. Расшифровка документов (чанков) с учетом флага шифрования из метаданных
+    docs = decrypted.get("documents")
+    if docs and isinstance(docs, list):
+        if docs and isinstance(docs[0], list):
+            new_docs = []
+            for i, doc_list in enumerate(docs):
+                meta_list = metas[i] if (metas and i < len(metas) and isinstance(metas[i], list)) else []
+                new_sublist = []
+                for j, doc in enumerate(doc_list):
+                    meta = meta_list[j] if (j < len(meta_list) and isinstance(meta_list[j], dict)) else None
+                    is_enc = meta.get("is_encrypted") if meta else None
+                    new_sublist.append(decrypt_chroma_chunk(doc, key=key, is_encrypted=is_enc))
+                new_docs.append(new_sublist)
+            decrypted["documents"] = new_docs
+        else:
+            new_docs = []
+            for i, doc in enumerate(docs):
+                meta = metas[i] if (metas and i < len(metas) and isinstance(metas[i], dict)) else None
+                is_enc = meta.get("is_encrypted") if meta else None
+                new_docs.append(decrypt_chroma_chunk(doc, key=key, is_encrypted=is_enc))
+            decrypted["documents"] = new_docs
 
     return decrypted

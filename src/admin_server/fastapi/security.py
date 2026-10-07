@@ -180,8 +180,6 @@ class Settings:
         has_priv = bool(os.getenv("JWT_PRIVATE_KEY") or os.getenv("JWT_PRIVATE_KEY_PATH"))
         if not has_priv:
             missing.append("JWT_PRIVATE_KEY или JWT_PRIVATE_KEY_PATH")
-        if not self.ADMIN_TOTP_SECRET:
-            missing.append("ADMIN_TOTP_SECRET (обязательно для двухфакторной аутентификации 2FA)")
         for agent in ["DIGITAL", "BANK", "INVEST", "MAIN"]:
             if not getattr(self, f"AGENT_{agent}_BOOTSTRAP_TOKEN"):
                 missing.append(f"AGENT_{agent}_BOOTSTRAP_TOKEN")
@@ -190,6 +188,11 @@ class Settings:
             missing.append("DATA_ENCRYPTION_KEY (обязательно для шифрования данных при хранении / Data at Rest)")
         if missing:
             raise RuntimeError(f"Отсутствуют обязательные переменные окружения безопасности: {', '.join(missing)}")
+        if not self.ADMIN_TOTP_SECRET:
+            log_info(
+                "Безопасность",
+                "ADMIN_TOTP_SECRET не задан в .env. Сервер ожидает загрузку секрета из зашифрованной базы данных или первичную привязку 2FA (onboarding)."
+            )
 
     def get_bootstrap_token(self, agent_name: str) -> str | None:
         """Возвращает bootstrap-токен для указанного агента."""
@@ -616,7 +619,57 @@ def generate_qr_svg(uri: str) -> str:
         return ""
 
 
+# Временное состояние для первичной настройки 2FA (onboarding)
+_pending_totp_cache: dict[str, tuple[str, float]] = {}
+
+
+def set_pending_totp_secret(username: str, secret: str, ttl_seconds: int = 300, redis_conn=None) -> None:
+    """Сохраняет временный TOTP-секрет для первичной привязки в Redis и локальный кэш."""
+    client = redis_conn or redis_blacklist
+    if client:
+        try:
+            client.setex(f"auth:2fa_pending:{username}", ttl_seconds, secret)
+        except Exception as e:
+            log_warning("2FA", f"Не удалось сохранить временный TOTP-секрет в Redis: {e}")
+    _pending_totp_cache[username] = (secret, time.time() + ttl_seconds)
+
+
+def get_pending_totp_secret(username: str, redis_conn=None) -> str | None:
+    """Извлекает временный TOTP-секрет из Redis или локального кэша, если срок действия не истек."""
+    client = redis_conn or redis_blacklist
+    if client:
+        try:
+            val = client.get(f"auth:2fa_pending:{username}")
+            if val is not None:
+                if isinstance(val, bytes):
+                    return val.decode("utf-8")
+                return str(val)
+        except Exception as e:
+            log_warning("2FA", f"Не удалось получить временный TOTP-секрет из Redis: {e}")
+
+    cached = _pending_totp_cache.get(username)
+    if cached:
+        secret, expires_at = cached
+        if time.time() <= expires_at:
+            return secret
+        else:
+            _pending_totp_cache.pop(username, None)
+    return None
+
+
+def clear_pending_totp_secret(username: str, redis_conn=None) -> None:
+    """Удаляет временный TOTP-секрет после успешной валидации или истечения времени."""
+    client = redis_conn or redis_blacklist
+    if client:
+        try:
+            client.delete(f"auth:2fa_pending:{username}")
+        except Exception:
+            pass
+    _pending_totp_cache.pop(username, None)
+
+
 # --- ШИФРОВАНИЕ ДАННЫХ ПРИ ХРАНЕНИИ (DATA AT REST / AES-256-GCM / MINIO SSE) ---
+
 
 MAGIC_ENCRYPTION_V1 = b"ENC1"
 _EPHEMERAL_DATA_KEY: bytes | None = None
@@ -801,104 +854,29 @@ def get_minio_sse(
 
 
 # --- ХЕЛПЕРЫ КОНВЕРТНОГО ШИФРОВАНИЯ CHROMADB (ENVELOPE ENCRYPTION) ---
-
-def encrypt_chroma_chunk(
-    chunk: str,
-    key: bytes | str | None = None,
-    aad: bytes | str | None = None
-) -> str:
-    """Шифрует чанк документа для ChromaDB с использованием AES-256-GCM."""
-    aad_bytes = aad.encode("utf-8") if isinstance(aad, str) else aad
-    return encrypt_text_at_rest(chunk, key=key, associated_data=aad_bytes)
-
-
-def decrypt_chroma_chunk(
-    val: str,
-    key: bytes | str | None = None,
-    aad: bytes | str | None = None
-) -> str:
-    """Расшифровывает чанк документа из ChromaDB (с fallback для не зашифрованных legacy чанков)."""
-    if not isinstance(val, str) or not val:
-        return val
-    if not val.startswith("RU5D"):
-        return val
-    aad_bytes = aad.encode("utf-8") if isinstance(aad, str) else aad
+# Каноническая реализация находится в src/admin_server/vectors/chroma_envelope.py.
+# Реэкспортируем функции для сохранения обратной совместимости интерфейса security.
+try:
+    from vectors.chroma_envelope import (
+        is_encrypted_chunk,
+        encrypt_chroma_chunk,
+        decrypt_chroma_chunk,
+        encrypt_chroma_metadata,
+        decrypt_chroma_metadata,
+        decrypt_chroma_results,
+    )
+except ImportError:
     try:
-        return decrypt_text_at_rest(val, key=key, associated_data=aad_bytes)
-    except Exception:
-        return val
-
-
-def encrypt_chroma_metadata(
-    metadata: dict[str, Any],
-    key: bytes | str | None = None,
-    preserve_keys: set[str] | None = None
-) -> dict[str, Any]:
-    """Шифрует чувствительные строковые поля в словаре метаданных документа ChromaDB."""
-    preserved = preserve_keys or {"short_name", "system_name", "chunk_index", "is_encrypted", "_encrypted"}
-    encrypted_meta: dict[str, Any] = {}
-    for k, v in metadata.items():
-        key_str = str(k)
-        if key_str in preserved:
-            encrypted_meta[key_str] = v
-        elif isinstance(v, str):
-            encrypted_meta[key_str] = encrypt_chroma_chunk(v, key=key)
-        else:
-            encrypted_meta[key_str] = v
-    encrypted_meta["is_encrypted"] = True
-    return encrypted_meta
-
-
-def decrypt_chroma_metadata(
-    metadata: dict[str, Any],
-    key: bytes | str | None = None
-) -> dict[str, Any]:
-    """Расшифровывает метаданные из ChromaDB."""
-    if not isinstance(metadata, dict):
-        return metadata
-    decrypted_meta: dict[str, Any] = {}
-    for k, v in metadata.items():
-        if isinstance(v, str):
-            decrypted_meta[k] = decrypt_chroma_chunk(v, key=key)
-        else:
-            decrypted_meta[k] = v
-    return decrypted_meta
-
-
-def decrypt_chroma_results(
-    results: dict[str, Any],
-    key: bytes | str | None = None
-) -> dict[str, Any]:
-    """Прозрачно расшифровывает документы и метаданные в ответе от ChromaDB (collection.query или collection.get)."""
-    if not isinstance(results, dict):
-        return results
-
-    decrypted = dict(results)
-    docs = decrypted.get("documents")
-    if docs and isinstance(docs, list):
-        if docs and isinstance(docs[0], list):
-            decrypted["documents"] = [
-                [decrypt_chroma_chunk(doc, key=key) for doc in doc_list]
-                for doc_list in docs
-            ]
-        else:
-            decrypted["documents"] = [
-                decrypt_chroma_chunk(doc, key=key) for doc in docs
-            ]
-
-    metas = decrypted.get("metadatas")
-    if metas and isinstance(metas, list):
-        if metas and isinstance(metas[0], list):
-            decrypted["metadatas"] = [
-                [decrypt_chroma_metadata(meta, key=key) if isinstance(meta, dict) else meta for meta in meta_list]
-                for meta_list in metas
-            ]
-        else:
-            decrypted["metadatas"] = [
-                decrypt_chroma_metadata(meta, key=key) if isinstance(meta, dict) else meta for meta in metas
-            ]
-
-    return decrypted
+        from src.admin_server.vectors.chroma_envelope import (
+            is_encrypted_chunk,
+            encrypt_chroma_chunk,
+            decrypt_chroma_chunk,
+            encrypt_chroma_metadata,
+            decrypt_chroma_metadata,
+            decrypt_chroma_results,
+        )
+    except ImportError:
+        pass
 
 
 def extract_cn_from_subject(subject: str | None) -> str | None:

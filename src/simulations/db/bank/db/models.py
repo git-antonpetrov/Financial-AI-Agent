@@ -10,6 +10,13 @@ def generate_uuid():
 def get_moscow_now():
     return (datetime.now(timezone.utc) + timedelta(hours=3)).replace(tzinfo=None)
 
+def get_moscow_date():
+    return (datetime.now(timezone.utc) + timedelta(hours=3)).date()
+
+def get_moscow_time():
+    return (datetime.now(timezone.utc) + timedelta(hours=3)).time()
+
+
 class Tariff(Base):
     __tablename__ = "tariffs"
     id = Column(String, primary_key=True, default=generate_uuid)
@@ -63,10 +70,8 @@ class Transaction(Base):
     commission = Column(Numeric(12, 2), default=0.00)
     description = Column(String)
     status = Column(String, default="completed")  # Статус: 'completed', 'failed', 'pending'
-    date = Column(Date, default=date.today, index=True)
-    
-    # Использует вызываемый объект для вычисления московского времени при создании транзакции
-    time = Column(Time, default=lambda: (datetime.now(timezone.utc) + timedelta(hours=3)).time()) 
+    date = Column(Date, default=get_moscow_date, index=True)
+    time = Column(Time, default=get_moscow_time)
     
     account = relationship("Account", back_populates="transactions")
 

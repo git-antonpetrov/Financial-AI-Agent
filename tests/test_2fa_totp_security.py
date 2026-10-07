@@ -360,3 +360,69 @@ def test_2fa_pair_endpoint_flow(monkeypatch):
     assert res_pair_recovery.status_code == 200
     assert res_pair_recovery.json()["secret"] == "JBSWY3DPEHPK3PXP"
 
+
+def test_2fa_dynamic_onboarding_clean_instance_flow(monkeypatch):
+    """
+    Проверяет динамический Onboarding 2FA на чистом экземпляре сервера (без ADMIN_TOTP_SECRET в .env):
+    1. На сервере не задан ADMIN_TOTP_SECRET.
+    2. Первичный вызов /api/auth/2fa/pair генерирует новый секрет и сохраняет его в pending.
+    3. Попытка входа с неверным кодом отклоняется (401 Invalid 2FA TOTP code).
+    4. Вход с верным кодом на базе pending-секрета успешен (200 OK) и сохраняет секрет в runtime/settings.
+    5. Повторный логин с кодом проходит штатно.
+    6. Повторный вызов /pair без токена восстановления отклоняется (403 2FA already enrolled).
+    """
+    from server import app
+    client = TestClient(app)
+
+    test_password = "SecureAdminPassword456!"
+    monkeypatch.setattr(settings, "ADMIN_PASSWORD_HASH", get_password_hash(test_password))
+    monkeypatch.setattr(settings, "ADMIN_TOTP_SECRET", "")
+    monkeypatch.setattr(settings, "REQUIRE_2FA", False)
+
+    # 1. Запрос на первичную привязку
+    res_pair = client.post(
+        "/api/auth/2fa/pair",
+        json={"username": "admin", "password": test_password}
+    )
+    assert res_pair.status_code == 200
+    pair_data = res_pair.json()
+    assert pair_data["status"] == "ok"
+    secret = pair_data["secret"]
+    assert len(secret) >= 16
+    assert "<svg" in pair_data["qr_svg"]
+    assert pair_data["is_enrolled"] is False
+
+    # 2. Попытка входа с неверным TOTP кодом
+    res_bad_login = client.post(
+        "/login",
+        data={"username": "admin", "password": test_password, "otp_code": "000000"}
+    )
+    assert res_bad_login.status_code == 401
+    assert "Invalid 2FA TOTP code" in res_bad_login.json()["detail"]
+
+    # 3. Вход с корректным TOTP кодом завершает привязку и авторизует
+    totp = pyotp.TOTP(secret)
+    valid_code = totp.now()
+
+    res_good_login = client.post(
+        "/login",
+        data={"username": "admin", "password": test_password, "otp_code": valid_code}
+    )
+    assert res_good_login.status_code == 200
+    assert "access_token" in res_good_login.json()
+    assert settings.ADMIN_TOTP_SECRET == secret
+
+    # 4. Проверка статуса 2FA - теперь активно и привязано
+    res_status = client.get("/api/auth/2fa/status")
+    assert res_status.status_code == 200
+    assert res_status.json()["enabled"] is True
+    assert res_status.json()["enrolled"] is True
+
+    # 5. Повторный вызов привязки без токена восстановления блокируется (403)
+    res_pair_again = client.post(
+        "/api/auth/2fa/pair",
+        json={"username": "admin", "password": test_password}
+    )
+    assert res_pair_again.status_code == 403
+
+

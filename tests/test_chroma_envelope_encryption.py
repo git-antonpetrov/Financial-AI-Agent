@@ -43,6 +43,7 @@ from vectors.chroma_envelope import (
     encrypt_batch,
     decrypt_chroma_results,
     MAGIC_ENVELOPE_V1,
+    is_encrypted_chunk,
 )
 
 
@@ -93,12 +94,54 @@ def test_legacy_plaintext_chunk_compatibility():
         "Обычный текстовый чанк без шифрования",
         "# Header 1\nSome text here",
         "Short note",
+        "RU5D",
+        "RU5D (Российский университет 5Д)",
+        "RU5D-2026: Регламент о противодействии мошенничеству",
+        "RU5DM_NOT_AN_ENVELOPE",
+        "RU5D" + "A" * 50,
         "",
         None,
     ]
     for chunk in legacy_chunks:
-        # Для строк, не начинающихся с RU5D, функция возвращает исходную строку
         assert decrypt_chroma_chunk(chunk) == chunk  # type: ignore
+
+
+def test_ru5d_plaintext_collision_prevention():
+    """
+    Проверяет, что обычный незашифрованный текст, начинающийся с символов 'RU5D' или 'RU5DM',
+    не определяется ошибочно как зашифрованный пакет ENC1 и не ломает расшифровку.
+    """
+    key = b"7" * 32
+    
+    # 1. Строки, начинающиеся с RU5D, которые НЕ являются зашифрованными пакетами
+    non_envelope_strings = [
+        "RU5D",
+        "RU5DM",
+        "RU5D-001",
+        "RU5D Текстовый заголовок документа",
+        "RU5DM_CONFIG_PARAM = 42",
+        "RU5D" + "A" * 50,  # длина >= 43, но не начинается с RU5DM
+        "RU5DM " + "A" * 40,  # есть пробел, не base64url
+        "RU5DM" + "!@#$%^&*",  # недопустимые символы для base64url
+    ]
+    for text in non_envelope_strings:
+        assert is_encrypted_chunk(text) is False
+        assert decrypt_chroma_chunk(text, key=key) == text
+
+    # 2. Настоящий зашифрованный чанк распознается и расшифровывается корректно
+    original_text = "RU5D: Реальный документ комплаенс-контроля"
+    enc = encrypt_chroma_chunk(original_text, key=key)
+    assert is_encrypted_chunk(enc) is True
+    assert enc.startswith("RU5DM")
+    assert decrypt_chroma_chunk(enc, key=key) == original_text
+
+    # 3. При наличии метаданных с is_encrypted=False текст возвращается без изменений
+    results = {
+        "documents": [["RU5DM_FAKE_BASE64_PAYLOAD_NOT_ENCRYPTED"]],
+        "metadatas": [[{"short_name": "doc", "is_encrypted": False}]],
+    }
+    decrypted = decrypt_chroma_results(results, key=key)
+    assert decrypted["documents"][0][0] == "RU5DM_FAKE_BASE64_PAYLOAD_NOT_ENCRYPTED"
 
 
 def test_encrypt_decrypt_chroma_metadata():

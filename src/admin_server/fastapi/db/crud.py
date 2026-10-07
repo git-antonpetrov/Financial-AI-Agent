@@ -471,3 +471,34 @@ async def list_agent_keys(db: AsyncSession, agent_name: str) -> list[models.Agen
     query = select(models.AgentKey).where(models.AgentKey.agent_id == agent.id).order_by(models.AgentKey.created_at.desc())
     result = await db.execute(query)
     return result.scalars().all()
+
+
+async def get_system_setting(db: AsyncSession, key: str) -> str | None:
+    """Извлекает системную настройку по ключу с прозрачной расшифровкой значения."""
+    query = select(models.SystemSetting).where(models.SystemSetting.key == key)
+    result = await db.execute(query)
+    setting = result.scalars().first()
+    return setting.value if setting else None
+
+
+async def set_system_setting(
+    db: AsyncSession,
+    key: str,
+    value: str,
+    description: str | None = None
+) -> models.SystemSetting:
+    """Сохраняет или обновляет системную настройку с прозрачным шифрованием AES-256-GCM при записи."""
+    query = select(models.SystemSetting).where(models.SystemSetting.key == key)
+    result = await db.execute(query)
+    setting = result.scalars().first()
+    if setting:
+        setting.value = value
+        if description is not None:
+            setting.description = description
+    else:
+        setting = models.SystemSetting(key=key, value=value, description=description)
+        db.add(setting)
+    await db.commit()
+    await db.refresh(setting)
+    return setting
+

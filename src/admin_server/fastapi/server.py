@@ -1,6 +1,5 @@
 import os
 import re
-import io
 import json
 import secrets
 import tempfile
@@ -32,15 +31,13 @@ from security import (
     generate_totp_secret,
     get_totp_uri,
     generate_qr_svg,
+    set_pending_totp_secret,
+    get_pending_totp_secret,
+    clear_pending_totp_secret,
     calculate_key_fingerprint,
     revoke_agent_key_in_redis,
     is_agent_key_revoked_in_redis,
     get_minio_sse,
-    encrypt_data_at_rest,
-    decrypt_data_at_rest,
-    encrypt_text_at_rest,
-    decrypt_text_at_rest,
-    parse_mtls_client_certificate,
     verify_mtls_client_certificate,
     settings,
     oauth2_scheme,
@@ -50,13 +47,11 @@ from security import (
     ROLE_DESCRIPTIONS,
     CurrentUser,
     get_current_user,
-    require_role,
     require_permission,
 )
-from db.database import engine, Base, get_db, validate_database_env
+from db.database import engine, Base, get_db, validate_database_env, async_session
 from db import schemas, crud, audit
 from core.utils.console_logger import log_info, log_error, log_warning, log_success
-from urllib.parse import quote_plus
 
 VALID_AGENTS = {"main", "bank", "invest", "digital"}
 VALID_ACTIONS = {"upsert", "delete"}
@@ -119,7 +114,17 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         log_info("Database", "Database tables created/verified")
-        
+
+    # Загрузка персистентных настроек безопасности из БД (если не заданы через .env)
+    try:
+        async with async_session() as db:
+            persisted_totp = await crud.get_system_setting(db, "ADMIN_TOTP_SECRET")
+            if persisted_totp and not settings.ADMIN_TOTP_SECRET:
+                settings.ADMIN_TOTP_SECRET = persisted_totp
+                log_info("Security", "ADMIN_TOTP_SECRET успешно загружен из зашифрованной базы данных")
+    except Exception as e:
+        log_warning("Security", f"Не удалось загрузить настройки безопасности из БД: {e}")
+
     yield
 
 app = FastAPI(title="Financial MAS - Admin Server", version="1.0.0", lifespan=lifespan)
@@ -262,8 +267,11 @@ async def login(
         raise HTTPException(status_code=400, detail="Incorrect username or password")
 
     # ВТОРОЙ ФАКТОР: Проверка одноразового TOTP-кода (RFC 6238)
-    if settings.is_2fa_enabled():
-        totp_code = (otp_code or x_otp_code or "").strip()
+    totp_code = (otp_code or x_otp_code or "").strip()
+    pending_secret = get_pending_totp_secret(form_data.username, redis_conn=redis_client)
+    is_2fa_required = settings.is_2fa_enabled()
+
+    if is_2fa_required or totp_code:
         if not totp_code:
             log_warning("Auth", f"Login attempt without required 2FA code from IP: {client_ip}")
             await audit.log_audit_event(db, actor=form_data.username, action="AUTH_2FA_REQUIRED", status="WARNING", actor_ip=client_ip)
@@ -274,7 +282,7 @@ async def login(
             )
 
         # Защита от Replay Attack: предотвращение повторного применения одного и того же кода
-        replay_key = f"totp_used:admin:{totp_code}"
+        replay_key = f"totp_used:{form_data.username}:{totp_code}"
         if redis_client:
             try:
                 if redis_client.exists(replay_key):
@@ -290,7 +298,10 @@ async def login(
             except Exception as e:
                 log_warning("Auth", f"Redis TOTP replay check error: {e}")
 
-        if not verify_totp_code(settings.ADMIN_TOTP_SECRET, totp_code):
+        # Целевой секрет для валидации: постоянный ключ сервера либо pending-ключ онбординга
+        target_secret = settings.ADMIN_TOTP_SECRET or pending_secret
+
+        if not target_secret or not verify_totp_code(target_secret, totp_code):
             try:
                 curr = redis_client.incr(failed_key)
                 if curr == 1:
@@ -305,11 +316,34 @@ async def login(
                 headers={"WWW-Authenticate": "Bearer"}
             )
 
+        # Если валидация прошла успешно и это был первичный онбординг (pending_secret):
+        if pending_secret and (not settings.ADMIN_TOTP_SECRET or target_secret == pending_secret):
+            # Персистентное сохранение в зашифрованное хранилище БД (AES-256-GCM)
+            try:
+                await crud.set_system_setting(
+                    db,
+                    key="ADMIN_TOTP_SECRET",
+                    value=pending_secret,
+                    description="Admin TOTP 2FA secret (AES-256-GCM encrypted)"
+                )
+            except Exception as e:
+                log_warning("Auth", f"Не удалось персистентно сохранить 2FA секрет в БД (fallback): {e}")
+            settings.ADMIN_TOTP_SECRET = pending_secret
+            clear_pending_totp_secret(form_data.username, redis_conn=redis_client)
+            await audit.log_audit_event(
+                db,
+                actor=form_data.username,
+                action="AUTH_2FA_ONBOARDED_PERSISTED",
+                status="SUCCESS",
+                actor_ip=client_ip,
+                details="2FA successfully onboarded and persisted to encrypted storage"
+            )
+
         # Фиксируем использование одноразового пароля на 90 секунд в Redis и отмечаем завершение привязки 2FA
         if redis_client:
             try:
                 redis_client.setex(replay_key, 90, "used")
-                redis_client.set("auth:totp_enrolled:admin", "1")
+                redis_client.set(f"auth:totp_enrolled:{form_data.username}", "1")
             except Exception:
                 pass
 
@@ -379,10 +413,21 @@ async def check_totp_enrolled(db: AsyncSession) -> bool:
         except Exception:
             pass
     try:
+        db_secret = await crud.get_system_setting(db, "ADMIN_TOTP_SECRET")
+        if db_secret:
+            if redis_client:
+                try:
+                    redis_client.set("auth:totp_enrolled:admin", "1")
+                except Exception:
+                    pass
+            return True
+    except Exception:
+        pass
+    try:
         from db.models import AuditLog
         from sqlalchemy import select
         res = await db.execute(
-            select(AuditLog.id).where(AuditLog.action == "AUTH_LOGIN_SUCCESS").limit(1)
+            select(AuditLog.id).where(AuditLog.action.in_(["AUTH_LOGIN_SUCCESS", "AUTH_2FA_ONBOARDED_PERSISTED"])).limit(1)
         )
         has_login = res.scalar_one_or_none() is not None
         if has_login and redis_client:
@@ -517,7 +562,16 @@ async def pair_2fa(
         except Exception:
             pass
 
-    secret = settings.ADMIN_TOTP_SECRET or generate_totp_secret()
+    # 1. Если ADMIN_TOTP_SECRET уже настроен (в .env или в БД):
+    #    - Отдаем существующий постоянный секрет сервера (полная обратная совместимость!).
+    # 2. Если секрет еще не настроен (новый инстанс):
+    #    - Генерируем новый 160-битный секрет и сохраняем его в pending до подтверждения кодом.
+    if settings.ADMIN_TOTP_SECRET:
+        secret = settings.ADMIN_TOTP_SECRET
+    else:
+        secret = generate_totp_secret()
+        set_pending_totp_secret(payload.username, secret, ttl_seconds=300, redis_conn=redis_client)
+
     uri = get_totp_uri(secret, username=payload.username)
     qr_svg = generate_qr_svg(uri)
 

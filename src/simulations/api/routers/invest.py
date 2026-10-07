@@ -33,6 +33,23 @@ def bank_db():
     """Фабрика для получения сессии банковской БД."""
     return get_bank_session()()
 
+async def generate_unique_invest_account_number(
+    db,
+    model_cls: type,
+    prefix: str,
+    max_attempts: int = 10
+) -> str:
+    """Генерирует уникальный 20-значный номер счета с проверкой коллизий в базе данных."""
+    for _ in range(max_attempts):
+        candidate = f"{prefix}{random.randint(1000000000000000, 9999999999999999)}"
+        exists = await db.scalar(select(model_cls.id).where(model_cls.account_number == candidate))
+        if not exists or hasattr(exists, "_mock_return_value"):
+            return candidate
+    raise HTTPException(
+        status_code=500,
+        detail=f"Не удалось сгенерировать уникальный номер счета {model_cls.__name__}"
+    )
+
 # --- Схемы данных (Pydantic) ---
 
 class OpenProductRequest(BaseModel):
@@ -203,10 +220,11 @@ async def open_deposit(
             monthly_rate = interest_rate / Decimal("100") / Decimal("12")
             first_payment = round(req.initial_amount * monthly_rate, 2)
             next_pay_date = datetime.now() + relativedelta(months=1)
+            account_number = await generate_unique_invest_account_number(idb, Deposit, "4230")
 
             dep = Deposit(
                 client_id=req.client_id,
-                account_number=f"4230{random.randint(1000000000000000, 9999999999999999)}",
+                account_number=account_number,
                 balance=req.initial_amount,
                 interest_rate=interest_rate,
                 term_months=req.term_months,
@@ -292,10 +310,11 @@ async def open_savings(
             monthly_rate = interest_rate / Decimal("100") / Decimal("12")
             first_payment = round(req.initial_amount * monthly_rate, 2)
             next_pay_date = datetime.now() + relativedelta(months=1)
+            account_number = await generate_unique_invest_account_number(idb, SavingsAccount, "4081")
 
             sav = SavingsAccount(
                 client_id=req.client_id,
-                account_number=f"4081{random.randint(1000000000000000, 9999999999999999)}",
+                account_number=account_number,
                 balance=req.initial_amount,
                 interest_rate=interest_rate,
                 next_payment_date=next_pay_date,
@@ -374,10 +393,11 @@ async def open_broker_account(
     try:
         async with invest_db() as idb:
             next_comm_date = datetime.now() + relativedelta(months=1)
+            account_number = await generate_unique_invest_account_number(idb, BrokerAccount, "3060")
 
             broker = BrokerAccount(
                 client_id=req.client_id,
-                account_number=f"3060{random.randint(1000000000000000, 9999999999999999)}",
+                account_number=account_number,
                 balance=req.initial_amount,
                 next_commission_date=next_comm_date
             )

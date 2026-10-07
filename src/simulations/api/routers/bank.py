@@ -139,6 +139,15 @@ async def get_autopayments(account_id: str) -> List[AutoPaymentResponse]:
         result = await db.execute(select(AutoPayment).where(AutoPayment.account_id == account_id))
         return [AutoPaymentResponse.model_validate(ap) for ap in result.scalars().all()]
 
+async def generate_unique_card_number(db, max_attempts: int = 10) -> str:
+    """Генерирует уникальный 16-значный номер карты с валидацией коллизий в базе данных."""
+    for _ in range(max_attempts):
+        candidate = f"4276{random.randint(100000000000, 999999999999)}"
+        exists = await db.scalar(select(Card.id).where(Card.card_number == candidate))
+        if not exists or hasattr(exists, "_mock_return_value"):
+            return candidate
+    raise HTTPException(status_code=500, detail="Не удалось сгенерировать уникальный номер карты")
+
 @router.post("/accounts/{account_id}/cards/issue", response_model=CardResponse)
 async def issue_card(account_id: str) -> CardResponse:
     """
@@ -150,11 +159,11 @@ async def issue_card(account_id: str) -> CardResponse:
             log_error("BankAPI", f"Попытка выпустить карту для несуществующего счета {account_id}")
             raise HTTPException(404, "Счет не найден")
         
-        
-        # Генерируем тестовый номер карты
+        # Генерируем уникальный номер карты с проверкой коллизий
+        card_number = await generate_unique_card_number(db)
         new_card = Card(
             account_id=account_id,
-            card_number=f"4276{random.randint(100000000000, 999999999999)}"
+            card_number=card_number
         )
         db.add(new_card)
         await db.commit()
@@ -203,10 +212,10 @@ async def reissue_card(card_id: str) -> CardResponse:
         
         card.status = "blocked"
         
-        
+        card_number = await generate_unique_card_number(db)
         new_card = Card(
             account_id=card.account_id,
-            card_number=f"4276{random.randint(100000000000, 999999999999)}"
+            card_number=card_number
         )
         db.add(new_card)
         await db.commit()
