@@ -9,7 +9,7 @@ COPY src/simulations/workers/bank_eod/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Копируем исходный код
-# Мы копируем папку src целиком, так как воркеру нужны модели БД из src/simulations/db/bank
+COPY src/common /app/src/common
 COPY src/simulations /app/src/simulations
 
 # Добавляем корневую директорию в PYTHONPATH

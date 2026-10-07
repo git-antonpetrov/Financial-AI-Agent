@@ -12,12 +12,16 @@ RUN groupadd -g 10001 appuser && \
     useradd -u 10001 -g 10001 -s /sbin/nologin -M -d /app appuser
 
 # Установка Python зависимостей
-COPY fastapi/requirements.txt .
+COPY src/admin_server/fastapi/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Копирование исходного кода с назначением прав
-COPY --chown=appuser:appuser fastapi/ .
-COPY --chown=appuser:appuser core/ core/
+# Копирование общих библиотек и сервисного кода
+COPY --chown=appuser:appuser src/common /app/src/common
+COPY --chown=appuser:appuser src/admin_server/core /app/core
+COPY --chown=appuser:appuser src/admin_server/fastapi /app
+
+# Настройка путей импорта
+ENV PYTHONPATH=/app:/app/src
 
 # Переключение на непривилегированного пользователя
 USER appuser

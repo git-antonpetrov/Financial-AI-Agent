@@ -9,9 +9,13 @@ from minio import Minio
 # pyrefly: ignore [missing-import]
 import redis
 import chromadb
-import litellm
+try:
+    from src.common.logger import log_info, log_success, log_warning, log_error
+    from src.common.llm import default_llm_client, LLMClient
+except ImportError:
+    from common.logger import log_info, log_success, log_warning, log_error
+    from common.llm import default_llm_client, LLMClient
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from core.utils.console_logger import log_info, log_success, log_warning, log_error
 import psycopg2
 from psycopg2.pool import SimpleConnectionPool
 try:
@@ -101,17 +105,10 @@ CHROMA_PORT = int(os.getenv("CHROMA_PORT", "8000"))
 CHROMA_AUTH_TOKEN = os.getenv("CHROMA_AUTH_TOKEN", "")
 
 # Google Vertex AI (через прокси)
-VERTEX_BASE_URL = os.getenv("VERTEX_BASE_URL", "").rstrip('/')
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL_NAME", "gemini-embedding-2")
 
 def get_vertex_api_base(model_name: str) -> str | None:
-    if not VERTEX_BASE_URL:
-        return None
-    clean_model = model_name.replace("vertex_ai/", "")
-    return f"{VERTEX_BASE_URL}/v1/projects/{VERTEX_PROJECT}/locations/{VERTEX_LOCATION}/publishers/google/models/{clean_model}"
-
-VERTEX_PROJECT = os.getenv("VERTEX_PROJECT", "financial-ai-agent-0")
-VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "global")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL_NAME", "gemini-embedding-2")
+    return default_llm_client.get_vertex_api_base(model_name)
 
 # База данных
 DB_HOST = os.getenv("DB_HOST", "postgres-db")
@@ -231,19 +228,12 @@ def mark_document_repealed(short_name: str, agent_name: str, message: str = ""):
 def get_embeddings_google(texts: list[str]) -> list[list[float]]:
     """
     Отправляет батч текстов к Vertex AI (через прокси) для получения эмбеддингов.
-    Использует библиотеку litellm. Выполняет запросы по отдельности во избежание ошибки размерности (1 к 10).
+    Использует централизованный LLMClient с автоматическими повторными попытками при ошибках 429 (Resource Exhausted).
     """
-    embeddings = []
-    for text in texts:
-        response = litellm.embedding(
-            model=EMBEDDING_MODEL,
-            input=[text],
-            api_base=get_vertex_api_base(EMBEDDING_MODEL),
-            vertex_project=VERTEX_PROJECT if VERTEX_PROJECT else None,
-            vertex_location=VERTEX_LOCATION if VERTEX_LOCATION else None
-        )
-        embeddings.append(response.data[0]["embedding"])
-    return embeddings
+    return default_llm_client.get_embeddings_batch(
+        model=EMBEDDING_MODEL,
+        texts=texts
+    )
 
 def extract_metadata_from_markdown(markdown_text: str) -> dict:
     """

@@ -9,6 +9,7 @@ COPY src/simulations/workers/digital_eod/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Копируем исходный код
+COPY src/common /app/src/common
 COPY src/simulations /app/src/simulations
 
 # Добавляем корневую директорию в PYTHONPATH

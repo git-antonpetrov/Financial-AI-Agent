@@ -11,11 +11,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN groupadd -g 10001 appuser && \
     useradd -u 10001 -g 10001 -s /sbin/nologin -M -d /app appuser
 
-COPY vectors/requirements.txt .
+COPY src/admin_server/vectors/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY --chown=appuser:appuser vectors/ .
-COPY --chown=appuser:appuser core/ core/
+# Копирование общих библиотек и воркера
+COPY --chown=appuser:appuser src/common /app/src/common
+COPY --chown=appuser:appuser src/admin_server/core /app/core
+COPY --chown=appuser:appuser src/admin_server/vectors /app
+
+ENV PYTHONPATH=/app:/app/src
 
 USER appuser
 

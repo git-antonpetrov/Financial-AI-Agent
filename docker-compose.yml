@@ -150,8 +150,8 @@ services:
 
   admin-server:
     build:
-      context: ./src/admin_server
-      dockerfile: fastapi/Dockerfile
+      context: .
+      dockerfile: src/admin_server/fastapi/Dockerfile
     container_name: admin-server
     ports:
       - "127.0.0.1:8001:8000"
@@ -201,8 +201,8 @@ services:
     
   vector-worker:
     build:
-      context: ./src/admin_server
-      dockerfile: vectors/Dockerfile
+      context: .
+      dockerfile: src/admin_server/vectors/Dockerfile
     container_name: vector-worker
     environment:
       - REDIS_HOST=redis

@@ -5,7 +5,8 @@ WORKDIR /app
 COPY src/simulations/api/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Копируем весь исходный код проекта (чтобы API имело доступ к src.simulations.db)
+# Копируем общие модули и исходный код проекта
+COPY src/common /app/src/common
 COPY src/simulations /app/src/simulations
 
 ENV PYTHONPATH=/app

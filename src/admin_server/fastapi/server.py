@@ -51,7 +51,12 @@ from security import (
 )
 from db.database import engine, Base, get_db, validate_database_env, async_session
 from db import schemas, crud, audit
-from core.utils.console_logger import log_info, log_error, log_warning, log_success
+try:
+    from src.common.logger import log_info, log_error, log_warning, log_success
+    from src.common.llm import default_llm_client, LLMClient
+except ImportError:
+    from common.logger import log_info, log_error, log_warning, log_success
+    from common.llm import default_llm_client, LLMClient
 
 VALID_AGENTS = {"main", "bank", "invest", "digital"}
 VALID_ACTIONS = {"upsert", "delete"}
@@ -83,18 +88,12 @@ redis_client = redis.Redis(
     socket_connect_timeout=2.0
 )
 
-# --- НАСТРОЙКА LLM (через LiteLLM) ---
-VERTEX_PROJECT = os.getenv("VERTEX_PROJECT")
-VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "global")
-VERTEX_BASE_URL = os.getenv("VERTEX_BASE_URL")
-
-def get_vertex_api_base(model_name: str) -> str | None:
-    if not VERTEX_BASE_URL:
-        return None
-    clean_model = model_name.replace("vertex_ai/", "")
-    return f"{VERTEX_BASE_URL.rstrip('/')}/v1/projects/{VERTEX_PROJECT}/locations/{VERTEX_LOCATION}/publishers/google/models/{clean_model}"
+# --- НАСТРОЙКА LLM (через централизованный LLMClient) ---
 RAG_DATA_MODEL_NAME = os.getenv("RAG_DATA_MODEL_NAME", "vertex_ai/gemini-3.8-flash")
 RAG_DATA_REASONING_EFFORT = os.getenv("RAG_DATA_REASONING_EFFORT", "low")
+
+def get_vertex_api_base(model_name: str) -> str | None:
+    return default_llm_client.get_vertex_api_base(model_name)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -1288,15 +1287,12 @@ async def llm_analyze(
     
     try:
         log_info("LLM", "Starting analyze request")
-        response = await litellm.acompletion(
+        response = await default_llm_client.acompletion(
             model=RAG_DATA_MODEL_NAME,
             messages=[{"role": "user", "content": prompt}],
             response_format=schemas.LLMAnalyzeResponse,
             reasoning_effort=RAG_DATA_REASONING_EFFORT,
             temperature=0.0,
-            api_base=get_vertex_api_base(RAG_DATA_MODEL_NAME),
-            vertex_project=VERTEX_PROJECT,
-            vertex_location=VERTEX_LOCATION
         )
         
         result_text = response.choices[0].message.content
@@ -1335,15 +1331,12 @@ async def llm_find_repealed(
     
     try:
         log_info("LLM", "Starting find_repealed request")
-        response = await litellm.acompletion(
+        response = await default_llm_client.acompletion(
             model=RAG_DATA_MODEL_NAME,
             messages=[{"role": "user", "content": prompt}],
             response_format=schemas.LLMRepealedResponse,
             reasoning_effort=RAG_DATA_REASONING_EFFORT,
             temperature=0.0,
-            api_base=get_vertex_api_base(RAG_DATA_MODEL_NAME),
-            vertex_project=VERTEX_PROJECT,
-            vertex_location=VERTEX_LOCATION
         )
         
         result_text = response.choices[0].message.content
