@@ -22,6 +22,7 @@ class Document(Base):
     agent_name = Column(String, index=True, nullable=False)
     status = Column(String, nullable=False)
     message = Column(Text, nullable=True)
+    raw_content = Column(EncryptedText, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 

@@ -27,7 +27,8 @@ async def create_document(
     status: str,
     system_name: str = None,
     short_name: str = None,
-    message: str = None
+    message: str = None,
+    raw_content: str = None
 ) -> models.Document:
     """Создает новую запись о документе в базе данных."""
     doc = models.Document(
@@ -37,7 +38,8 @@ async def create_document(
         status=status,
         system_name=system_name,
         short_name=short_name,
-        message=message
+        message=message,
+        raw_content=raw_content
     )
     db.add(doc)
     await db.commit()

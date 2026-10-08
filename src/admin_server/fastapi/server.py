@@ -159,8 +159,33 @@ app.add_middleware(
         "x-client-cert-issuer",
         "x-client-cert-serial",
         "x-client-cert-fingerprint",
+        "x-signature",
+        "x-nonce",
+        "x-timestamp",
+        "x-cert",
+        "x-admin-signature",
+        "x-server-signature",
+        "x-server-key-fingerprint",
+        "x-ack-nonce",
+    ],
+    expose_headers=[
+        "x-admin-signature",
+        "x-server-signature",
+        "x-server-key-fingerprint",
+        "x-ack-nonce",
     ],
 )
+
+# Подключение роутера защищенного приема документов RAG (Zero-Trust PKI)
+try:
+    from routers.rag_documents import router as rag_router
+except ImportError:
+    try:
+        from .routers.rag_documents import router as rag_router
+    except ImportError:
+        from src.admin_server.fastapi.routers.rag_documents import router as rag_router
+
+app.include_router(rag_router)
 
 @app.get("/health")
 async def health_check():
