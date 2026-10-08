@@ -308,25 +308,33 @@ class BankCertificateAuthority:
 
 
     @classmethod
-    def load_from_central_pki(cls) -> Optional["BankCertificateAuthority"]:
+    def load_from_central_pki(
+        cls,
+        ca_cert_path: Optional[str] = None,
+        bank_cert_path: Optional[str] = None,
+        bank_key_path: Optional[str] = None,
+    ) -> Optional["BankCertificateAuthority"]:
         """
         Загружает доверенный сертификат Root CA (/certs/ca.crt), 
         сертификат банка (/certs/bank.crt) и приватный ключ банка (/certs/bank.key),
         выпущенные центральным Root CA.
         """
         ca_candidates = [
+            ca_cert_path or "",
             os.getenv("ROOT_CA_CERT_PATH", ""),
             "/certs/ca.crt",
             "./certs/ca.crt",
             str(Path(__file__).resolve().parents[4] / "certs" / "ca.crt"),
         ]
         bank_cert_candidates = [
+            bank_cert_path or "",
             os.getenv("BANK_CERT_PATH", ""),
             "/certs/bank.crt",
             "./certs/bank.crt",
             str(Path(__file__).resolve().parents[4] / "certs" / "bank.crt"),
         ]
         bank_key_candidates = [
+            bank_key_path or "",
             os.getenv("BANK_KEY_PATH", ""),
             "/certs/bank.key",
             "./certs/bank.key",

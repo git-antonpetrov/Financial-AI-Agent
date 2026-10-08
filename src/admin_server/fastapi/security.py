@@ -941,7 +941,8 @@ def revoke_certificate_in_redis(
     serial: str | None = None,
     fingerprint: str | None = None,
     ttl_seconds: int = 86400 * 365,
-    redis_conn=None
+    redis_conn=None,
+    reason: str | None = None,
 ) -> None:
     """
     Помещает серийный номер и/или отпечаток сертификата в черный список отзыва (CRL / Blacklist).

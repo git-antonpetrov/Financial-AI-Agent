@@ -30,21 +30,30 @@ class X509ChainValidator:
 
     def __init__(
         self,
-        root_ca_cert: Optional[Union[x509.Certificate, str]] = None,
+        root_ca_cert: Optional[Union[x509.Certificate, str, Path]] = None,
         crl_pem: Optional[str] = None,
         max_drift_seconds: int = 300,
+        ca_cert_path: Optional[Union[str, Path]] = None,
     ):
         self.max_drift_seconds = max_drift_seconds
         self.crl_pem = crl_pem
-        self.root_ca_cert = self._resolve_root_ca(root_ca_cert)
+        self.root_ca_cert = self._resolve_root_ca(root_ca_cert or ca_cert_path)
 
     def _resolve_root_ca(
         self,
-        cert_or_pem: Optional[Union[x509.Certificate, str]]
+        cert_or_pem: Optional[Union[x509.Certificate, str, Path]]
     ) -> Optional[x509.Certificate]:
         """Разрешает сертификат Root CA из переданного аргумента, файлов или синглтона банка."""
         if isinstance(cert_or_pem, x509.Certificate):
             return cert_or_pem
+
+        if isinstance(cert_or_pem, (str, Path)):
+            p = Path(cert_or_pem)
+            if p.exists() and p.is_file():
+                try:
+                    return x509.load_pem_x509_certificate(p.read_bytes(), default_backend())
+                except Exception:
+                    pass
 
         if isinstance(cert_or_pem, str) and "BEGIN CERTIFICATE" in cert_or_pem:
             try:
@@ -76,14 +85,18 @@ class X509ChainValidator:
 
         return None
 
-    def parse_certificate(self, cert_input: Union[x509.Certificate, str, bytes]) -> Optional[x509.Certificate]:
-        """Парсит X.509 сертификат из объекта, PEM-строки или байт."""
+    def parse_certificate(self, cert_input: Union[x509.Certificate, str, bytes, Path]) -> Optional[x509.Certificate]:
+        """Парсит X.509 сертификат из объекта, пути к файлу, PEM-строки или байт."""
         if isinstance(cert_input, x509.Certificate):
             return cert_input
 
         try:
-            if isinstance(cert_input, str):
-                cert_bytes = cert_input.strip().encode("utf-8")
+            if isinstance(cert_input, (str, Path)):
+                p = Path(cert_input)
+                if p.exists() and p.is_file():
+                    cert_bytes = p.read_bytes()
+                else:
+                    cert_bytes = str(cert_input).strip().encode("utf-8")
             else:
                 cert_bytes = bytes(cert_input).strip()
 
