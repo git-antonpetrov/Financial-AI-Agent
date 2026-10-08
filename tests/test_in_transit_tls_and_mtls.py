@@ -321,48 +321,43 @@ def test_in_transit_ssl_settings():
     assert hasattr(database, "POSTGRES_SSLMODE")
 
 
-def test_internal_certs_generation_script_exists():
+def test_zero_trust_pki_dockerfile_and_bootstrap_exist():
     """
-    Проверяет наличие скрипта генерации внутренних сертификатов и его базовую структуру.
+    Проверяет наличие Dockerfile.ca и скрипта bootstrap_pki для изолированной генерации сертификатов в контейнере.
     """
-    script_path = Path(__file__).parent.parent / "scripts" / "generate_internal_certs.sh"
-    assert script_path.exists(), "scripts/generate_internal_certs.sh не найден"
-
-    content = script_path.read_text(encoding="utf-8")
-    assert "#!/usr/bin/env bash" in content
-    assert "openssl genrsa" in content
-    assert "openssl req" in content
-    assert "openssl x509" in content
-    assert "ca.crt" in content
-    assert "server.crt" in content
-    assert "client.crt" in content
-    assert "postgres.crt" in content
-    assert "redis.crt" in content
-    assert "minio.crt" in content
+    root_dir = Path(__file__).parent.parent
+    dockerfile_ca = root_dir / "src" / "pki" / "Dockerfile.ca"
+    bootstrap_py = root_dir / "src" / "pki" / "bootstrap_pki.py"
+    assert dockerfile_ca.exists(), "src/pki/Dockerfile.ca должен существовать"
+    assert bootstrap_py.exists(), "src/pki/bootstrap_pki.py должен существовать"
 
 
-def test_python_internal_certs_generator(tmp_path):
+def test_pki_bootstrap_in_transit_certificates(tmp_path):
     """
-    Проверяет корректность работы кроссплатформенного генератора generate_internal_certs.py.
+    Проверяет корректность генерации полного комплекта сертификатов сервисов
+    через центральный Zero-Trust PKI bootstrap engine (src.pki.bootstrap_pki).
     """
-    from scripts.generate_internal_certs import generate_all_certs
-    res = generate_all_certs(certs_dir=tmp_path)
-    
-    assert (tmp_path / "ca.crt").exists()
-    assert (tmp_path / "ca.key").exists()
-    assert (tmp_path / "server.crt").exists()
-    assert (tmp_path / "server.key").exists()
-    assert (tmp_path / "client.crt").exists()
-    assert (tmp_path / "client.key").exists()
-    assert (tmp_path / "client.p12").exists()
-    assert (tmp_path / "postgres.crt").exists()
-    assert (tmp_path / "postgres.key").exists()
-    assert (tmp_path / "redis.crt").exists()
-    assert (tmp_path / "redis.key").exists()
-    assert (tmp_path / "minio.crt").exists()
-    assert (tmp_path / "minio.key").exists()
-    assert (tmp_path / "minio" / "public.crt").exists()
-    assert (tmp_path / "minio" / "private.key").exists()
-    assert (tmp_path / "minio" / "CAs" / "ca.crt").exists()
-    assert len(res["ca_fingerprint"]) == 64
+    from src.pki.bootstrap_pki import bootstrap_pki
+    data_dir = tmp_path / "ca_data"
+    export_dir = tmp_path / "shared_certs"
+    manifest = bootstrap_pki(data_dir=data_dir, export_dir=export_dir, passphrase="test-passphrase-2026")
+
+    assert (export_dir / "ca.crt").exists()
+    assert (export_dir / "server.crt").exists()
+    assert (export_dir / "server.key").exists()
+    assert (export_dir / "client.crt").exists()
+    assert (export_dir / "client.key").exists()
+    assert (export_dir / "postgres.crt").exists()
+    assert (export_dir / "postgres.key").exists()
+    assert (export_dir / "redis.crt").exists()
+    assert (export_dir / "redis.key").exists()
+    assert (export_dir / "minio.crt").exists()
+    assert (export_dir / "minio.key").exists()
+    assert (export_dir / "minio" / "public.crt").exists()
+    assert (export_dir / "minio" / "private.key").exists()
+    assert (export_dir / "minio" / "CAs" / "ca.crt").exists()
+    assert "root_ca" in manifest
+    assert "postgres" in manifest["services"]
+    assert "redis" in manifest["services"]
+    assert "minio" in manifest["services"]
 

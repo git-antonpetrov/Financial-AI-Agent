@@ -131,11 +131,10 @@ def _resolve_client_public_key(x_cert: Optional[str]) -> Optional[str]:
             pass
         return cert_val
 
-    # Проверка смонтированного сертификата клиента
+    # Проверка смонтированного сертификата клиента (внутри контейнера)
     cert_paths = [
         os.getenv("ADMIN_CLIENT_CERT_PATH", ""),
         "/certs/admin_client.crt",
-        "./certs/admin_client.crt",
     ]
     for p in cert_paths:
         if p and os.path.exists(p):

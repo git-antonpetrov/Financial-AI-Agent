@@ -323,22 +323,16 @@ class BankCertificateAuthority:
             ca_cert_path or "",
             os.getenv("ROOT_CA_CERT_PATH", ""),
             "/certs/ca.crt",
-            "./certs/ca.crt",
-            str(Path(__file__).resolve().parents[4] / "certs" / "ca.crt"),
         ]
         bank_cert_candidates = [
             bank_cert_path or "",
             os.getenv("BANK_CERT_PATH", ""),
             "/certs/bank.crt",
-            "./certs/bank.crt",
-            str(Path(__file__).resolve().parents[4] / "certs" / "bank.crt"),
         ]
         bank_key_candidates = [
             bank_key_path or "",
             os.getenv("BANK_KEY_PATH", ""),
             "/certs/bank.key",
-            "./certs/bank.key",
-            str(Path(__file__).resolve().parents[4] / "certs" / "bank.key"),
         ]
 
         def safe_file_exists(p: str) -> bool:
@@ -391,8 +385,8 @@ def get_bank_ca() -> BankCertificateAuthority:
     Возвращает синглтон-экземпляр Bank CA.
     Приоритет:
     1. Централизованный Zero-Trust Root CA (/certs/ca.crt + bank.crt + bank.key);
-    2. Локальная директория сертификатов BANK_CERTS_DIR;
-    3. Автоматическая генерация в памяти (dev/test fallback).
+    2. Локальная директория сертификатов BANK_CERTS_DIR (если явно задана);
+    3. Автоматическая генерация в оперативной памяти (dev/test fallback без сохранения на диск).
     """
     global _BANK_CA_INSTANCE
     if _BANK_CA_INSTANCE is not None:
@@ -401,21 +395,15 @@ def get_bank_ca() -> BankCertificateAuthority:
     # 1. Попытка загрузки из центрального контура PKI
     instance = BankCertificateAuthority.load_from_central_pki()
 
-    # 2. Попытка загрузки из локальной директории
+    # 2. Попытка загрузки из локальной директории (если явно задана)
     if instance is None:
         certs_dir = os.getenv("BANK_CERTS_DIR")
-        if not certs_dir:
-            certs_dir = str(Path(__file__).resolve().parent / "certs")
-        instance = BankCertificateAuthority.load_from_dir(certs_dir)
+        if certs_dir:
+            instance = BankCertificateAuthority.load_from_dir(certs_dir)
 
-    # 3. Эфемерная генерация в памяти
+    # 3. Эфемерная генерация в оперативной памяти (без сохранения приватных ключей на диск)
     if instance is None:
         instance = BankCertificateAuthority.create_in_memory()
-        try:
-            certs_dir = os.getenv("BANK_CERTS_DIR") or str(Path(__file__).resolve().parent / "certs")
-            instance.save_to_dir(certs_dir)
-        except Exception:
-            pass
 
     _BANK_CA_INSTANCE = instance
     return _BANK_CA_INSTANCE

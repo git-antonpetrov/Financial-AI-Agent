@@ -12,7 +12,7 @@ services:
       - FORCE_REGENERATE=${FORCE_REGENERATE:-false}
     volumes:
       - root_ca_data:/data/ca
-      - ./certs:/shared_certs
+      - certs_data:/shared_certs
     networks:
       - pki_net
     restart: "no"
@@ -30,7 +30,7 @@ services:
       - "127.0.0.1:15432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./certs:/certs:ro
+      - certs_data:/certs:ro
     networks:
       - data_net
       - simulation_net
@@ -46,7 +46,7 @@ services:
       - "127.0.0.1:5050:80"
     volumes:
       - pgadmin_data:/var/lib/pgadmin
-      - ./certs:/certs:ro
+      - certs_data:/certs:ro
     depends_on:
       - postgres-db
     networks:
@@ -70,7 +70,7 @@ services:
       - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
       - SSL_CERT_FILE=/certs/ca.crt
     volumes:
-      - ./certs:/certs:ro
+      - certs_data:/certs:ro
     env_file:
       - .env
     networks:
@@ -89,7 +89,7 @@ services:
       - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
       - SSL_CERT_FILE=/certs/ca.crt
     volumes:
-      - ./certs:/certs:ro
+      - certs_data:/certs:ro
     env_file:
       - .env
     networks:
@@ -109,7 +109,7 @@ services:
       - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
       - SSL_CERT_FILE=/certs/ca.crt
     volumes:
-      - ./certs:/certs:ro
+      - certs_data:/certs:ro
     env_file:
       - .env
     networks:
@@ -130,7 +130,7 @@ services:
       - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
       - SSL_CERT_FILE=/certs/ca.crt
     volumes:
-      - ./certs:/certs:ro
+      - certs_data:/certs:ro
     env_file:
       - .env
     networks:
@@ -153,7 +153,7 @@ services:
       - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
       - SSL_CERT_FILE=/certs/ca.crt
     volumes:
-      - ./certs:/certs:ro
+      - certs_data:/certs:ro
     env_file:
       - .env
     networks:
@@ -172,8 +172,8 @@ services:
       - "127.0.0.1:9001:9001"
     volumes:
       - minio_data:/data
-      - ./certs/minio:/root/.minio/certs:ro
-    command: server /data --console-address ":9001"
+      - certs_data:/certs:ro
+    command: server /data --certs-dir /certs/minio --console-address ":9001"
     networks:
       - data_net
     restart: unless-stopped
@@ -194,7 +194,7 @@ services:
       - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
-      - ./certs:/certs:ro
+      - certs_data:/certs:ro
     networks:
       - backend_net
     restart: unless-stopped
@@ -225,7 +225,7 @@ services:
       - REDIS_SSL_CA_CERTS=/certs/ca.crt
     volumes:
       - ./data:/app/data:ro
-      - ./certs:/certs:ro
+      - certs_data:/certs:ro
     env_file:
       - .env
     networks:
@@ -281,7 +281,7 @@ services:
       - REDIS_SSL_CA_CERTS=/certs/ca.crt
     volumes:
       - ./data:/app/data:ro
-      - ./certs:/certs:ro
+      - certs_data:/certs:ro
     env_file:
       - .env
     networks:
@@ -308,7 +308,7 @@ services:
       - ADMIN_LOCAL_DOMAIN=${ADMIN_LOCAL_DOMAIN:-admin.fin-ai-agent.local}
     volumes:
       - ./src/caddy/Caddyfile:/etc/caddy/Caddyfile
-      - ./certs:/etc/caddy/certs:ro
+      - certs_data:/etc/caddy/certs:ro
       - caddy_data:/data
       - caddy_config:/config
     networks:
@@ -344,6 +344,7 @@ networks:
 
 volumes:
   root_ca_data:
+  certs_data:
   postgres_data:
   pgadmin_data:
   caddy_data:

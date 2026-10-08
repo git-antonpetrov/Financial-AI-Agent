@@ -17,8 +17,11 @@ import subprocess
 from pathlib import Path
 
 
-def generate_rsa_keypair(priv_path: str, pub_path: str):
-    """Генерирует пару RSA-2048 через библиотеку cryptography (или openssl fallback)."""
+def generate_rsa_keypair(priv_path: str | None = None, pub_path: str | None = None) -> tuple[str, str]:
+    """
+    Генерирует пару RSA-2048 в оперативной памяти через библиотеку cryptography.
+    Опционально сохраняет в файлы, если пути переданы явно (для совместимости).
+    """
     try:
         from cryptography.hazmat.primitives.asymmetric import rsa
         from cryptography.hazmat.primitives import serialization
@@ -34,31 +37,47 @@ def generate_rsa_keypair(priv_path: str, pub_path: str):
             format=serialization.PublicFormat.SubjectPublicKeyInfo,
         )
 
-        with open(priv_path, "wb") as f:
-            f.write(priv_bytes)
-        with open(pub_path, "wb") as f:
-            f.write(pub_bytes)
-    except Exception:
-        subprocess.run(
-            ["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048", "-out", priv_path],
-            check=True,
-        )
-        subprocess.run(
-            ["openssl", "rsa", "-in", priv_path, "-pubout", "-out", pub_path],
-            check=True,
-        )
+        if priv_path and pub_path:
+            os.makedirs(os.path.dirname(os.path.abspath(priv_path)), exist_ok=True)
+            os.makedirs(os.path.dirname(os.path.abspath(pub_path)), exist_ok=True)
+            with open(priv_path, "wb") as f:
+                f.write(priv_bytes)
+            with open(pub_path, "wb") as f:
+                f.write(pub_bytes)
+            try:
+                os.chmod(priv_path, 0o600)
+                os.chmod(pub_path, 0o644)
+            except Exception:
+                pass
 
-    try:
-        os.chmod(priv_path, 0o600)
-        os.chmod(pub_path, 0o644)
+        priv_pem = priv_bytes.decode("utf-8").strip().replace("\n", "\\n")
+        pub_pem = pub_bytes.decode("utf-8").strip().replace("\n", "\\n")
+        return priv_pem, pub_pem
     except Exception:
-        pass
+        if priv_path and pub_path:
+            os.makedirs(os.path.dirname(os.path.abspath(priv_path)), exist_ok=True)
+            os.makedirs(os.path.dirname(os.path.abspath(pub_path)), exist_ok=True)
+            subprocess.run(
+                ["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048", "-out", priv_path],
+                check=True,
+            )
+            subprocess.run(
+                ["openssl", "rsa", "-in", priv_path, "-pubout", "-out", pub_path],
+                check=True,
+            )
+            with open(priv_path, "r", encoding="utf-8") as f:
+                priv_pem = f.read().strip().replace("\n", "\\n")
+            with open(pub_path, "r", encoding="utf-8") as f:
+                pub_pem = f.read().strip().replace("\n", "\\n")
+            return priv_pem, pub_pem
+        raise RuntimeError("Ошибка генерации RSA ключей подписи JWT в памяти.")
 
 
 def setup_vds(project_dir: str | None = None) -> dict[str, str]:
     """
     Выполняет инициализацию параметров безопасности в .env:
     - Создает .env из .env.example, если файл отсутствует;
+    - Генерирует асимметричную пару RSA-2048 для подписи JWT в памяти и сохраняет в .env;
     - Заменяет плейсхолдеры на криптографически стойкие секреты;
     - Устанавливает флаги Zero-Trust TLS;
     - Возвращает словарь с ключевыми сгенерированными учетными данными.
@@ -67,22 +86,6 @@ def setup_vds(project_dir: str | None = None) -> dict[str, str]:
         project_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     else:
         project_dir = os.path.abspath(project_dir)
-
-    certs_dir = os.path.join(project_dir, "certs")
-    os.makedirs(certs_dir, exist_ok=True)
-
-    jwt_priv_path = os.path.join(certs_dir, "jwt_private.pem")
-    jwt_pub_path = os.path.join(certs_dir, "jwt_public.pem")
-
-    # 1. Генерация RSA ключей подписи JWT, если отсутствуют
-    if not os.path.exists(jwt_priv_path) or not os.path.exists(jwt_pub_path):
-        generate_rsa_keypair(jwt_priv_path, jwt_pub_path)
-
-    with open(jwt_priv_path, "r", encoding="utf-8") as f:
-        priv_pem = f.read().strip().replace("\n", "\\n")
-
-    with open(jwt_pub_path, "r", encoding="utf-8") as f:
-        pub_pem = f.read().strip().replace("\n", "\\n")
 
     env_path = os.path.join(project_dir, ".env")
     example_path = os.path.join(project_dir, ".env.example")
@@ -104,6 +107,16 @@ def setup_vds(project_dir: str | None = None) -> dict[str, str]:
             env_dict[k.strip()] = v.strip().strip('"').strip("'")
 
     generated_info: dict[str, str] = {}
+
+    # 1. Генерация RSA пары для асимметричной подписи JWT в оперативной памяти (RS256)
+    cur_jwt_priv = env_dict.get("JWT_PRIVATE_KEY", "").strip()
+    cur_jwt_pub = env_dict.get("JWT_PUBLIC_KEY", "").strip()
+    if not cur_jwt_priv or not cur_jwt_pub or "BEGIN RSA PRIVATE KEY" in cur_jwt_priv:
+        priv_pem, pub_pem = generate_rsa_keypair()
+        generated_info["JWT_KEY_ALGORITHM"] = "RS256 (2048-bit in-memory)"
+    else:
+        priv_pem = cur_jwt_priv.strip('"')
+        pub_pem = cur_jwt_pub.strip('"')
 
     # 2. Мастер-ключ шифрования Data at Rest (AES-256-GCM)
     cur_enc_key = env_dict.get("DATA_ENCRYPTION_KEY", "")

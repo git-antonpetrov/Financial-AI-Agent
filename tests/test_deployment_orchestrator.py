@@ -10,7 +10,8 @@ from scripts.deploy_vds_prod import find_docker_compose_cmd, run_deployment
 def test_setup_vds_security_env_creates_and_hardens_env(tmp_path):
     """
     Проверяет корректность инициализации переменных окружения и ключей:
-    - генерация RSA пары (jwt_private.pem, jwt_public.pem);
+    - генерация RSA пары для JWT подписи в оперативной памяти и запись в .env;
+    - отсутствие утечки незашифрованных ключей в certs/ на хосте;
     - замена плейсхолдеров на криптостойкие секреты;
     - принудительное включение параметров сквозного Zero-Trust шифрования.
     """
@@ -24,20 +25,17 @@ def test_setup_vds_security_env_creates_and_hardens_env(tmp_path):
     info = setup_vds(str(tmp_path))
     assert isinstance(info, dict)
 
-    # 1. Проверяем генерацию RSA ключей
-    jwt_priv = tmp_path / "certs" / "jwt_private.pem"
-    jwt_pub = tmp_path / "certs" / "jwt_public.pem"
-    assert jwt_priv.exists(), "jwt_private.pem должен быть создан"
-    assert jwt_pub.exists(), "jwt_public.pem должен быть создан"
-    assert "-----BEGIN " in jwt_priv.read_text(encoding="utf-8")
-    assert "-----BEGIN PUBLIC KEY-----" in jwt_pub.read_text(encoding="utf-8")
-
-    # 2. Проверяем содержимое созданного .env
+    # 1. Проверяем генерацию RSA ключей в .env и отсутствие создания certs/ на хосте
+    assert not (tmp_path / "certs").exists(), "Папка certs/ не должна создаваться на хосте (Strict Only-Docker Mode)"
     env_file = tmp_path / ".env"
     assert env_file.exists(), ".env должен быть создан"
     env_content = env_file.read_text(encoding="utf-8")
+    assert "JWT_PRIVATE_KEY=" in env_content
+    assert "JWT_PUBLIC_KEY=" in env_content
+    assert "-----BEGIN PRIVATE KEY-----" in env_content
+    assert "-----BEGIN PUBLIC KEY-----" in env_content
 
-    # Zero-Trust TLS параметры
+    # 2. Zero-Trust TLS параметры
     assert "POSTGRES_SSLMODE=require" in env_content
     assert "REDIS_SSL=true" in env_content
     assert "MINIO_SECURE=true" in env_content
@@ -56,8 +54,8 @@ def test_deploy_vds_prod_bash_script_structure():
     """
     Проверяет целостность и синтаксическую структуру scripts/deploy_vds_prod.sh:
     - шебанг bash и безопасный режим -euo pipefail;
-    - вызов шагов: setup_vds_security_env.py, generate_internal_certs, docker compose up -d;
-    - проверка сертификатов и контроль healthcheck.
+    - вызов шагов: setup_vds_security_env.py, docker compose up -d;
+    - валидация томов Zero-Trust PKI и контроль healthcheck.
     """
     root_dir = Path(__file__).resolve().parent.parent
     sh_path = root_dir / "scripts" / "deploy_vds_prod.sh"
@@ -67,22 +65,17 @@ def test_deploy_vds_prod_bash_script_structure():
     assert "#!/usr/bin/env bash" in content
     assert "set -euo pipefail" in content
     assert "setup_vds_security_env.py" in content
-    assert "generate_internal_certs.py" in content
     assert "up -d --build" in content
     assert "DOCKER_COMPOSE_CMD" in content
-    assert "certs/ca.crt" in content
-    assert "certs/postgres.crt" in content
-    assert "certs/redis.crt" in content
-    assert "certs/minio.crt" in content
-    assert "certs/client.p12" in content
-    assert "chmod 600" in content
+    assert "certs_data" in content
     assert "admin-server" in content
+    assert "caddy-ingress" in content
 
 
 def test_deploy_vds_prod_python_orchestrator_no_docker(tmp_path, monkeypatch):
     """
     Проверяет выполнение сценария развертывания через Python скрипт deploy_vds_prod.py
-    в режиме --no-docker без запуска контейнеров.
+    в режиме --no-docker без запуска контейнеров (Strict Only-Docker Mode).
     """
     root_dir = Path(__file__).resolve().parent.parent
     example_env = root_dir / ".env.example"
@@ -94,14 +87,9 @@ def test_deploy_vds_prod_python_orchestrator_no_docker(tmp_path, monkeypatch):
     # Запуск этапов подготовки без вызова Docker
     deploy_mod.run_deployment(skip_build=True, no_docker=True)
 
-    # Проверяем, что .env и все сертификаты успешно созданы
+    # Проверяем, что .env успешно создан и настроен, а папка certs на хосте отсутствует
     assert (tmp_path / ".env").exists()
-    certs_dir = tmp_path / "certs"
-    assert (certs_dir / "ca.crt").exists()
-    assert (certs_dir / "postgres.crt").exists()
-    assert (certs_dir / "redis.crt").exists()
-    assert (certs_dir / "minio.crt").exists()
-    assert (certs_dir / "client.p12").exists()
+    assert not (tmp_path / "certs").exists(), "Хостовая папка certs/ не должна существовать"
 
 
 def test_find_docker_compose_cmd():

@@ -21,7 +21,6 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from setup_vds_security_env import setup_vds
-from generate_internal_certs import generate_all_certs
 
 
 def find_docker_compose_cmd() -> list[str]:
@@ -44,28 +43,21 @@ def find_docker_compose_cmd() -> list[str]:
 
 def run_deployment(skip_build: bool = False, no_docker: bool = False, timeout: int = 90):
     print("=" * 78)
-    print("    FINANCIAL AI AGENT — ZERO-TRUST PRODUCTION DEPLOYMENT")
+    print("    FINANCIAL AI AGENT — ZERO-TRUST PRODUCTION DEPLOYMENT (ONLY-DOCKER)")
     print("=" * 78)
 
     # 1. Настройка переменных безопасности
-    print("\n[1/4] Инициализация переменных окружения безопасности (.env)...")
+    print("\n[1/3] Инициализация переменных окружения безопасности (.env)...")
     sec_info = setup_vds(str(PROJECT_ROOT))
     print(f"      Инициализировано параметров: {len(sec_info)}")
-
-    # 2. Выпуск внутренних сертификатов PKI
-    print("\n[2/4] Выпуск внутренних TLS-сертификатов (PostgreSQL, Redis, MinIO, Caddy, mTLS)...")
-    certs_dir = PROJECT_ROOT / "certs"
-    cert_map = generate_all_certs(certs_dir)
-    print(f"      Выпущено сертификатов и ключей: {len(cert_map)}")
-    for name, path in cert_map.items():
-        print(f"      - {name}: {Path(path).name}")
+    print("      RSA-2048 ключи JWT и параметры шифрования инициализированы в памяти/.env.")
 
     if no_docker:
-        print("\n[+] Флаг --no-docker установлен. Настройка конфигурации завершена без запуска контейнеров.")
+        print("\n[+] Флаг --no-docker установлен. Конфигурация .env готова, запуск Docker пропущен.")
         return
 
-    # 3. Проверка Docker и Docker Compose
-    print("\n[3/4] Проверка Docker и запуск контейнеров...")
+    # 2. Проверка Docker и запуск контейнеров (Strict Only-Docker Mode)
+    print("\n[2/3] Проверка Docker и запуск контейнеров (Zero-Trust PKI в томе certs_data)...")
     compose_cmd = find_docker_compose_cmd()
     if not compose_cmd:
         print("[-] Ошибка: Docker Compose не найден на данной машине.")
@@ -92,8 +84,8 @@ def run_deployment(skip_build: bool = False, no_docker: bool = False, timeout: i
         print("[-] Ошибка при выполнении docker compose up.")
         sys.exit(1)
 
-    # 4. Проверка состояния сервисов
-    print("\n[4/4] Ожидание готовности сервисов...")
+    # 3. Проверка состояния сервисов
+    print("\n[3/3] Ожидание готовности сервисов...")
     start_time = time.time()
     critical_services = [
         "postgres-db",
@@ -134,13 +126,14 @@ def run_deployment(skip_build: bool = False, no_docker: bool = False, timeout: i
         print(f"[!] Предупреждение: таймаут ожидания готовности сервисов ({timeout}с). Проверьте 'docker compose logs'.")
 
     print("\n" + "=" * 78)
-    print("    БОЕВОЕ РАЗВЕРТЫВАНИЕ ЗАВЕРШЕНО (ZERO-TRUST TLS ACTIVE)")
+    print("    БОЕВОЕ РАЗВЕРТЫВАНИЕ ЗАВЕРШЕНО (ZERO-TRUST ONLY-DOCKER ACTIVE)")
     print("=" * 78)
     print("  • Public Ingress (Caddy):       https://admin.fin-ai-agent.ru")
-    print("  • Client mTLS Bundle:           certs/client.p12 (пароль: financial-agent-mtls)")
-    print("  • PostgreSQL In-Transit TLS:    активен (ssl=on, certs/postgres.crt)")
-    print("  • Redis In-Transit TLS:         активен (tls-port 6379, certs/redis.crt)")
-    print("  • MinIO In-Transit TLS:         активен (https://127.0.0.1:9001)")
+    print("  • Zero-Trust PKI & Root CA:     Изолированы в Docker томах certs_data и root_ca_data")
+    print("  • Хостовая файловая система:    Чистая (0 незашифрованных ключей на диске хоста)")
+    print("  • PostgreSQL In-Transit TLS:    активен (ssl=on, certs_data:/certs:ro)")
+    print("  • Redis In-Transit TLS:         активен (tls-port 6379, certs_data:/certs:ro)")
+    print("  • MinIO In-Transit TLS & SSE:   активен (HTTPS, certs_data:/certs:ro)")
     print("  • Настройка 2FA TOTP:           python scripts/setup_2fa.py")
     print("=" * 78)
 

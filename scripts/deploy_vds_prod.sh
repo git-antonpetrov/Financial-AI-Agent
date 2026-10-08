@@ -117,67 +117,19 @@ chmod 600 "${PROJECT_ROOT}/.env" 2>/dev/null || true
 log_success "Файл .env инициализирован и защищен (права 0600)."
 
 # ------------------------------------------------------------------------------
-# 3. ВЫПУСК ВНУТРЕННИХ СЕРТИФИКАТОВ PKI (IN-TRANSIT TLS & MTLS)
+# 3. ВАЛИДАЦИЯ КОНФИГУРАЦИИ DOCKER COMPOSE И ТОМОВ ZERO-TRUST PKI
 # ------------------------------------------------------------------------------
-log_info "Этап 3/5: Выпуск внутренних сертификатов TLS для Zero-Trust среды..."
-
-mkdir -p "${PROJECT_ROOT}/certs"
-chmod 700 "${PROJECT_ROOT}/certs"
-
-# Запуск кроссплатформенного генератора сертификатов на Python (с fallback на bash)
-if $PYTHON_CMD "${SCRIPT_DIR}/generate_internal_certs.py"; then
-    log_success "Сертификаты успешно сгенерированы через Python cryptography."
-else
-    log_warn "Python генератор вернул ошибку, запуск bash-генератора с OpenSSL..."
-    bash "${SCRIPT_DIR}/generate_internal_certs.sh"
-fi
-
-# Проверка наличия обязательных сертификатов
-REQUIRED_CERTS=(
-    "certs/ca.crt"
-    "certs/ca.key"
-    "certs/server.crt"
-    "certs/server.key"
-    "certs/postgres.crt"
-    "certs/postgres.key"
-    "certs/redis.crt"
-    "certs/redis.key"
-    "certs/minio.crt"
-    "certs/minio.key"
-    "certs/minio/public.crt"
-    "certs/minio/private.key"
-    "certs/minio/CAs/ca.crt"
-    "certs/client.p12"
-)
-
-for cert_file in "${REQUIRED_CERTS[@]}"; do
-    if [[ ! -f "${PROJECT_ROOT}/${cert_file}" ]]; then
-        log_error "Критический сертификат/ключ не найден: ${cert_file}"
-        exit 1
-    fi
-done
-
-# Установка безопасных POSIX-прав
-chmod 600 "${PROJECT_ROOT}"/certs/*.key 2>/dev/null || true
-chmod 600 "${PROJECT_ROOT}"/certs/minio/private.key 2>/dev/null || true
-chmod 644 "${PROJECT_ROOT}"/certs/*.crt 2>/dev/null || true
-chmod 644 "${PROJECT_ROOT}"/certs/minio/public.crt 2>/dev/null || true
-chmod 644 "${PROJECT_ROOT}"/certs/minio/CAs/ca.crt 2>/dev/null || true
-chmod 600 "${PROJECT_ROOT}"/certs/client.p12 2>/dev/null || true
-
-log_success "Полный набор TLS-сертификатов проверен и защищен."
-
-# ------------------------------------------------------------------------------
-# 4. ВАЛИДАЦИЯ КОНФИГУРАЦИИ DOCKER COMPOSE И ЗАПУСК КОНТЕЙНЕРОВ
-# ------------------------------------------------------------------------------
-log_info "Этап 4/5: Валидация конфигурации Docker Compose и запуск стека..."
+log_info "Этап 3/4: Валидация конфигурации Docker Compose и томов Zero-Trust PKI..."
 
 # Проверка синтаксиса и подстановки переменных в docker-compose.yml
 $DOCKER_COMPOSE_CMD config -q
 log_success "Конфигурация docker-compose.yml валидна."
+log_info "Сертификаты PKI будут автоматически выпущены контейнером root-ca в изолированный том certs_data."
 
-# Сборка и запуск контейнеров в фоне (исключая seeder, защищенный профилем seed)
-log_info "Запуск контейнеров со сквозным TLS шифрованием..."
+# ------------------------------------------------------------------------------
+# 4. ЗАПУСК КОНТЕЙНЕРОВ В STRICT ONLY-DOCKER MODE
+# ------------------------------------------------------------------------------
+log_info "Этап 4/4: Сборка и запуск контейнеров со сквозным TLS шифрованием..."
 $DOCKER_COMPOSE_CMD up -d --build --remove-orphans
 
 log_success "Контейнеры запущены в изолированных Zero-Trust сетях."
@@ -252,10 +204,12 @@ echo -e "  • S3 Объектное хранилище (MinIO):        ${COLOR_
 echo -e "  • База данных pgAdmin4:                 ${COLOR_CYAN}http://127.0.0.1:5050${COLOR_RESET}"
 echo ""
 echo -e "Статус безопасности контура:"
+echo -e "  [✓] Zero-Trust Root CA & PKI:            Изолирован в Docker Volume certs_data / root_ca_data"
+echo -e "  [✓] Хостовая файловая система:           Чистая (0 незашифрованных ключей на хосте)"
 echo -e "  [✓] Zero-Trust In-Transit Encryption:   PostgreSQL (TLS require), Redis (TLS port 6379), MinIO (HTTPS)"
 echo -e "  [✓] Data at Rest Protection:            AES-256-GCM Envelope Encryption (ChromaDB + Master Key)"
-echo -e "  [✓] Асимметричный JWT (RS256):          Закрытый ключ 2048-bit в certs/jwt_private.pem"
-echo -e "  [✓] Взаимная TLS-аутентификация (mTLS):  Клиентский бандл готов: certs/client.p12 (пароль: financial-agent-mtls)"
+echo -e "  [✓] Асимметричный JWT (RS256):          Ключ 2048-bit в оперативной памяти / .env"
+echo -e "  [✓] Взаимная TLS-аутентификация (mTLS):  Caddy проверяет сертификаты клиентов по доверенному CA"
 echo ""
 echo -e "Следующие рекомендуемые действия:"
 echo -e "  1. Настройте двухфакторную аутентификацию (2FA TOTP):"

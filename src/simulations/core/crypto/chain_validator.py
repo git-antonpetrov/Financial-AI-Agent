@@ -63,12 +63,10 @@ class X509ChainValidator:
                 except (OSError, ValueError):
                     pass
 
-        # Поиск ca.crt на диске
+        # Поиск ca.crt на диске (в контейнере или по переменной окружения)
         ca_paths = [
             os.getenv("ROOT_CA_CERT_PATH", ""),
             "/certs/ca.crt",
-            "./certs/ca.crt",
-            str(Path(__file__).resolve().parents[4] / "certs" / "ca.crt"),
         ]
         for p in ca_paths:
             if p and len(p) < 1024 and "\n" not in p:

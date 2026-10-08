@@ -52,7 +52,7 @@ def test_docker_compose_zero_trust_in_transit_encryption():
     pg = services["postgres-db"]
     assert "-c ssl=on" in pg.get("command", "")
     assert "-c ssl_cert_file=/certs/postgres.crt" in pg.get("command", "")
-    assert "./certs:/certs:ro" in pg.get("volumes", [])
+    assert "certs_data:/certs:ro" in pg.get("volumes", [])
 
     # 2. Redis
     redis_svc = services["redis"]
@@ -60,16 +60,17 @@ def test_docker_compose_zero_trust_in_transit_encryption():
     assert "--tls-port 6379" in redis_cmd
     assert "--port 0" in redis_cmd
     assert "--tls-cert-file /certs/redis.crt" in redis_cmd
-    assert "./certs:/certs:ro" in redis_svc.get("volumes", [])
+    assert "certs_data:/certs:ro" in redis_svc.get("volumes", [])
 
     # 3. MinIO
     minio_svc = services["minio"]
-    assert "./certs/minio:/root/.minio/certs:ro" in minio_svc.get("volumes", [])
+    assert "certs_data:/certs:ro" in minio_svc.get("volumes", [])
+    assert "--certs-dir /certs/minio" in minio_svc.get("command", "")
 
     # 4. Клиентские сервисы
     for s_name in ["admin-server", "vector-worker", "simulation-api", "bank-worker", "invest-worker", "digital-worker"]:
         svc = services[s_name]
-        assert "./certs:/certs:ro" in svc.get("volumes", []), f"{s_name} должен монтировать ./certs:/certs:ro"
+        assert "certs_data:/certs:ro" in svc.get("volumes", []), f"{s_name} должен монтировать certs_data:/certs:ro"
 
 
 def test_docker_compose_root_ca_service_and_pki_network():
@@ -77,7 +78,7 @@ def test_docker_compose_root_ca_service_and_pki_network():
     Проверяет сервис root-ca в docker-compose.yml:
     - Сборка на базе src/pki/Dockerfile.ca;
     - Изоляция в подсети pki_net;
-    - Монтирование тома root_ca_data:/data/ca и ./certs:/shared_certs;
+    - Монтирование тома root_ca_data:/data/ca и certs_data:/shared_certs;
     - restart: 'no' (разовая инициализация при bootstrap).
     """
     compose_path = Path(__file__).parent.parent / "docker-compose.yml"
@@ -95,7 +96,8 @@ def test_docker_compose_root_ca_service_and_pki_network():
 
     vols = ca_svc.get("volumes", [])
     assert "root_ca_data:/data/ca" in vols
-    assert "./certs:/shared_certs" in vols
+    assert "certs_data:/shared_certs" in vols
+    assert "certs_data" in compose_data.get("volumes", {})
 
 
 def test_docker_compose_five_isolated_networks():

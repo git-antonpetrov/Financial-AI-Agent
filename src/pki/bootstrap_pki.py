@@ -250,15 +250,8 @@ def bootstrap_pki(
 
 
 if __name__ == "__main__":
-    import datetime
-
     default_data = os.getenv("ROOT_CA_DATA_DIR", "/data/ca")
     default_export = os.getenv("SHARED_CERTS_DIR", "/shared_certs")
-
-    # Локальный фоллбек для запуска вне Docker
-    if not Path(default_data).exists() and Path("./certs").exists():
-        default_data = "./certs/root_ca_data"
-        default_export = "./certs"
 
     force_flag = os.getenv("FORCE_REGENERATE", "false").lower() in ("true", "1")
     bootstrap_pki(default_data, default_export, force=force_flag)
