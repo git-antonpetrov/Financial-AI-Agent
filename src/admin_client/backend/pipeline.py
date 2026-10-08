@@ -1,9 +1,10 @@
 import os
 import hashlib
+import json
 import requests
 import re
 import yaml
-from typing import Callable, Any
+from typing import Callable, Any, Optional
 try:
     from src.common.logger import log_info, log_error, log_warning
 except ImportError:
@@ -15,6 +16,15 @@ try:
 except ImportError:
     from core.utils.pdf_converter import convert_to_pdf
     from core.utils.content_ai import ContentCaptureRecognizer
+
+try:
+    from src.admin_client.backend.core.crypto import ZeroTrustClientSigner
+except ImportError:
+    try:
+        from core.crypto import ZeroTrustClientSigner
+    except ImportError:
+        ZeroTrustClientSigner = None
+
 import threading
 
 _ACTIVE_MD5_LOCK = threading.Lock()
@@ -23,22 +33,90 @@ _ACTIVE_MD5S = set()
 class DocumentPipeline:
     """
     Выполняет полный жизненный цикл обработки документов перед отправкой на сервер.
-    Пайплайн разбит на последовательные логические этапы.
+    Пайплайн разбит на последовательные логические этапы с поддержкой Zero-Trust mTLS и цифровой подписи.
     """
 
-    def __init__(self, server_url: str, admin_token: str, contentai_username: str = "", contentai_password: str = "", contentai_api_uri: str = ""):
+    def __init__(
+        self,
+        server_url: str,
+        admin_token: str,
+        contentai_username: str = "",
+        contentai_password: str = "",
+        contentai_api_uri: str = "",
+        ca_cert_path: Optional[str] = None,
+        client_cert_path: Optional[str] = None,
+        client_key_path: Optional[str] = None,
+        signer: Optional[Any] = None,
+        use_zero_trust: bool = True
+    ):
         """
-        Инициализирует экземпляр пайплайна с параметрами подключения к серверу и Content AI.
+        Инициализирует экземпляр пайплайна с параметрами подключения к серверу, Content AI и mTLS.
         
         Args:
             server_url (str): Базовый URL сервера (например, https://api.my-vds.com)
             admin_token (str): JWT токен администратора для авторизации запросов
+            ca_cert_path (Optional[str]): Путь к доверенному Root CA сертификату (ca.crt)
+            client_cert_path (Optional[str]): Путь к клиентскому mTLS сертификату (admin_client.crt)
+            client_key_path (Optional[str]): Путь к приватному ключу клиента (admin_client.key)
+            signer (Optional[ZeroTrustClientSigner]): Экземпляр клиента цифровой подписи
+            use_zero_trust (bool): Использовать защищенный эндпоинт /api/v1/rag/documents с цифровой подписью
         """
         self.server_url = server_url.rstrip('/')
         self.headers = {"Authorization": f"Bearer {admin_token}"}
         self.contentai_username = contentai_username
         self.contentai_password = contentai_password
         self.contentai_api_uri = contentai_api_uri
+        self.use_zero_trust = use_zero_trust
+
+        # Zero-Trust mTLS & PKI конфигурация
+        self.ca_cert_path = ca_cert_path or os.getenv("CA_CERT_PATH")
+        if not self.ca_cert_path or not os.path.exists(self.ca_cert_path):
+            for default_ca in ["./certs/ca.crt", "/certs/ca.crt", "certs/ca.crt"]:
+                if os.path.exists(default_ca):
+                    self.ca_cert_path = default_ca
+                    break
+
+        self.client_cert_path = client_cert_path or os.getenv("ADMIN_CLIENT_CERT_PATH")
+        if not self.client_cert_path or not os.path.exists(self.client_cert_path):
+            for default_cert in ["./certs/admin_client.crt", "/certs/admin_client.crt", "certs/admin_client.crt"]:
+                if os.path.exists(default_cert):
+                    self.client_cert_path = default_cert
+                    break
+
+        self.client_key_path = client_key_path or os.getenv("ADMIN_CLIENT_KEY_PATH")
+        if not self.client_key_path or not os.path.exists(self.client_key_path):
+            for default_key in ["./certs/admin_client.key", "/certs/admin_client.key", "certs/admin_client.key"]:
+                if os.path.exists(default_key):
+                    self.client_key_path = default_key
+                    break
+
+        # Настройка защищенной сессии requests с mTLS
+        self.session = requests.Session()
+        if self.ca_cert_path and os.path.exists(self.ca_cert_path):
+            self.session.verify = self.ca_cert_path
+        if (
+            self.client_cert_path
+            and self.client_key_path
+            and os.path.exists(self.client_cert_path)
+            and os.path.exists(self.client_key_path)
+        ):
+            self.session.cert = (self.client_cert_path, self.client_key_path)
+
+        # Инициализация ZeroTrustClientSigner
+        if signer is not None:
+            self.signer = signer
+        elif ZeroTrustClientSigner is not None:
+            try:
+                self.signer = ZeroTrustClientSigner(
+                    cert_path=self.client_cert_path,
+                    key_path=self.client_key_path,
+                    ca_cert_path=self.ca_cert_path
+                )
+            except Exception as e:
+                log_warning("Pipeline", f"Не удалось инициализировать ZeroTrustClientSigner: {e}")
+                self.signer = None
+        else:
+            self.signer = None
         
         # Функция обратного вызова для отправки прогресса во фронтенд (React)
         # Если она не задана, по умолчанию ничего не делает.
@@ -143,7 +221,7 @@ class DocumentPipeline:
             
             # Берем первые ~15000 символов, чтобы не превысить лимит токенов (хватит для понимания сути документа)
             analyze_url = f"{self.server_url}/api/llm/analyze"
-            analyze_resp = requests.post(
+            analyze_resp = self.session.post(
                 analyze_url,
                 headers=self.headers,
                 json={"text": recognized_text[:15000]},
@@ -180,7 +258,7 @@ class DocumentPipeline:
                 "agent_name": agent_name
             }
             
-            date_resp = requests.post(date_url, headers=self.headers, json=date_payload, timeout=(5, 120))
+            date_resp = self.session.post(date_url, headers=self.headers, json=date_payload, timeout=(5, 120))
             date_resp.raise_for_status()
             
             if date_resp.json().get("status") == "old_version":
@@ -203,7 +281,7 @@ class DocumentPipeline:
             if repealed_paragraphs:
                 log_info("Pipeline", f"Найдено подозрительных абзацев: {len(repealed_paragraphs)}. Отправляем в LLM...")
                 repeal_url = f"{self.server_url}/api/llm/find_repealed"
-                repeal_resp = requests.post(
+                repeal_resp = self.session.post(
                     repeal_url,
                     headers=self.headers,
                     json={"snippets": repealed_paragraphs},
@@ -236,19 +314,48 @@ class DocumentPipeline:
             if not safe_system_name:
                 safe_system_name = f"doc_{file_hash[:8]}"
 
-            upsert_url = f"{self.server_url}/api/upload/{agent_name}/upsert"
-            upsert_data = {
-                "file_hash": file_hash,
-                "system_name": system_name,
-                "short_name": short_name
-            }
-            upsert_files = {
-                "file": (f"{safe_system_name}.md", markdown_content.encode('utf-8'), "text/markdown")
-            }
-            
-            log_info("Pipeline", "Вызов ручки /upsert...")
-            upsert_resp = requests.post(upsert_url, headers=self.headers, data=upsert_data, files=upsert_files, timeout=(5, 120))
-            upsert_resp.raise_for_status()
+            # Приоритетный путь Zero-Trust с цифровой подписью документа
+            zero_trust_used = False
+            ack_receipt = None
+            if self.use_zero_trust and self.signer:
+                try:
+                    log_info("Pipeline", "Отправка документа через Zero-Trust RAG эндпоинт /api/v1/rag/documents...")
+                    ack_receipt = self.submit_zero_trust_document(
+                        document_title=str(system_name),
+                        content=markdown_content,
+                        collection_name=f"knowledge-{agent_name}",
+                        metadata={
+                            "source": "admin_workstation",
+                            "agent_name": agent_name,
+                            "short_name": str(short_name),
+                            "file_hash": file_hash,
+                            "filename": filename
+                        }
+                    )
+                    zero_trust_used = True
+                    log_info("Pipeline", f"Документ успешно передан в RAG через Zero-Trust (receipt_id={ack_receipt.get('receipt_id')})")
+                except requests.exceptions.HTTPError as he:
+                    if he.response is not None and he.response.status_code == 404:
+                        log_warning("Pipeline", "Эндпоинт /api/v1/rag/documents недоступен (404), используем fallback /upsert")
+                    else:
+                        raise he
+                except Exception as zte:
+                    log_warning("Pipeline", f"Предупреждение Zero-Trust отправки: {zte}, откат к /upsert...")
+
+            if not zero_trust_used:
+                upsert_url = f"{self.server_url}/api/upload/{agent_name}/upsert"
+                upsert_data = {
+                    "file_hash": file_hash,
+                    "system_name": system_name,
+                    "short_name": short_name
+                }
+                upsert_files = {
+                    "file": (f"{safe_system_name}.md", markdown_content.encode('utf-8'), "text/markdown")
+                }
+                
+                log_info("Pipeline", "Вызов ручки /upsert...")
+                upsert_resp = self.session.post(upsert_url, headers=self.headers, data=upsert_data, files=upsert_files, timeout=(5, 120))
+                upsert_resp.raise_for_status()
 
             # ==========================================
             # ШАГ 8: ОТПРАВКА СПИСКА УСТАРЕВШИХ АКТОВ
@@ -269,7 +376,7 @@ class DocumentPipeline:
                 }
                 
                 log_info("Pipeline", "Вызов ручки /delete...")
-                delete_resp = requests.post(delete_url, headers=self.headers, data=delete_data, files=delete_files, timeout=(5, 120))
+                delete_resp = self.session.post(delete_url, headers=self.headers, data=delete_data, files=delete_files, timeout=(5, 120))
                 delete_resp.raise_for_status()
 
             # Успешное завершение всего пайплайна для этого файла!
@@ -283,7 +390,9 @@ class DocumentPipeline:
                 "system_name": system_name, 
                 "short_name": short_name,
                 "repealed_docs": repealed_short_names,
-                "text_length": len(recognized_text)
+                "text_length": len(recognized_text),
+                "zero_trust": zero_trust_used,
+                "receipt": ack_receipt
             }
 
         except requests.exceptions.RequestException as e:
@@ -311,6 +420,55 @@ class DocumentPipeline:
                     os.remove(working_file_path)
                 except Exception as ex:
                     log_warning("Pipeline", f"Не удалось удалить временный файл {working_file_path}: {ex}")
+
+    def submit_zero_trust_document(
+        self,
+        document_title: str,
+        content: str,
+        collection_name: str = "financial_kb",
+        metadata: Optional[dict[str, Any]] = None
+    ) -> dict[str, Any]:
+        """
+        Отправляет документ в защищенный эндпоинт RAG (POST /api/v1/rag/documents)
+        с цифровой подписью X-Signature, Nonce, Timestamp и валидацией серверной квитанции AckReceipt.
+        """
+        if not self.signer:
+            raise RuntimeError("ZeroTrustClientSigner не инициализирован")
+
+        payload = {
+            "document_title": document_title,
+            "collection_name": collection_name,
+            "content": content,
+            "metadata": metadata or {}
+        }
+        body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+        # Получаем защитные заголовки Zero-Trust
+        zt_headers = self.signer.create_rag_request_headers(body_bytes)
+        combined_headers = {
+            **self.headers,
+            **zt_headers,
+            "Content-Type": "application/json"
+        }
+
+        url = f"{self.server_url}/api/v1/rag/documents"
+        resp = self.session.post(url, data=body_bytes, headers=combined_headers, timeout=(5, 120))
+        resp.raise_for_status()
+
+        resp_data = resp.json()
+
+        # Валидация подписи сервера в квитанции
+        server_sig = resp_data.get("signature") or resp.headers.get("X-Admin-Signature", "")
+        receipt_verified = False
+        if server_sig:
+            receipt_verified = self.signer.verify_server_receipt(resp_data, server_sig)
+            if not receipt_verified:
+                log_warning("Pipeline", f"Предупреждение: подпись квитанции сервера {resp_data.get('receipt_id')} не подтверждена")
+            else:
+                log_info("Pipeline", f"Квитанция сервера AckReceipt подтверждена криптографически: receipt_id={resp_data.get('receipt_id')}")
+
+        resp_data["receipt_verified"] = receipt_verified
+        return resp_data
 
     def _calculate_md5(self, file_path: str) -> str:
         """
@@ -340,8 +498,8 @@ class DocumentPipeline:
             "agent_name": agent_name
         }
         
-        # Отправляем JSON и заголовки с токеном
-        response = requests.post(url, headers=self.headers, json=payload, timeout=(5, 120))
+        # Отправляем JSON и заголовки с токеном через защищенную mTLS-сессию
+        response = self.session.post(url, headers=self.headers, json=payload, timeout=(5, 120))
         
         # Если статус не 200 (например, 401 Unauthorized или 500 Internal Server Error) — выбрасываем исключение
         response.raise_for_status() 

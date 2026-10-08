@@ -25,6 +25,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from pipeline import DocumentPipeline
 
+try:
+    from src.admin_client.backend.core.crypto import HardwareSigningBridge, ZeroTrustClientSigner
+except ImportError:
+    try:
+        from core.crypto import HardwareSigningBridge, ZeroTrustClientSigner
+    except ImportError:
+        HardwareSigningBridge = None
+        ZeroTrustClientSigner = None
+
 # Очереди в памяти для SSE-ответов и время их создания
 job_queues = {}
 job_statuses = {}
@@ -133,7 +142,21 @@ try:
 except Exception:
     pass
 
-def run_pipeline(job_id: str, file_path: str, agent_name: str, server_url: str, admin_token: str, contentai_username: str, contentai_password: str, contentai_api_uri: str, loop: asyncio.AbstractEventLoop):
+def run_pipeline(
+    job_id: str,
+    file_path: str,
+    agent_name: str,
+    server_url: str,
+    admin_token: str,
+    contentai_username: str,
+    contentai_password: str,
+    contentai_api_uri: str,
+    loop: asyncio.AbstractEventLoop,
+    ca_cert_path: str = "",
+    client_cert_path: str = "",
+    client_key_path: str = "",
+    use_zero_trust: bool = True
+):
     """Запускает процесс обработки файла в отдельном рабочем потоке и передает события прогресса в очередь."""
     def progress_callback(filename, status, message):
         event = {
@@ -145,7 +168,17 @@ def run_pipeline(job_id: str, file_path: str, agent_name: str, server_url: str, 
             loop.call_soon_threadsafe(job_queues[job_id].put_nowait, event)
     
     try:
-        pipeline = DocumentPipeline(server_url=server_url, admin_token=admin_token, contentai_username=contentai_username, contentai_password=contentai_password, contentai_api_uri=contentai_api_uri)
+        pipeline = DocumentPipeline(
+            server_url=server_url,
+            admin_token=admin_token,
+            contentai_username=contentai_username,
+            contentai_password=contentai_password,
+            contentai_api_uri=contentai_api_uri,
+            ca_cert_path=ca_cert_path or None,
+            client_cert_path=client_cert_path or None,
+            client_key_path=client_key_path or None,
+            use_zero_trust=use_zero_trust
+        )
         pipeline.set_progress_callback(progress_callback)
         
         result = pipeline.process_file(file_path, agent_name)
@@ -221,6 +254,10 @@ async def process_document(
     contentai_username: str = Form(""),
     contentai_password: str = Form(""),
     contentai_api_uri: str = Form(""),
+    ca_cert_path: str = Form(""),
+    client_cert_path: str = Form(""),
+    client_key_path: str = Form(""),
+    use_zero_trust: bool = Form(True),
     file: UploadFile = File(...)
 ):
     """Принимает файл и параметры запуска, валидирует входные данные и ставит задачу обработки в очередь."""
@@ -274,10 +311,38 @@ async def process_document(
         contentai_username,
         contentai_password,
         contentai_api_uri,
-        loop
+        loop,
+        ca_cert_path,
+        client_cert_path,
+        client_key_path,
+        use_zero_trust
     )
     
     return {"job_id": job_id, "filename": file.filename}
+
+@app.get("/api/local/security/status")
+async def get_security_status():
+    """Возвращает статус аппаратной безопасности (TPM 2.0 / Windows Hello) и mTLS сертификатов."""
+    tpm_available = False
+    if HardwareSigningBridge:
+        tpm_available = HardwareSigningBridge.is_tpm_available()
+
+    cert_mounted = False
+    signer_fp = "none"
+    if ZeroTrustClientSigner:
+        try:
+            signer = ZeroTrustClientSigner()
+            signer_fp = signer.get_key_fingerprint()
+            cert_mounted = bool(signer.get_certificate_pem())
+        except Exception:
+            pass
+
+    return {
+        "hardware_tpm_available": tpm_available,
+        "platform": sys.platform,
+        "zero_trust_ready": cert_mounted or tpm_available,
+        "client_key_fingerprint": signer_fp
+    }
 
 @app.get("/api/local/progress/{job_id}", response_class=EventSourceResponse)
 async def get_progress(job_id: str):
