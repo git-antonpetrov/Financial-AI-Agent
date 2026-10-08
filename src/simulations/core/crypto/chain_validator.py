@@ -47,19 +47,21 @@ class X509ChainValidator:
         if isinstance(cert_or_pem, x509.Certificate):
             return cert_or_pem
 
-        if isinstance(cert_or_pem, (str, Path)):
-            p = Path(cert_or_pem)
-            if p.exists() and p.is_file():
-                try:
-                    return x509.load_pem_x509_certificate(p.read_bytes(), default_backend())
-                except Exception:
-                    pass
-
         if isinstance(cert_or_pem, str) and "BEGIN CERTIFICATE" in cert_or_pem:
             try:
                 return x509.load_pem_x509_certificate(cert_or_pem.encode("utf-8"), default_backend())
             except Exception:
                 pass
+
+        if isinstance(cert_or_pem, (str, Path)):
+            cert_str = str(cert_or_pem).strip()
+            if len(cert_str) < 1024 and "\n" not in cert_str:
+                try:
+                    p = Path(cert_or_pem)
+                    if p.exists() and p.is_file():
+                        return x509.load_pem_x509_certificate(p.read_bytes(), default_backend())
+                except (OSError, ValueError):
+                    pass
 
         # Поиск ca.crt на диске
         ca_paths = [
@@ -69,10 +71,11 @@ class X509ChainValidator:
             str(Path(__file__).resolve().parents[4] / "certs" / "ca.crt"),
         ]
         for p in ca_paths:
-            if p and Path(p).exists():
+            if p and len(p) < 1024 and "\n" not in p:
                 try:
-                    return x509.load_pem_x509_certificate(Path(p).read_bytes(), default_backend())
-                except Exception:
+                    if Path(p).exists() and Path(p).is_file():
+                        return x509.load_pem_x509_certificate(Path(p).read_bytes(), default_backend())
+                except (OSError, ValueError):
                     pass
 
         # Использование Root CA из Bank CA
@@ -91,22 +94,45 @@ class X509ChainValidator:
             return cert_input
 
         try:
-            if isinstance(cert_input, (str, Path)):
-                p = Path(cert_input)
-                if p.exists() and p.is_file():
-                    cert_bytes = p.read_bytes()
-                else:
-                    cert_bytes = str(cert_input).strip().encode("utf-8")
-            else:
-                cert_bytes = bytes(cert_input).strip()
+            # 1. Если это PEM-строка с заголовком
+            if isinstance(cert_input, str) and "BEGIN CERTIFICATE" in cert_input:
+                return x509.load_pem_x509_certificate(cert_input.strip().encode("utf-8"), default_backend())
 
-            if b"BEGIN CERTIFICATE" in cert_bytes:
-                return x509.load_pem_x509_certificate(cert_bytes, default_backend())
-            else:
-                return x509.load_der_x509_certificate(cert_bytes, default_backend())
+            # 2. Если это байты
+            if isinstance(cert_input, (bytes, bytearray)):
+                cert_bytes = bytes(cert_input).strip()
+                if b"BEGIN CERTIFICATE" in cert_bytes:
+                    return x509.load_pem_x509_certificate(cert_bytes, default_backend())
+                else:
+                    return x509.load_der_x509_certificate(cert_bytes, default_backend())
+
+            # 3. Если передан Path или короткая строка пути к файлу (без переносов строк)
+            if isinstance(cert_input, (str, Path)):
+                cert_str = str(cert_input).strip()
+                if len(cert_str) < 1024 and "\n" not in cert_str:
+                    try:
+                        p = Path(cert_input)
+                        if p.exists() and p.is_file():
+                            file_bytes = p.read_bytes().strip()
+                            if b"BEGIN CERTIFICATE" in file_bytes:
+                                return x509.load_pem_x509_certificate(file_bytes, default_backend())
+                            else:
+                                return x509.load_der_x509_certificate(file_bytes, default_backend())
+                    except (OSError, ValueError):
+                        pass
+
+                # Резервная попытка парсинга строки
+                cert_bytes = cert_str.encode("utf-8")
+                if b"BEGIN CERTIFICATE" in cert_bytes:
+                    return x509.load_pem_x509_certificate(cert_bytes, default_backend())
+                else:
+                    return x509.load_der_x509_certificate(cert_bytes, default_backend())
+
         except Exception as e:
             log_warning("ChainValidator", f"Ошибка парсинга X.509 сертификата: {e}")
             return None
+
+        return None
 
     def validate_certificate_lifetime(
         self,

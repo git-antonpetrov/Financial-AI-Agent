@@ -341,9 +341,17 @@ class BankCertificateAuthority:
             str(Path(__file__).resolve().parents[4] / "certs" / "bank.key"),
         ]
 
-        ca_file = next((Path(p) for p in ca_candidates if p and Path(p).exists()), None)
-        bank_cert_file = next((Path(p) for p in bank_cert_candidates if p and Path(p).exists()), None)
-        bank_key_file = next((Path(p) for p in bank_key_candidates if p and Path(p).exists()), None)
+        def safe_file_exists(p: str) -> bool:
+            if not p or len(p) >= 1024 or "\n" in p:
+                return False
+            try:
+                return Path(p).exists() and Path(p).is_file()
+            except (OSError, ValueError):
+                return False
+
+        ca_file = next((Path(p) for p in ca_candidates if safe_file_exists(p)), None)
+        bank_cert_file = next((Path(p) for p in bank_cert_candidates if safe_file_exists(p)), None)
+        bank_key_file = next((Path(p) for p in bank_key_candidates if safe_file_exists(p)), None)
 
         if not (ca_file and bank_cert_file and bank_key_file):
             return None
