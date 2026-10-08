@@ -71,3 +71,101 @@ def test_docker_compose_zero_trust_in_transit_encryption():
         svc = services[s_name]
         assert "./certs:/certs:ro" in svc.get("volumes", []), f"{s_name} должен монтировать ./certs:/certs:ro"
 
+
+def test_docker_compose_root_ca_service_and_pki_network():
+    """
+    Проверяет сервис root-ca в docker-compose.yml:
+    - Сборка на базе src/pki/Dockerfile.ca;
+    - Изоляция в подсети pki_net;
+    - Монтирование тома root_ca_data:/data/ca и ./certs:/shared_certs;
+    - restart: 'no' (разовая инициализация при bootstrap).
+    """
+    compose_path = Path(__file__).parent.parent / "docker-compose.yml"
+    with open(compose_path, "r", encoding="utf-8") as f:
+        compose_data = yaml.safe_load(f)
+
+    services = compose_data["services"]
+    assert "root-ca" in services, "Сервис root-ca должен быть объявлен в docker-compose.yml"
+
+    ca_svc = services["root-ca"]
+    assert ca_svc.get("build", {}).get("dockerfile") == "src/pki/Dockerfile.ca"
+    assert ca_svc.get("container_name") == "root-ca-service"
+    assert ca_svc.get("restart") == "no"
+    assert ca_svc.get("networks") == ["pki_net"]
+
+    vols = ca_svc.get("volumes", [])
+    assert "root_ca_data:/data/ca" in vols
+    assert "./certs:/shared_certs" in vols
+
+
+def test_docker_compose_five_isolated_networks():
+    """
+    Проверяет сетевую топологию Defense-in-Depth / Zero-Trust (5 подсетей):
+    - Наличие pki_net, edge_net, backend_net, data_net, simulation_net;
+    - Строгая изоляция: pki_net и data_net имеют флаг internal: true;
+    - Изоляция Root CA: ни один другой сервис не подключен к pki_net.
+    """
+    compose_path = Path(__file__).parent.parent / "docker-compose.yml"
+    with open(compose_path, "r", encoding="utf-8") as f:
+        compose_data = yaml.safe_load(f)
+
+    networks = compose_data.get("networks", {})
+    required_nets = {"pki_net", "edge_net", "backend_net", "data_net", "simulation_net"}
+    for net_name in required_nets:
+        assert net_name in networks, f"Сеть {net_name} отсутствует в docker-compose.yml"
+
+    # Проверка флагов internal: true
+    assert networks["pki_net"].get("internal") is True, "pki_net должна быть строго изолирована (internal: true)"
+    assert networks["data_net"].get("internal") is True, "data_net должна быть строго изолирована (internal: true)"
+
+    # Проверка изоляции Root CA: только root-ca подключен к pki_net
+    services = compose_data["services"]
+    for svc_name, svc_conf in services.items():
+        svc_nets = svc_conf.get("networks", [])
+        if svc_name == "root-ca":
+            assert "pki_net" in svc_nets
+        else:
+            assert "pki_net" not in svc_nets, f"Сервис {svc_name} не должен иметь доступа к изолированной сети pki_net"
+
+
+def test_docker_compose_caddy_and_volumes_configuration():
+    """
+    Проверяет конфигурацию Caddy шлюза и персистентных томов:
+    - caddy зависит от admin-server;
+    - caddy изолирован в edge_net;
+    - Наличие персистентных томов root_ca_data, postgres_data, redis_data, chroma_data, minio_data.
+    """
+    compose_path = Path(__file__).parent.parent / "docker-compose.yml"
+    with open(compose_path, "r", encoding="utf-8") as f:
+        compose_data = yaml.safe_load(f)
+
+    services = compose_data["services"]
+    caddy = services["caddy"]
+    deps = caddy.get("depends_on", [])
+    if isinstance(deps, dict):
+        deps = list(deps.keys())
+    assert "admin-server" in deps
+
+    caddy_nets = caddy.get("networks", [])
+    assert caddy_nets == ["edge_net"]
+
+    vols = compose_data.get("volumes", {})
+    for vol in ["root_ca_data", "postgres_data", "redis_data", "chroma_data", "minio_data", "caddy_data", "caddy_config"]:
+        assert vol in vols, f"Том {vol} должен быть объявлен в volumes"
+
+
+def test_env_example_pki_and_mtls_variables():
+    """Проверяет наличие параметров центрального Root CA и mTLS в .env.example."""
+    env_example_path = Path(__file__).parent.parent / ".env.example"
+    assert env_example_path.exists()
+
+    with open(env_example_path, "r", encoding="utf-8") as f:
+        env_content = f.read()
+
+    assert "ROOT_CA_PASSPHRASE=" in env_content
+    assert "FORCE_REGENERATE=" in env_content
+    assert "ADMIN_DOMAIN=" in env_content
+    assert "ADMIN_LOCAL_DOMAIN=" in env_content
+    assert "CADDY_CLIENT_AUTH_MODE=require_and_verify" in env_content
+
+
