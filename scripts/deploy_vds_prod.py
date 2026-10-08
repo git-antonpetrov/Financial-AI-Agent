@@ -59,6 +59,10 @@ def run_deployment(skip_build: bool = False, no_docker: bool = False, timeout: i
     print(f"      Инициализировано параметров: {len(sec_info)}")
     print("      RSA-2048 ключи JWT и параметры шифрования инициализированы в памяти/.env.")
 
+    legacy_certs = PROJECT_ROOT / "certs"
+    if legacy_certs.exists():
+        shutil.rmtree(legacy_certs, ignore_errors=True)
+
     if no_docker:
         print("\n[+] Флаг --no-docker установлен. Конфигурация .env готова, запуск Docker пропущен.")
         return

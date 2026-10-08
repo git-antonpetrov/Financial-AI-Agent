@@ -116,6 +116,12 @@ $PYTHON_CMD "${SCRIPT_DIR}/setup_vds_security_env.py"
 chmod 600 "${PROJECT_ROOT}/.env" 2>/dev/null || true
 log_success "Файл .env инициализирован и защищен (права 0600)."
 
+# Очистка устаревшей хостовой папки certs/, если осталась от предыдущих запусков
+if [[ -d "${PROJECT_ROOT}/certs" ]]; then
+    log_info "Удаление устаревшей хостовой папки certs/ (Strict Only-Docker Mode)..."
+    rm -rf "${PROJECT_ROOT}/certs"
+fi
+
 # ------------------------------------------------------------------------------
 # 3. ВАЛИДАЦИЯ КОНФИГУРАЦИИ DOCKER COMPOSE И ТОМОВ ZERO-TRUST PKI
 # ------------------------------------------------------------------------------
