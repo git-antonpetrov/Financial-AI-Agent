@@ -232,3 +232,7 @@ src/admin_client/frontend/src-tauri/bin/
 
 # Helping files
 arch.txt
+
+# PKI Certificates and Private Keys (Zero-Trust)
+certs/*
+!certs/.gitkeep

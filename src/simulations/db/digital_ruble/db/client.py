@@ -15,6 +15,9 @@ def get_async_engine():
         "RUBLE_DATABASE_URL", 
         "postgresql+asyncpg://agent_user:agent_password@localhost:15432/ruble_db"
     )
+    ssl_mode = os.getenv("POSTGRES_SSLMODE", "").strip()
+    if ssl_mode and "?" not in DATABASE_URL:
+        DATABASE_URL += f"?ssl={ssl_mode}"
     return create_async_engine(DATABASE_URL, echo=False)
 
 def get_async_session_maker():

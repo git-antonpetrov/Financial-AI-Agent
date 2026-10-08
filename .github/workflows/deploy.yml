@@ -18,4 +18,6 @@ jobs:
             cd Financial-AI-Agent
             git fetch origin main
             git reset --hard origin/main
-            sudo docker compose up -d --build
+            chmod +x scripts/deploy_vds_prod.sh
+            bash scripts/deploy_vds_prod.sh
+

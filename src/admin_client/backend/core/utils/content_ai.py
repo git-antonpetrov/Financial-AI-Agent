@@ -6,8 +6,10 @@ import requests
 import xml.etree.ElementTree as ET
 import re
 from requests.auth import HTTPBasicAuth
-from dotenv import load_dotenv
-from core.utils.console_logger import log_info, log_error, log_warning
+try:
+    from src.common.logger import log_info, log_error, log_warning
+except ImportError:
+    from core.utils.console_logger import log_info, log_error, log_warning
 from xml.sax.saxutils import escape
 
 def parse_result_xml(xml_str):

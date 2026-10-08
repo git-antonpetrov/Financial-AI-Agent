@@ -144,7 +144,7 @@ async def generate_unique_card_number(db, max_attempts: int = 10) -> str:
     for _ in range(max_attempts):
         candidate = f"4276{random.randint(100000000000, 999999999999)}"
         exists = await db.scalar(select(Card.id).where(Card.card_number == candidate))
-        if not exists or hasattr(exists, "_mock_return_value"):
+        if not exists:
             return candidate
     raise HTTPException(status_code=500, detail="Не удалось сгенерировать уникальный номер карты")
 
@@ -311,8 +311,24 @@ async def transfer_money(
                 receiver_acc = await db.scalar(select(Account).where(Account.id == card.account_id))
         elif data.transfer_type == 'phone':
             # Для симуляции предполагаем, что номер телефона совпадает с client_id
-            # Выбираем первый попавшийся счет клиента
-            receiver_acc = await db.scalar(select(Account).where(Account.client_id == data.destination))
+            # Выбираем активный рублевый счет клиента
+            receiver_acc = await db.scalar(
+                select(Account)
+                .where(
+                    Account.client_id == data.destination,
+                    Account.status == "active",
+                    Account.currency == "RUB"
+                )
+                .order_by(Account.created_at.asc())
+            )
+            if not receiver_acc:
+                # Проверяем, существует ли клиент вообще
+                client_exists = await db.scalar(
+                    select(Account.id).where(Account.client_id == data.destination)
+                )
+                if client_exists:
+                    log_error("BankAPI", f"У клиента {data.destination} нет активных рублевых счетов для зачисления")
+                    raise HTTPException(400, "У получателя отсутствуют активные рублевые счета для зачисления перевода")
         
         if not receiver_acc:
             log_error("BankAPI", f"Получатель не найден. Тип: {data.transfer_type}, Назначение: {data.destination}")

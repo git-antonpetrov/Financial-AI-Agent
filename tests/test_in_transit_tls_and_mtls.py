@@ -336,3 +336,33 @@ def test_internal_certs_generation_script_exists():
     assert "ca.crt" in content
     assert "server.crt" in content
     assert "client.crt" in content
+    assert "postgres.crt" in content
+    assert "redis.crt" in content
+    assert "minio.crt" in content
+
+
+def test_python_internal_certs_generator(tmp_path):
+    """
+    Проверяет корректность работы кроссплатформенного генератора generate_internal_certs.py.
+    """
+    from scripts.generate_internal_certs import generate_all_certs
+    res = generate_all_certs(certs_dir=tmp_path)
+    
+    assert (tmp_path / "ca.crt").exists()
+    assert (tmp_path / "ca.key").exists()
+    assert (tmp_path / "server.crt").exists()
+    assert (tmp_path / "server.key").exists()
+    assert (tmp_path / "client.crt").exists()
+    assert (tmp_path / "client.key").exists()
+    assert (tmp_path / "client.p12").exists()
+    assert (tmp_path / "postgres.crt").exists()
+    assert (tmp_path / "postgres.key").exists()
+    assert (tmp_path / "redis.crt").exists()
+    assert (tmp_path / "redis.key").exists()
+    assert (tmp_path / "minio.crt").exists()
+    assert (tmp_path / "minio.key").exists()
+    assert (tmp_path / "minio" / "public.crt").exists()
+    assert (tmp_path / "minio" / "private.key").exists()
+    assert (tmp_path / "minio" / "CAs" / "ca.crt").exists()
+    assert len(res["ca_fingerprint"]) == 64
+

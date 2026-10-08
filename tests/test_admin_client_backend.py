@@ -13,17 +13,6 @@ backend_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "sr
 if backend_path not in sys.path:
     sys.path.insert(0, backend_path)
 
-# Предотвращаем конфликт пространств имен 'core' между admin_server и admin_client
-client_core = os.path.join(backend_path, "core")
-client_utils = os.path.join(backend_path, "core", "utils")
-if "core" in sys.modules:
-    core_mod = sys.modules["core"]
-    if hasattr(core_mod, "__path__") and client_core not in core_mod.__path__:
-        core_mod.__path__.insert(0, client_core)
-if "core.utils" in sys.modules:
-    utils_mod = sys.modules["core.utils"]
-    if hasattr(utils_mod, "__path__") and client_utils not in utils_mod.__path__:
-        utils_mod.__path__.insert(0, client_utils)
 
 from fastapi import HTTPException
 from main import validate_server_url

@@ -162,3 +162,72 @@ def test_real_simulation_app_endpoints_protected():
     # Междоменный доступ запрещен (403)
     invest_headers = {"X-Bootstrap-Token": "secret_invest_token_456"}
     assert client.get("/bank/accounts/by-client/cl_123", headers=invest_headers).status_code == 403
+
+
+def test_enclave_signature_with_agent_token_joint_validation(test_app):
+    """Проверяет совместную валидацию подписи Анклава и токена агента."""
+    import time
+    import base64
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+    from src.simulations.core.crypto.enclave_verifier import get_enclave_verifier, EnclaveVerifier
+
+    client = TestClient(test_app)
+    verifier = get_enclave_verifier()
+    key_mgr = verifier.key_manager
+
+    method = "GET"
+    path = "/invest/test"
+    now_ts = int(time.time())
+    nonce = f"test-joint-nonce-{now_ts}"
+    body = b""
+
+    canonical_digest = EnclaveVerifier.compute_payload_digest(
+        method=method,
+        path=path,
+        timestamp=now_ts,
+        nonce=nonce,
+        body_bytes=body,
+    )
+    raw_sig = key_mgr._dev_private_key.sign(
+        canonical_digest,
+        padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
+        hashes.SHA256(),
+    )
+    sig_b64 = base64.b64encode(raw_sig).decode("ascii")
+
+    # 1. Валидная подпись Анклава + корректный токен агента invest -> 200
+    headers_valid = {
+        "X-Enclave-Signature": sig_b64,
+        "X-Nonce": nonce,
+        "X-Timestamp": str(now_ts),
+        "X-Bootstrap-Token": "secret_invest_token_456",
+    }
+    resp = client.get(path, headers=headers_valid)
+    assert resp.status_code == 200
+
+    # 2. Валидная подпись Анклава + неверный междоменный токен (bank вместо invest) -> 403
+    nonce_cross = f"test-joint-nonce-cross-{now_ts}"
+    canonical_cross = EnclaveVerifier.compute_payload_digest(
+        method=method,
+        path=path,
+        timestamp=now_ts,
+        nonce=nonce_cross,
+        body_bytes=body,
+    )
+    raw_sig_cross = key_mgr._dev_private_key.sign(
+        canonical_cross,
+        padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
+        hashes.SHA256(),
+    )
+    sig_b64_cross = base64.b64encode(raw_sig_cross).decode("ascii")
+
+    headers_cross = {
+        "X-Enclave-Signature": sig_b64_cross,
+        "X-Nonce": nonce_cross,
+        "X-Timestamp": str(now_ts),
+        "X-Bootstrap-Token": "secret_bank_token_123",
+    }
+    resp_cross = client.get(path, headers=headers_cross)
+    assert resp_cross.status_code == 403
+

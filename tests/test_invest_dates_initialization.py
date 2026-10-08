@@ -21,6 +21,9 @@ from src.simulations.workers.invest_eod.tasks import process_deposits, process_s
 def make_async_cm(session):
     if not hasattr(session, "add") or isinstance(session.add, AsyncMock):
         session.add = MagicMock()
+    if hasattr(session, "scalar") and isinstance(session.scalar, AsyncMock):
+        if isinstance(session.scalar.return_value, AsyncMock):
+            session.scalar.return_value = None
     cm = MagicMock()
     cm.__aenter__.return_value = session
     cm.__aexit__.return_value = None

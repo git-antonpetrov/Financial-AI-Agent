@@ -29,6 +29,9 @@ from src.simulations.workers.invest_eod.tasks import (
 def make_async_cm(session):
     if "add" not in session.__dict__:
         session.add = MagicMock()
+    if hasattr(session, "scalar") and isinstance(session.scalar, AsyncMock):
+        if isinstance(session.scalar.return_value, AsyncMock):
+            session.scalar.return_value = None
     cm = MagicMock()
     cm.__aenter__.return_value = session
     cm.__aexit__.return_value = None

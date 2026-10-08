@@ -77,16 +77,23 @@ minio_client = Minio(
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
+REDIS_SSL_CA = os.getenv("REDIS_SSL_CA_CERTS", "/certs/ca.crt")
 
-redis_client = redis.Redis(
-    host=REDIS_HOST,
-    port=REDIS_PORT,
-    password=REDIS_PASSWORD,
-    ssl=settings.REDIS_SSL,
-    decode_responses=True,
-    socket_timeout=2.0,
-    socket_connect_timeout=2.0
-)
+redis_kwargs = {
+    "host": REDIS_HOST,
+    "port": REDIS_PORT,
+    "password": REDIS_PASSWORD,
+    "ssl": settings.REDIS_SSL,
+    "decode_responses": True,
+    "socket_timeout": 2.0,
+    "socket_connect_timeout": 2.0,
+}
+if settings.REDIS_SSL and os.path.exists(REDIS_SSL_CA):
+    redis_kwargs["ssl_ca_certs"] = REDIS_SSL_CA
+    redis_kwargs["ssl_cert_reqs"] = "required"
+
+redis_client = redis.Redis(**redis_kwargs)
+
 
 # --- НАСТРОЙКА LLM (через централизованный LLMClient) ---
 RAG_DATA_MODEL_NAME = os.getenv("RAG_DATA_MODEL_NAME", "vertex_ai/gemini-3.8-flash")
@@ -206,7 +213,6 @@ async def login(
     form_data: OAuth2PasswordRequestForm = Depends(),
     otp_code: Optional[str] = Form(default=None),
     x_otp_code: Optional[str] = Header(default=None, alias="X-OTP-Code"),
-    x_role: Optional[str] = Header(default=None, alias="X-Role"),
     db: AsyncSession = Depends(get_db)
 ):
     """Выполняет двухфакторную аутентификацию администратора с выдачей пары JWT-токенов."""
@@ -352,12 +358,8 @@ async def login(
     except Exception:
         pass
 
-    # Определение роли RBAC (superadmin по умолчанию)
-    requested_role = (x_role or "").lower().strip()
-    try:
-        user_role = Role(requested_role) if requested_role else Role.SUPERADMIN
-    except ValueError:
-        user_role = Role.SUPERADMIN
+    # Для модели «1 сервер — 1 админ» токен администратора всегда выпускается с ролью SUPERADMIN
+    user_role = Role.SUPERADMIN
 
     access_token = create_access_token(data={"sub": form_data.username}, role=user_role)
     refresh_token = create_refresh_token(data={"sub": form_data.username}, role=user_role)
@@ -531,8 +533,8 @@ async def pair_2fa(
 
     is_enrolled = await check_totp_enrolled(db)
 
-    # Проверка recovery / bootstrap токена
-    expected_setup_token = os.getenv("ADMIN_SETUP_TOKEN") or settings.AGENT_MAIN_BOOTSTRAP_TOKEN
+    # Проверка recovery / bootstrap токена администратора (полная изоляция от токенов агентов)
+    expected_setup_token = os.getenv("ADMIN_SETUP_TOKEN", "").strip()
     has_valid_setup_token = bool(
         payload.setup_token
         and expected_setup_token
@@ -1135,6 +1137,7 @@ async def admin_reactivate_agent(
     )
 
 @app.post("/api/agent_requests", response_model=schemas.AgentRequestResponse)
+@app.post("/api/agent-requests", response_model=schemas.AgentRequestResponse)
 async def create_agent_request(
     req: schemas.AgentRequestJWT,
     db: AsyncSession = Depends(get_db)

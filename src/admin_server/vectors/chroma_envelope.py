@@ -48,6 +48,12 @@ def resolve_encryption_key(key: bytes | str | None = None) -> bytes:
         raw_key = os.getenv("CHROMA_ENVELOPE_KEY") or os.getenv("DATA_ENCRYPTION_KEY", "")
         raw_key = raw_key.strip()
         if not raw_key:
+            is_strict = os.getenv("STRICT_SECURITY", "false").lower() in ("true", "1") or os.getenv("ENV") == "production"
+            if is_strict:
+                raise RuntimeError(
+                    "Ключ шифрования ChromaDB (DATA_ENCRYPTION_KEY / CHROMA_ENVELOPE_KEY) не настроен. "
+                    "В production/strict режиме генерация эфемерных ключей запрещена."
+                )
             if _EPHEMERAL_KEY is None:
                 _EPHEMERAL_KEY = os.urandom(32)
                 log_warning(

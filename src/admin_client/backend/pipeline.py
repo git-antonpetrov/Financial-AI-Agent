@@ -4,9 +4,17 @@ import requests
 import re
 import yaml
 from typing import Callable, Any
-from core.utils.console_logger import log_info, log_error, log_warning
-from core.utils.pdf_converter import convert_to_pdf
-from core.utils.content_ai import ContentCaptureRecognizer
+try:
+    from src.common.logger import log_info, log_error, log_warning
+except ImportError:
+    from core.utils.console_logger import log_info, log_error, log_warning
+
+try:
+    from src.admin_client.backend.core.utils.pdf_converter import convert_to_pdf
+    from src.admin_client.backend.core.utils.content_ai import ContentCaptureRecognizer
+except ImportError:
+    from core.utils.pdf_converter import convert_to_pdf
+    from core.utils.content_ai import ContentCaptureRecognizer
 import threading
 
 _ACTIVE_MD5_LOCK = threading.Lock()

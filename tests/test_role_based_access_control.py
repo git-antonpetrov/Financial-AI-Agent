@@ -292,8 +292,8 @@ def test_auditor_access_restrictions():
     assert "keys:rotate" in resp_rotate.json()["detail"]
 
 
-def test_login_supports_x_role_header():
-    """Проверяет выпуск токенов с указанной ролью при логине через заголовок X-Role."""
+def test_login_always_issues_superadmin_role():
+    """Проверяет выпуск токенов строго с ролью superadmin и невозможность подмены роли через заголовок X-Role."""
     from server import app, settings
     client = TestClient(app)
 
@@ -301,7 +301,7 @@ def test_login_supports_x_role_header():
     settings.REQUIRE_2FA = False
     settings.ADMIN_TOTP_SECRET = ""
 
-    # Логин с запросом роли operator
+    # Попытка передать X-Role: operator не должна влиять на роль
     resp = client.post(
         "/login",
         data={"username": "admin", "password": "SecretPassword123!"},
@@ -310,6 +310,7 @@ def test_login_supports_x_role_header():
     assert resp.status_code == 200
     token_data = resp.json()
     payload = decode_access_token(token_data["access_token"])
-    assert payload["role"] == "operator"
+    assert payload["role"] == "superadmin"
     assert "documents:write" in payload["permissions"]
-    assert "keys:revoke" not in payload["permissions"]
+    assert "keys:revoke" in payload["permissions"]
+    assert "security:manage" in payload["permissions"]

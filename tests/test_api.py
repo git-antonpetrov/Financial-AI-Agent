@@ -94,3 +94,6 @@ def test_agent_requests_api_call_unauthorized():
             assert False, "Запрос без валидного токена должен приводить к HTTPError"
         except urllib.error.HTTPError as e:
             assert e.code == 401
+        finally:
+            mock_http_error.close()
+

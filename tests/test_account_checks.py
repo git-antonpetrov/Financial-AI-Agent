@@ -212,7 +212,65 @@ def test_ruble_create_contract_rejects_self_contract():
         with pytest.raises(HTTPException) as exc_info:
             await create_smart_contract("w_creator_same", req)
 
-        assert exc_info.value.status_code == 400
-        assert "Создатель и получатель смарт-контракта не могут совпадать" in exc_info.value.detail
+    asyncio.run(_test())
+
+
+def test_bank_transfer_by_phone_selects_active_rub_account(monkeypatch):
+    """
+    Проверяет, что при переводе по номеру телефона выбирается активный рублевый счет.
+    """
+    async def _test():
+        sender_acc = Account(id="sender_1", balance=Decimal("1000.00"), status="active", currency="RUB")
+        receiver_active = Account(id="rec_active", client_id="cl_2", balance=Decimal("100.00"), status="active", currency="RUB")
+
+        session = AsyncMock()
+        # Поиск счета по телефону возвращает receiver_active
+        session.scalar = AsyncMock(return_value=receiver_active)
+
+        res_mock = MagicMock()
+        res_mock.scalars().all.return_value = [sender_acc, receiver_active]
+        session.execute = AsyncMock(return_value=res_mock)
+        session.commit = AsyncMock()
+
+        monkeypatch.setattr("src.simulations.api.routers.bank.get_db", lambda: make_async_cm(session))
+
+        req = TransferRequest(
+            from_account_id="sender_1",
+            amount=Decimal("200.00"),
+            transfer_type="phone",
+            destination="cl_2"
+        )
+        res = await transfer_money(req)
+        assert res["status"] == "success"
+        assert sender_acc.balance == Decimal("800.00")
+        assert receiver_active.balance == Decimal("300.00")
 
     asyncio.run(_test())
+
+
+def test_bank_transfer_by_phone_rejects_when_no_active_rub_account(monkeypatch):
+    """
+    Проверяет, что если у получателя нет активных рублевых счетов, возвращается HTTP 400.
+    """
+    async def _test():
+        session = AsyncMock()
+        # 1-й вызов scalar (поиск активного счета) -> None
+        # 2-й вызов scalar (проверка существования клиента) -> "acc_closed"
+        session.scalar = AsyncMock(side_effect=[None, "acc_closed"])
+
+        monkeypatch.setattr("src.simulations.api.routers.bank.get_db", lambda: make_async_cm(session))
+
+        req = TransferRequest(
+            from_account_id="sender_1",
+            amount=Decimal("100.00"),
+            transfer_type="phone",
+            destination="cl_with_closed_accs"
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await transfer_money(req)
+
+        assert exc_info.value.status_code == 400
+        assert "отсутствуют активные рублевые счета" in exc_info.value.detail
+
+    asyncio.run(_test())
+

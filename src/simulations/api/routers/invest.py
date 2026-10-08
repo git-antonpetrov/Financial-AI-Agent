@@ -43,7 +43,7 @@ async def generate_unique_invest_account_number(
     for _ in range(max_attempts):
         candidate = f"{prefix}{random.randint(1000000000000000, 9999999999999999)}"
         exists = await db.scalar(select(model_cls.id).where(model_cls.account_number == candidate))
-        if not exists or hasattr(exists, "_mock_return_value"):
+        if not exists:
             return candidate
     raise HTTPException(
         status_code=500,
@@ -144,17 +144,45 @@ async def get_strategies() -> List[InvestmentStrategyResponse]:
         result = await db.execute(select(InvestmentStrategy))
         return [InvestmentStrategyResponse.model_validate(s) for s in result.scalars().all()]
 
+# Базовые параметры тарифной сетки финансовых продуктов
+PRODUCT_CONDITIONS = {
+    "key_rate": Decimal("15.00"),
+    "deposit_rates": {
+        "6_months": Decimal("15.00"),
+        "12_months": Decimal("15.00"),
+    },
+    "default_deposit_rate": Decimal("15.00"),
+    "savings_account_rate": Decimal("10.00"),
+}
+
+def get_product_terms() -> dict:
+    """Возвращает актуальные тарифные условия банка по депозитам и накопительным счетам."""
+    return {
+        "key_rate": float(PRODUCT_CONDITIONS["key_rate"]),
+        "deposit_rates": {
+            k: float(v) for k, v in PRODUCT_CONDITIONS["deposit_rates"].items()
+        },
+        "savings_account_rate": float(PRODUCT_CONDITIONS["savings_account_rate"]),
+    }
+
+def calculate_deposit_rate(term_months: Optional[int]) -> Decimal:
+    """Рассчитывает процентную ставку по вкладу в зависимости от выбранного срока."""
+    if term_months == 6 and "6_months" in PRODUCT_CONDITIONS["deposit_rates"]:
+        return PRODUCT_CONDITIONS["deposit_rates"]["6_months"]
+    if term_months == 12 and "12_months" in PRODUCT_CONDITIONS["deposit_rates"]:
+        return PRODUCT_CONDITIONS["deposit_rates"]["12_months"]
+    return PRODUCT_CONDITIONS["default_deposit_rate"]
+
+def calculate_savings_rate() -> Decimal:
+    """Возвращает актуальную процентную ставку для накопительного счета."""
+    return PRODUCT_CONDITIONS["savings_account_rate"]
+
 @router.get("/products/terms")
 async def get_terms():
     """
     Получить текущие условия по продуктам (ставки, сроки).
     """
-    # Мок-данные стандартных условий
-    return {
-        "key_rate": 15.0,
-        "deposit_rates": {"6_months": 14.5, "12_months": 15.2},
-        "savings_account_rate": 10.0
-    }
+    return get_product_terms()
 
 @router.get("/portfolio/{client_id}", response_model=PortfolioResponse)
 async def get_portfolio(client_id: str) -> PortfolioResponse:
@@ -216,7 +244,7 @@ async def open_deposit(
     # 2. Создаем вклад в базе инвестиций с Saga-компенсацией
     try:
         async with invest_db() as idb:
-            interest_rate = Decimal("15.00") # Мок-ставка
+            interest_rate = calculate_deposit_rate(req.term_months)
             monthly_rate = interest_rate / Decimal("100") / Decimal("12")
             first_payment = round(req.initial_amount * monthly_rate, 2)
             next_pay_date = datetime.now() + relativedelta(months=1)
@@ -306,7 +334,7 @@ async def open_savings(
     # 2. Создание копилки с Saga-компенсацией
     try:
         async with invest_db() as idb:
-            interest_rate = Decimal("10.00") # Мок-ставка
+            interest_rate = calculate_savings_rate()
             monthly_rate = interest_rate / Decimal("100") / Decimal("12")
             first_payment = round(req.initial_amount * monthly_rate, 2)
             next_pay_date = datetime.now() + relativedelta(months=1)

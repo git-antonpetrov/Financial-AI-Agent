@@ -140,6 +140,12 @@ class Settings:
 
         # 4. Если ключи не настроены (dev/test режим) - генерация надежной RSA-2048 пары
         if not priv_pem or not pub_pem:
+            is_strict = os.getenv("STRICT_SECURITY", "false").lower() in ("true", "1") or os.getenv("ENV") == "production"
+            if is_strict:
+                raise RuntimeError(
+                    "Критические ключи подписи JWT (JWT_PRIVATE_KEY_PATH / JWT_PRIVATE_KEY) не настроены. "
+                    "В production/strict режиме генерация эфемерных ключей запрещена."
+                )
             log_warning(
                 "Безопасность",
                 "RSA-ключи подписи JWT не настроены. Сгенерирована временная пара ключей в памяти (RS256, 2048-bit). "
@@ -211,18 +217,23 @@ settings = Settings()
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
+REDIS_SSL_CA = os.getenv("REDIS_SSL_CA_CERTS", "/certs/ca.crt")
 
 try:
     if redis is not None:
-        redis_blacklist = redis.Redis(
-            host=REDIS_HOST,
-            port=REDIS_PORT,
-            password=REDIS_PASSWORD,
-            ssl=settings.REDIS_SSL,
-            decode_responses=True,
-            socket_timeout=2.0,
-            socket_connect_timeout=2.0
-        )
+        redis_kwargs = {
+            "host": REDIS_HOST,
+            "port": REDIS_PORT,
+            "password": REDIS_PASSWORD,
+            "ssl": settings.REDIS_SSL,
+            "decode_responses": True,
+            "socket_timeout": 2.0,
+            "socket_connect_timeout": 2.0,
+        }
+        if settings.REDIS_SSL and os.path.exists(REDIS_SSL_CA):
+            redis_kwargs["ssl_ca_certs"] = REDIS_SSL_CA
+            redis_kwargs["ssl_cert_reqs"] = "required"
+        redis_blacklist = redis.Redis(**redis_kwargs)
     else:
         redis_blacklist = None
 except Exception as e:
@@ -689,6 +700,12 @@ def resolve_encryption_key(key: bytes | str | None = None) -> bytes:
     if key is None:
         raw_key = settings.DATA_ENCRYPTION_KEY or os.getenv("DATA_ENCRYPTION_KEY", "")
         if not raw_key:
+            is_strict = os.getenv("STRICT_SECURITY", "false").lower() in ("true", "1") or os.getenv("ENV") == "production"
+            if is_strict:
+                raise RuntimeError(
+                    "DATA_ENCRYPTION_KEY не настроен. "
+                    "В production/strict режиме генерация эфемерных ключей шифрования запрещена."
+                )
             if _EPHEMERAL_DATA_KEY is None:
                 _EPHEMERAL_DATA_KEY = os.urandom(32)
                 log_warning(

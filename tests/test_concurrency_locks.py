@@ -39,6 +39,9 @@ def compile_pg(stmt) -> str:
 
 def make_async_cm(session):
     session.add = MagicMock()
+    if hasattr(session, "scalar") and isinstance(session.scalar, AsyncMock):
+        if isinstance(session.scalar.return_value, AsyncMock):
+            session.scalar.return_value = None
     cm = MagicMock()
     cm.__aenter__.return_value = session
     cm.__aexit__.return_value = None

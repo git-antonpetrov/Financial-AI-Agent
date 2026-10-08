@@ -7,10 +7,13 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
+    command: >
+      sh -c "mkdir -p /tmp/pg_certs && cp /certs/postgres.key /tmp/pg_certs/postgres.key && chmod 600 /tmp/pg_certs/postgres.key && chown postgres:postgres /tmp/pg_certs/postgres.key && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/certs/postgres.crt -c ssl_key_file=/tmp/pg_certs/postgres.key -c ssl_ca_file=/certs/ca.crt"
     ports:
       - "127.0.0.1:15432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./certs:/certs:ro
     networks:
       - data_net
       - simulation_net
@@ -26,6 +29,7 @@ services:
       - "127.0.0.1:5050:80"
     volumes:
       - pgadmin_data:/var/lib/pgadmin
+      - ./certs:/certs:ro
     depends_on:
       - postgres-db
     networks:
@@ -46,6 +50,10 @@ services:
       - BANK_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/bank_db
       - INVEST_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/invest_db
       - RUBLE_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/digital_db
+      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
+      - SSL_CERT_FILE=/certs/ca.crt
+    volumes:
+      - ./certs:/certs:ro
     env_file:
       - .env
     networks:
@@ -61,6 +69,10 @@ services:
     environment:
       - BANK_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/bank_db
       - TZ=Europe/Moscow
+      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
+      - SSL_CERT_FILE=/certs/ca.crt
+    volumes:
+      - ./certs:/certs:ro
     env_file:
       - .env
     networks:
@@ -77,6 +89,10 @@ services:
     environment:
       - INVEST_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/invest_db
       - TZ=Europe/Moscow
+      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
+      - SSL_CERT_FILE=/certs/ca.crt
+    volumes:
+      - ./certs:/certs:ro
     env_file:
       - .env
     networks:
@@ -94,6 +110,10 @@ services:
     environment:
       - RUBLE_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/digital_db
       - TZ=Europe/Moscow
+      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
+      - SSL_CERT_FILE=/certs/ca.crt
+    volumes:
+      - ./certs:/certs:ro
     env_file:
       - .env
     networks:
@@ -113,6 +133,10 @@ services:
       - BANK_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/bank_db
       - INVEST_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/invest_db
       - RUBLE_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/digital_db
+      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
+      - SSL_CERT_FILE=/certs/ca.crt
+    volumes:
+      - ./certs:/certs:ro
     env_file:
       - .env
     networks:
@@ -131,6 +155,7 @@ services:
       - "127.0.0.1:9001:9001"
     volumes:
       - minio_data:/data
+      - ./certs/minio:/root/.minio/certs:ro
     command: server /data --console-address ":9001"
     networks:
       - data_net
@@ -139,11 +164,20 @@ services:
   redis:
     image: redis:7-alpine
     container_name: redis-server
-    command: redis-server --requirepass ${REDIS_PASSWORD}
+    command: >
+      redis-server 
+      --tls-port 6379 
+      --port 0 
+      --tls-cert-file /certs/redis.crt 
+      --tls-key-file /certs/redis.key 
+      --tls-ca-cert-file /certs/ca.crt 
+      --tls-auth-clients no 
+      --requirepass ${REDIS_PASSWORD}
     ports:
       - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
+      - ./certs:/certs:ro
     networks:
       - backend_net
     restart: unless-stopped
@@ -167,11 +201,14 @@ services:
       - REQUIRE_MTLS=${REQUIRE_MTLS:-false}
       - ALLOWED_MTLS_SUBJECTS=${ALLOWED_MTLS_SUBJECTS:-}
       - ALLOWED_MTLS_ISSUERS=${ALLOWED_MTLS_ISSUERS:-}
-      - MINIO_SECURE=${MINIO_SECURE:-false}
-      - REDIS_SSL=${REDIS_SSL:-false}
-      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-prefer}
+      - MINIO_SECURE=${MINIO_SECURE:-true}
+      - REDIS_SSL=${REDIS_SSL:-true}
+      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
+      - SSL_CERT_FILE=/certs/ca.crt
+      - REDIS_SSL_CA_CERTS=/certs/ca.crt
     volumes:
       - ./data:/app/data:ro
+      - ./certs:/certs:ro
     env_file:
       - .env
     networks:
@@ -219,11 +256,14 @@ services:
       - DATA_ENCRYPTION_KEY=${DATA_ENCRYPTION_KEY}
       - MINIO_SSE_C_KEY=${MINIO_SSE_C_KEY}
       - CHROMA_ENVELOPE_ENCRYPTION_ENABLED=${CHROMA_ENVELOPE_ENCRYPTION_ENABLED:-true}
-      - MINIO_SECURE=${MINIO_SECURE:-false}
-      - REDIS_SSL=${REDIS_SSL:-false}
-      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-prefer}
+      - MINIO_SECURE=${MINIO_SECURE:-true}
+      - REDIS_SSL=${REDIS_SSL:-true}
+      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
+      - SSL_CERT_FILE=/certs/ca.crt
+      - REDIS_SSL_CA_CERTS=/certs/ca.crt
     volumes:
       - ./data:/app/data:ro
+      - ./certs:/certs:ro
     env_file:
       - .env
     networks:
@@ -254,6 +294,19 @@ services:
     networks:
       - edge_net
 
+# -----------------------------------------------------------------------------
+# СЕТЕВАЯ МИКРОСЕГМЕНТАЦИЯ И БЕЗОПАСНОСТЬ (Defense-in-Depth / Zero-Trust)
+# 1. edge_net:       Публичный контур ingress (Caddy обратный прокси с TLS 1.3 и mTLS).
+# 2. backend_net:   Внутренняя сеть сервисов управления (Admin Server, Vector Worker, Redis).
+# 3. data_net:      Изолированная сеть хранения (PostgreSQL, MinIO, ChromaDB) с internal: true
+#                   (запрещен любой прямой доступ в/из внешней сети Интернет).
+# 4. simulation_net: Изолированный контур банковских симуляций (API, воркеры EOD, смарт-контракты).
+# 
+# Шифрование данных в транзите (In-Transit Encryption):
+# Для боевого контура переключите переменные окружения:
+#   REQUIRE_MTLS=true, MINIO_SECURE=true, REDIS_SSL=true, POSTGRES_SSLMODE=require
+# При этом данные в покое (Data at Rest) защищены конвертным шифрованием AES-256-GCM.
+# -----------------------------------------------------------------------------
 networks:
   edge_net:
     driver: bridge

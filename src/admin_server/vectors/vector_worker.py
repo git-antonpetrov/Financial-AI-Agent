@@ -129,13 +129,20 @@ CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
 # --- Инициализация клиентов ---
 log_info("Worker Init", "Инициализация клиентов...")
 
-redis_client = redis.Redis(
-    host=REDIS_HOST,
-    port=REDIS_PORT,
-    password=REDIS_PASSWORD,
-    ssl=REDIS_SSL,
-    decode_responses=True
-)
+REDIS_SSL_CA = os.getenv("REDIS_SSL_CA_CERTS", "/certs/ca.crt")
+redis_kwargs = {
+    "host": REDIS_HOST,
+    "port": REDIS_PORT,
+    "password": REDIS_PASSWORD,
+    "ssl": REDIS_SSL,
+    "decode_responses": True,
+}
+if REDIS_SSL and os.path.exists(REDIS_SSL_CA):
+    redis_kwargs["ssl_ca_certs"] = REDIS_SSL_CA
+    redis_kwargs["ssl_cert_reqs"] = "required"
+
+redis_client = redis.Redis(**redis_kwargs)
+
 
 minio_client = Minio(
     MINIO_URL,
@@ -178,6 +185,9 @@ try:
     }
     if POSTGRES_SSLMODE:
         pool_kwargs["sslmode"] = POSTGRES_SSLMODE
+        ca_cert_path = os.getenv("SSL_CERT_FILE", "/certs/ca.crt")
+        if os.path.exists(ca_cert_path):
+            pool_kwargs["sslrootcert"] = ca_cert_path
     db_pool = SimpleConnectionPool(**pool_kwargs)
 except Exception as e:
     log_error("Инициализация воркера", f"Не удалось инициализировать пул соединений с базой данных: {e}")

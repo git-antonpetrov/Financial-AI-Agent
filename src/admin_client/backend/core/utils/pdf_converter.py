@@ -2,8 +2,10 @@ import os
 import shutil
 import tempfile
 import subprocess
-from pathlib import Path
-from core.utils.console_logger import log_error
+try:
+    from src.common.logger import log_error
+except ImportError:
+    from core.utils.console_logger import log_error
 
 def find_soffice_executable() -> str:
     """

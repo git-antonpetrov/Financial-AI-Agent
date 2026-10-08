@@ -32,7 +32,7 @@ interface LocalFile {
   display_message?: string
 }
 
-// Тип запроса агента (заглушка)
+// Структура заявки нормативного документа от агента (из таблицы agent_requests)
 interface AgentRequest {
   id: number
   agent_name: string
@@ -41,6 +41,7 @@ interface AgentRequest {
   justification_ru: string
   justification_en: string
   status: string
+  created_at?: string
 }
 
 interface ContentAiConfig {

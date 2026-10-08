@@ -149,6 +149,16 @@ async def check_enclave_or_token_auth(
         # Запоминаем проверенный nonce в состоянии запроса для включения в Signed Receipt
         request.state.enclave_nonce = nonce
         request.state.authenticated_entity = "enclave"
+
+        # Если вместе с подписью Анклава передан токен конкретного агента, проводим его доменную валидацию
+        optional_token = extract_token_from_headers(
+            x_bootstrap_token=request.headers.get("X-Bootstrap-Token"),
+            authorization=request.headers.get("Authorization"),
+        )
+        if optional_token:
+            verify_agent_token(token=optional_token, allowed_env_vars=allowed_env_vars, domain_name=domain_name)
+            request.state.authenticated_agent = optional_token
+
         log_info("Simulation Auth", f"Успешная верификация подписи Анклава для домена '{domain_name}' (nonce={nonce})")
         return f"enclave:{nonce}"
 
