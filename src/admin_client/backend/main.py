@@ -13,7 +13,13 @@ import secrets
 # pyrefly: ignore [missing-import]
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Response, status
 # pyrefly: ignore [missing-import]
-from fastapi.responses import EventSourceResponse
+try:
+    from sse_starlette.sse import EventSourceResponse
+except ImportError:
+    try:
+        from fastapi.responses import EventSourceResponse
+    except ImportError:
+        from starlette.responses import StreamingResponse as EventSourceResponse
 # pyrefly: ignore [missing-import]
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager

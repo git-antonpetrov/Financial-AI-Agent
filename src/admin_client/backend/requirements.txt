@@ -5,3 +5,4 @@ requests
 colorama
 python-dotenv
 pyyaml
+sse-starlette>=1.8.0
