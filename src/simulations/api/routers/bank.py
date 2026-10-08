@@ -263,6 +263,10 @@ async def close_account(
         )
         if response is not None:
             response.headers["X-Bank-Signature"] = receipt["signature"]
+            if receipt.get("cert_fingerprint"):
+                response.headers["X-Bank-Cert-Fingerprint"] = receipt["cert_fingerprint"]
+            if receipt.get("bank_cert_serial"):
+                response.headers["X-Bank-Cert-Serial"] = str(receipt["bank_cert_serial"])
         return {"status": "success", "signed_receipt": receipt}
 
 
@@ -410,6 +414,10 @@ async def transfer_money(
         )
         if response is not None:
             response.headers["X-Bank-Signature"] = receipt["signature"]
+            if receipt.get("cert_fingerprint"):
+                response.headers["X-Bank-Cert-Fingerprint"] = receipt["cert_fingerprint"]
+            if receipt.get("bank_cert_serial"):
+                response.headers["X-Bank-Cert-Serial"] = str(receipt["bank_cert_serial"])
         return {
             "status": "success",
             "transaction_id": tx_out.id,

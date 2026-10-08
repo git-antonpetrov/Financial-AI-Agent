@@ -22,6 +22,11 @@ from src.simulations.core.crypto.platform_signer import (
     DigitalPlatformSigner,
     get_digital_platform_signer,
 )
+from src.simulations.core.crypto.chain_validator import (
+    X509ChainValidator,
+    get_chain_validator,
+    reset_chain_validator_for_tests,
+)
 
 __all__ = [
     "BankCertificateAuthority",
@@ -38,4 +43,7 @@ __all__ = [
     "get_oracle_verifier",
     "DigitalPlatformSigner",
     "get_digital_platform_signer",
+    "X509ChainValidator",
+    "get_chain_validator",
+    "reset_chain_validator_for_tests",
 ]

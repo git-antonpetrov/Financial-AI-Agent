@@ -307,6 +307,65 @@ class BankCertificateAuthority:
             return None
 
 
+    @classmethod
+    def load_from_central_pki(cls) -> Optional["BankCertificateAuthority"]:
+        """
+        Загружает доверенный сертификат Root CA (/certs/ca.crt), 
+        сертификат банка (/certs/bank.crt) и приватный ключ банка (/certs/bank.key),
+        выпущенные центральным Root CA.
+        """
+        ca_candidates = [
+            os.getenv("ROOT_CA_CERT_PATH", ""),
+            "/certs/ca.crt",
+            "./certs/ca.crt",
+            str(Path(__file__).resolve().parents[4] / "certs" / "ca.crt"),
+        ]
+        bank_cert_candidates = [
+            os.getenv("BANK_CERT_PATH", ""),
+            "/certs/bank.crt",
+            "./certs/bank.crt",
+            str(Path(__file__).resolve().parents[4] / "certs" / "bank.crt"),
+        ]
+        bank_key_candidates = [
+            os.getenv("BANK_KEY_PATH", ""),
+            "/certs/bank.key",
+            "./certs/bank.key",
+            str(Path(__file__).resolve().parents[4] / "certs" / "bank.key"),
+        ]
+
+        ca_file = next((Path(p) for p in ca_candidates if p and Path(p).exists()), None)
+        bank_cert_file = next((Path(p) for p in bank_cert_candidates if p and Path(p).exists()), None)
+        bank_key_file = next((Path(p) for p in bank_key_candidates if p and Path(p).exists()), None)
+
+        if not (ca_file and bank_cert_file and bank_key_file):
+            return None
+
+        try:
+            ca_cert = x509.load_pem_x509_certificate(ca_file.read_bytes(), default_backend())
+            bank_cert = x509.load_pem_x509_certificate(bank_cert_file.read_bytes(), default_backend())
+            bank_key = serialization.load_pem_private_key(
+                bank_key_file.read_bytes(),
+                password=None,
+                backend=default_backend(),
+            )
+
+            # Валидируем сертификат банка по доверенному Root CA
+            if not cls.verify_certificate_against_ca(
+                bank_cert.public_bytes(serialization.Encoding.PEM).decode("utf-8"),
+                ca_cert.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+            ):
+                return None
+
+            return cls(
+                ca_cert=ca_cert,
+                ca_private_key=None,  # Приватный ключ Root CA изолирован в микросервисе Root CA!
+                bank_cert=bank_cert,
+                bank_private_key=bank_key,
+            )
+        except Exception:
+            return None
+
+
 # Глобальный Singleton-экземпляр Bank CA
 _BANK_CA_INSTANCE: Optional[BankCertificateAuthority] = None
 
@@ -314,23 +373,33 @@ _BANK_CA_INSTANCE: Optional[BankCertificateAuthority] = None
 def get_bank_ca() -> BankCertificateAuthority:
     """
     Возвращает синглтон-экземпляр Bank CA.
-    Автоматически сохраняет/загружает сертификаты в постоянное хранилище или создает в памяти.
+    Приоритет:
+    1. Централизованный Zero-Trust Root CA (/certs/ca.crt + bank.crt + bank.key);
+    2. Локальная директория сертификатов BANK_CERTS_DIR;
+    3. Автоматическая генерация в памяти (dev/test fallback).
     """
     global _BANK_CA_INSTANCE
     if _BANK_CA_INSTANCE is not None:
         return _BANK_CA_INSTANCE
 
-    certs_dir = os.getenv("BANK_CERTS_DIR")
-    if not certs_dir:
-        certs_dir = str(Path(__file__).resolve().parent / "certs")
+    # 1. Попытка загрузки из центрального контура PKI
+    instance = BankCertificateAuthority.load_from_central_pki()
 
-    instance = BankCertificateAuthority.load_from_dir(certs_dir)
+    # 2. Попытка загрузки из локальной директории
+    if instance is None:
+        certs_dir = os.getenv("BANK_CERTS_DIR")
+        if not certs_dir:
+            certs_dir = str(Path(__file__).resolve().parent / "certs")
+        instance = BankCertificateAuthority.load_from_dir(certs_dir)
+
+    # 3. Эфемерная генерация в памяти
     if instance is None:
         instance = BankCertificateAuthority.create_in_memory()
         try:
+            certs_dir = os.getenv("BANK_CERTS_DIR") or str(Path(__file__).resolve().parent / "certs")
             instance.save_to_dir(certs_dir)
         except Exception:
-            pass  # Если директория недоступна для записи, работаем в памяти
+            pass
 
     _BANK_CA_INSTANCE = instance
     return _BANK_CA_INSTANCE

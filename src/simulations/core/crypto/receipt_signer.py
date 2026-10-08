@@ -84,12 +84,15 @@ class ReceiptSigner:
 
         signature_b64 = base64.b64encode(signature_bytes).decode("ascii")
 
+        bank_serial = str(self.ca.bank_cert.serial_number) if self.ca.bank_cert else None
+
         return {
             "receipt": receipt_payload,
             "signature": signature_b64,
             "algorithm": "SHA256withRSA-PSS",
             "signer_cn": "Financial AI Simulation Bank",
             "cert_fingerprint": self.ca.get_bank_cert_fingerprint(),
+            "bank_cert_serial": bank_serial,
             "bank_cert_pem": self.ca.get_bank_cert_pem(),
             "ca_cert_pem": self.ca.get_ca_cert_pem(),
         }
@@ -116,10 +119,19 @@ class ReceiptSigner:
             if not receipt or not signature_b64 or not bank_cert_pem:
                 return False, "Отсутствуют обязательные поля чека (receipt, signature или bank_cert_pem)"
 
-            # 1. Проверка сертификата Банка через CA (если CA передан или берется дефолтный)
-            if trusted_ca_cert_pem:
-                if not BankCertificateAuthority.verify_certificate_against_ca(bank_cert_pem, trusted_ca_cert_pem):
+            # 1. Проверка сертификата Банка через CA (доверенный параметр или цепочка из чека)
+            ca_pem = trusted_ca_cert_pem or signed_receipt.get("ca_cert_pem")
+            if ca_pem:
+                if not BankCertificateAuthority.verify_certificate_against_ca(bank_cert_pem, ca_pem):
                     return False, "Сертификат Банка не прошел валидацию доверенным Root CA"
+            else:
+                try:
+                    from src.simulations.core.crypto.chain_validator import get_chain_validator
+                    is_valid, msg = get_chain_validator().validate_certificate_chain(bank_cert_pem)
+                    if not is_valid:
+                        return False, f"Сертификат Банка не прошел валидацию: {msg}"
+                except Exception:
+                    pass
 
             # 2. Загрузка открытого ключа Банка из сертификата
             bank_cert = x509.load_pem_x509_certificate(bank_cert_pem.encode("utf-8"), default_backend())
