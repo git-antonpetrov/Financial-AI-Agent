@@ -98,7 +98,7 @@ bcrypt==4.1.2
 minio==7.2.4
 redis==5.0.3
 chromadb==1.5.9
-langchain-text-splitters==0.0.1
+langchain-text-splitters>=1.0.0
 numpy<2.0.0
 pywebview
 pyotp>=2.9.0
