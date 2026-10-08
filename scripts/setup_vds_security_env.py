@@ -16,6 +16,13 @@ import secrets
 import subprocess
 from pathlib import Path
 
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 
 def generate_rsa_keypair(priv_path: str | None = None, pub_path: str | None = None) -> tuple[str, str]:
     """
@@ -171,17 +178,27 @@ def setup_vds(project_dir: str | None = None) -> dict[str, str]:
         except Exception:
             pass
 
-    # 7. Принудительные параметры Zero-Trust In-Transit TLS & RSA JWT
-    env_dict["JWT_PRIVATE_KEY"] = f'"{priv_pem}"'
-    env_dict["JWT_PUBLIC_KEY"] = f'"{pub_pem}"'
+    # 7. Парольная фраза Root CA (AES-256)
+    cur_ca_pass = env_dict.get("ROOT_CA_PASSPHRASE", "")
+    if not cur_ca_pass or cur_ca_pass.startswith("change_this_strong_root_ca_passphrase"):
+        env_dict["ROOT_CA_PASSPHRASE"] = secrets.token_urlsafe(32)
+        generated_info["ROOT_CA_PASSPHRASE"] = "Сгенерирована криптостойкая парольная фраза Root CA"
+
+    # 8. Принудительные параметры Zero-Trust In-Transit TLS & RSA JWT
+    env_dict["JWT_PRIVATE_KEY"] = f'"{priv_pem}"' if not priv_pem.startswith('"') else priv_pem
+    env_dict["JWT_PUBLIC_KEY"] = f'"{pub_pem}"' if not pub_pem.startswith('"') else pub_pem
     env_dict["POSTGRES_SSLMODE"] = "require"
     env_dict["REDIS_SSL"] = "true"
     env_dict["MINIO_SECURE"] = "true"
     env_dict["MINIO_SSE_ENABLED"] = "true"
+    env_dict["MINIO_SSE_TYPE"] = env_dict.get("MINIO_SSE_TYPE", "s3")
     env_dict["CHROMA_ENVELOPE_ENCRYPTION_ENABLED"] = "true"
     env_dict["CADDY_CLIENT_AUTH_MODE"] = env_dict.get("CADDY_CLIENT_AUTH_MODE", "request")
     env_dict["REQUIRE_MTLS"] = env_dict.get("REQUIRE_MTLS", "false")
     env_dict["REQUIRE_2FA"] = env_dict.get("REQUIRE_2FA", "false")
+    env_dict["ADMIN_DOMAIN"] = env_dict.get("ADMIN_DOMAIN", "admin.fin-ai-agent.ru")
+    env_dict["ADMIN_LOCAL_DOMAIN"] = env_dict.get("ADMIN_LOCAL_DOMAIN", "admin.fin-ai-agent.local")
+    env_dict["FORCE_REGENERATE"] = env_dict.get("FORCE_REGENERATE", "false")
 
     # Перезаписываем или обновляем .env
     written_keys = set()
