@@ -112,16 +112,37 @@ def run_deployment(skip_build: bool = False, no_docker: bool = False, timeout: i
     while time.time() - start_time < timeout:
         running_count = 0
         for svc in critical_services:
+            status = "not_found"
             try:
                 insp = subprocess.run(
                     ["docker", "inspect", "--format={{.State.Status}}", svc],
                     capture_output=True,
                     text=True,
                 )
-                if insp.stdout.strip() == "running":
-                    running_count += 1
+                status = insp.stdout.strip()
             except Exception:
                 pass
+
+            if status != "running":
+                alias_map = {
+                    "postgres-db": "financial-postgres",
+                    "redis": "redis-server",
+                    "caddy-ingress": "caddy-server",
+                }
+                alt = alias_map.get(svc)
+                if alt:
+                    try:
+                        insp = subprocess.run(
+                            ["docker", "inspect", "--format={{.State.Status}}", alt],
+                            capture_output=True,
+                            text=True,
+                        )
+                        status = insp.stdout.strip()
+                    except Exception:
+                        pass
+
+            if status == "running":
+                running_count += 1
 
         if running_count == len(critical_services):
             all_running = True

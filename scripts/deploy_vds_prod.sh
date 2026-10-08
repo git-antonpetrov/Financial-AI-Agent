@@ -169,6 +169,25 @@ while true; do
     RUNNING_COUNT=0
     for svc in "${CRITICAL_SERVICES[@]}"; do
         STATUS=$($DOCKER_BIN inspect --format='{{.State.Status}}' "$svc" 2>/dev/null || echo "not_found")
+        if [[ "$STATUS" != "running" ]]; then
+            CID=$($DOCKER_COMPOSE_CMD ps -q "$svc" 2>/dev/null || true)
+            if [[ -n "$CID" ]]; then
+                STATUS=$($DOCKER_BIN inspect --format='{{.State.Status}}' "$CID" 2>/dev/null || echo "not_found")
+            fi
+        fi
+        if [[ "$STATUS" != "running" ]]; then
+            case "$svc" in
+                "postgres-db")
+                    STATUS=$($DOCKER_BIN inspect --format='{{.State.Status}}' "financial-postgres" 2>/dev/null || echo "not_found")
+                    ;;
+                "redis")
+                    STATUS=$($DOCKER_BIN inspect --format='{{.State.Status}}' "redis-server" 2>/dev/null || echo "not_found")
+                    ;;
+                "caddy-ingress")
+                    STATUS=$($DOCKER_BIN inspect --format='{{.State.Status}}' "caddy-server" 2>/dev/null || echo "not_found")
+                    ;;
+            esac
+        fi
         if [[ "$STATUS" == "running" ]]; then
             RUNNING_COUNT=$((RUNNING_COUNT + 1))
         fi
@@ -176,7 +195,7 @@ while true; do
 
     if [[ $RUNNING_COUNT -eq ${#CRITICAL_SERVICES[@]} ]]; then
         # Проверяем health endpoint Admin Server через локальный порт
-        if curl -skf "http://127.0.0.1:8000/health" &> /dev/null || curl -skf "https://127.0.0.1/health" &> /dev/null; then
+        if curl -skf "http://127.0.0.1:8001/health" &> /dev/null || curl -skf "http://127.0.0.1:8000/health" &> /dev/null || curl -skf "https://127.0.0.1/health" &> /dev/null; then
             ALL_READY=true
             break
         fi
