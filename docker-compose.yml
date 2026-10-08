@@ -222,12 +222,12 @@ services:
       - postgres-db
 
   chromadb:
-    image: chromadb/chroma:0.4.24
+    image: chromadb/chroma:1.5.9
     container_name: chromadb-server
     environment:
-      - CHROMA_SERVER_AUTH_PROVIDER=chromadb.auth.token.TokenAuthServerProvider
-      - CHROMA_SERVER_AUTH_CREDENTIALS_PROVIDER=chromadb.auth.token.TokenConfigServerAuthCredentialsProvider
-      - CHROMA_SERVER_AUTH_CREDENTIALS=${CHROMA_AUTH_TOKEN}
+      - CHROMA_SERVER_AUTHN_PROVIDER=chromadb.auth.token_authn.TokenAuthenticationServerProvider
+      - CHROMA_SERVER_AUTHN_CREDENTIALS=${CHROMA_AUTH_TOKEN}
+      - CHROMA_AUTH_TOKEN_TRANSPORT_HEADER=Authorization
     ports:
       - "127.0.0.1:8100:8000"
     volumes:
@@ -235,6 +235,7 @@ services:
     networks:
       - data_net
     restart: unless-stopped
+
     
   vector-worker:
     build:

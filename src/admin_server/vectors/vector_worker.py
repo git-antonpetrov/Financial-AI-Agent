@@ -151,15 +151,22 @@ minio_client = Minio(
     secure=MINIO_SECURE
 )
 
-# Подключаемся к запущенному контейнеру Chroma
+# Подключаемся к запущенному контейнеру Chroma с поддержкой версий 1.x и 0.4.x
+if hasattr(chromadb, "auth") and hasattr(chromadb.auth, "token_authn"):
+    auth_provider = "chromadb.auth.token_authn.TokenAuthClientProvider"
+else:
+    auth_provider = "chromadb.auth.token.TokenAuthClientProvider"
+
 chroma_client = chromadb.HttpClient(
     host=CHROMA_HOST, 
     port=CHROMA_PORT,
     settings=chromadb.config.Settings(
-        chroma_client_auth_provider="chromadb.auth.token.TokenAuthClientProvider",
-        chroma_client_auth_credentials=CHROMA_AUTH_TOKEN
+        chroma_client_auth_provider=auth_provider,
+        chroma_client_auth_credentials=CHROMA_AUTH_TOKEN,
+        chroma_auth_token_transport_header="Authorization"
     )
 )
+
 
 # Ожидание готовности ChromaDB
 log_info("Инициализация воркера", "Ожидание ChromaDB...")
