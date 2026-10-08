@@ -1,0 +1,16 @@
+FROM python:3.12-alpine
+
+WORKDIR /app
+
+RUN apk add --no-cache gcc musl-dev libffi-dev
+
+COPY src/pki/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+COPY src/pki /app
+
+ENV ROOT_CA_DATA_DIR=/data/ca \
+    SHARED_CERTS_DIR=/shared_certs \
+    PYTHONUNBUFFERED=1
+
+ENTRYPOINT ["python", "bootstrap_pki.py"]
