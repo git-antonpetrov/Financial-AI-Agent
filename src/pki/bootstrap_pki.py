@@ -4,6 +4,7 @@
 Может запускаться как автономная утилита на хосте, так и внутри контейнера Root CA.
 """
 
+import datetime
 import hashlib
 import os
 import shutil
@@ -102,6 +103,7 @@ def bootstrap_pki(
             "role": "bank_service",
             "san_dns": [
                 "bank-simulation",
+                "bank-service.internal",
                 "simulation-api",
                 "simulation-api.internal",
                 "localhost",
@@ -120,6 +122,7 @@ def bootstrap_pki(
             "role": "Security Operations",
             "san_dns": [
                 "admin-server",
+                "admin-server.internal",
                 "admin.fin-ai-agent.local",
                 "localhost",
             ],

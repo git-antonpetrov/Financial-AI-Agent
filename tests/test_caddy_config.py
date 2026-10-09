@@ -66,3 +66,12 @@ def test_caddyfile_streaming_timeouts():
     assert "response_header_timeout 180s" in content
     assert "read_timeout 180s" in content
     assert "write_timeout 180s" in content
+
+
+def test_caddyfile_internal_inter_service_tls_routing():
+    """Проверяет шифрование межсервисного транзита: bank-service.internal и admin-server.internal."""
+    content = load_caddyfile()
+    assert "bank-service.internal" in content
+    assert "admin-server.internal" in content
+    assert "reverse_proxy admin-server:8000" in content
+

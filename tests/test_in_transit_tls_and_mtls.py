@@ -37,9 +37,9 @@ from server import app
 
 def test_docker_compose_network_microsegmentation():
     """
-    Проверяет, что Docker Compose реализует 4 сегментированные сети:
-    edge_net, backend_net, data_net (с флагом internal: true), simulation_net.
-    Проверяет изоляцию Caddy, БД и сервисов симуляций.
+    Проверяет, что Docker Compose реализует 5 сегментированных сетей:
+    pki_net (internal: true), edge_net (ingress, только caddy), admin_backend_net, data_net (internal: true), simulation_net.
+    Проверяет строгую изоляцию Caddy, БД и сервисов управления и симуляций.
     """
     compose_path = Path(__file__).parent.parent / "docker-compose.yml"
     assert compose_path.exists(), "docker-compose.yml не найден"
@@ -50,41 +50,62 @@ def test_docker_compose_network_microsegmentation():
     assert "networks" in compose, "В docker-compose.yml должна быть секция 'networks'"
     networks = compose["networks"]
 
-    # 1. Проверяем наличие всех 4 сетей
+    # 1. Проверяем наличие всех 5 сетей
+    assert "pki_net" in networks, "Сеть pki_net отсутствует"
     assert "edge_net" in networks, "Сеть edge_net отсутствует"
-    assert "backend_net" in networks, "Сеть backend_net отсутствует"
+    assert "admin_backend_net" in networks, "Сеть admin_backend_net отсутствует"
     assert "data_net" in networks, "Сеть data_net отсутствует"
     assert "simulation_net" in networks, "Сеть simulation_net отсутствует"
 
-    # 2. Сеть data_net должна иметь internal: true для изоляции от внешнего интернета
-    data_net_config = networks["data_net"]
-    assert data_net_config.get("internal") is True, "Сеть data_net должна быть помечена как 'internal: true'"
+    # 2. Сети pki_net и data_net должны иметь internal: true для изоляции от внешнего интернета
+    assert networks["pki_net"].get("internal") is True, "Сеть pki_net должна быть помечена как 'internal: true'"
+    assert networks["data_net"].get("internal") is True, "Сеть data_net должна быть помечена как 'internal: true'"
 
     services = compose["services"]
 
-    # 3. Caddy подключен ТОЛЬКО к edge_net
+    # 3. Caddy — единственный сервис в публичной edge_net, также связывает admin_backend_net и simulation_net
     assert "caddy" in services
-    assert services["caddy"].get("networks") == ["edge_net"], "Caddy должен быть подключен только к edge_net"
+    caddy_nets = services["caddy"].get("networks", [])
+    if isinstance(caddy_nets, dict):
+        caddy_nets = list(caddy_nets.keys())
+    assert "edge_net" in caddy_nets, "Caddy должен быть подключен к edge_net"
+    assert "admin_backend_net" in caddy_nets, "Caddy должен маршрутизировать admin_backend_net"
+    assert "simulation_net" in caddy_nets, "Caddy должен маршрутизировать simulation_net"
+    assert "data_net" not in caddy_nets, "Caddy не должен иметь доступа к data_net"
+    assert "pki_net" not in caddy_nets, "Caddy не должен иметь доступа к pki_net"
 
-    # 4. Воркеры симуляций изолированы: подключены к simulation_net и не имеют доступа к redis/minio/chroma
+    # Проверяем, что в edge_net больше нет ни одного другого сервиса
+    for s_name, s_conf in services.items():
+        s_nets = s_conf.get("networks", [])
+        if isinstance(s_nets, dict):
+            s_nets = list(s_nets.keys())
+        if s_name != "caddy":
+            assert "edge_net" not in s_nets, f"Сервис {s_name} не должен иметь доступа к публичной edge_net"
+
+    # 4. Воркеры симуляций изолированы: подключены к simulation_net и data_net (для БД), не имеют доступа к redis/minio/chroma
     simulation_services = ["simulation-api", "bank-worker", "invest-worker", "digital-worker", "simulations-seeder"]
     for s_name in simulation_services:
         assert s_name in services, f"Сервис {s_name} отсутствует в docker-compose.yml"
         s_nets = services[s_name].get("networks", [])
+        if isinstance(s_nets, dict):
+            s_nets = list(s_nets.keys())
         assert "simulation_net" in s_nets, f"{s_name} должен быть в simulation_net"
-        assert "backend_net" not in s_nets, f"{s_name} не должен иметь доступа к backend_net"
+        assert "admin_backend_net" not in s_nets, f"{s_name} не должен иметь доступа к admin_backend_net"
         assert "edge_net" not in s_nets, f"{s_name} не должен иметь доступа к edge_net"
 
     # 5. Хранилища minio и chromadb подключены к data_net и изолированы от simulation_net
     assert services["minio"].get("networks") == ["data_net"]
     assert services["chromadb"].get("networks") == ["data_net"]
 
-    # 6. Redis подключен к backend_net и изолирован от simulation_net
-    assert services["redis"].get("networks") == ["backend_net"]
+    # 6. Redis подключен к admin_backend_net и изолирован от simulation_net
+    assert services["redis"].get("networks") == ["admin_backend_net"]
 
-    # 7. Admin Server объединяет edge_net, backend_net и data_net
+    # 7. PostgreSQL подключен исключительно к изолированной data_net
+    assert services["postgres-db"].get("networks") == ["data_net"], "PostgreSQL должен быть строго в data_net (internal: true)"
+
+    # 8. Admin Server подключен к admin_backend_net и data_net, изолирован от публичного контура edge_net
     admin_nets = set(services["admin-server"].get("networks", []))
-    assert admin_nets == {"edge_net", "backend_net", "data_net"}
+    assert admin_nets == {"admin_backend_net", "data_net"}, "Admin Server не должен иметь прямого подключения к edge_net"
 
 
 # ------------------------------------------------------------------------------

@@ -20,20 +20,20 @@ services:
   postgres-db:
     image: postgres:15-alpine
     container_name: financial-postgres
+    depends_on:
+      root-ca:
+        condition: service_completed_successfully
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     command: >
       sh -c "mkdir -p /tmp/pg_certs && cp /certs/postgres.key /tmp/pg_certs/postgres.key && chmod 600 /tmp/pg_certs/postgres.key && chown postgres:postgres /tmp/pg_certs/postgres.key && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/certs/postgres.crt -c ssl_key_file=/tmp/pg_certs/postgres.key -c ssl_ca_file=/certs/ca.crt"
-    ports:
-      - "127.0.0.1:15432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - certs_data:/certs:ro
     networks:
       - data_net
-      - simulation_net
     restart: unless-stopped
 
   pgadmin:
@@ -42,16 +42,16 @@ services:
     environment:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
-    ports:
-      - "127.0.0.1:5050:80"
     volumes:
       - pgadmin_data:/var/lib/pgadmin
       - certs_data:/certs:ro
     depends_on:
-      - postgres-db
+      postgres-db:
+        condition: service_started
+      root-ca:
+        condition: service_completed_successfully
     networks:
       - data_net
-      - simulation_net
     restart: unless-stopped
 
   simulations-seeder:
@@ -62,7 +62,10 @@ services:
       dockerfile: src/simulations/Dockerfile.seeder
     container_name: simulations-seeder
     depends_on:
-      - postgres-db
+      postgres-db:
+        condition: service_started
+      root-ca:
+        condition: service_completed_successfully
     environment:
       - BANK_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/bank_db
       - INVEST_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/invest_db
@@ -75,6 +78,7 @@ services:
       - .env
     networks:
       - simulation_net
+      - data_net
 
   bank-worker:
     build:
@@ -82,7 +86,10 @@ services:
       dockerfile: src/simulations/workers/bank_eod/Dockerfile
     container_name: bank-worker
     depends_on:
-      - postgres-db
+      postgres-db:
+        condition: service_started
+      root-ca:
+        condition: service_completed_successfully
     environment:
       - BANK_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/bank_db
       - TZ=Europe/Moscow
@@ -94,6 +101,7 @@ services:
       - .env
     networks:
       - simulation_net
+      - data_net
     restart: unless-stopped
 
   invest-worker:
@@ -102,7 +110,10 @@ services:
       dockerfile: src/simulations/workers/invest_eod/Dockerfile
     container_name: invest-worker
     depends_on:
-      - postgres-db
+      postgres-db:
+        condition: service_started
+      root-ca:
+        condition: service_completed_successfully
     environment:
       - INVEST_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/invest_db
       - TZ=Europe/Moscow
@@ -114,6 +125,7 @@ services:
       - .env
     networks:
       - simulation_net
+      - data_net
     restart: unless-stopped
 
   digital-worker:
@@ -124,6 +136,8 @@ services:
     depends_on:
       postgres-db:
         condition: service_started
+      root-ca:
+        condition: service_completed_successfully
     environment:
       - RUBLE_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/digital_db
       - TZ=Europe/Moscow
@@ -135,6 +149,7 @@ services:
       - .env
     networks:
       - simulation_net
+      - data_net
     restart: unless-stopped
 
   simulation-api:
@@ -143,9 +158,10 @@ services:
       dockerfile: src/simulations/api/Dockerfile
     container_name: simulation-api
     depends_on:
-      - postgres-db
-    ports:
-      - "127.0.0.1:8002:8002"
+      postgres-db:
+        condition: service_started
+      root-ca:
+        condition: service_completed_successfully
     environment:
       - BANK_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/bank_db
       - INVEST_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/invest_db
@@ -158,18 +174,19 @@ services:
       - .env
     networks:
       - simulation_net
+      - data_net
     restart: unless-stopped
 
   minio:
     image: elestio/minio:latest
     container_name: minio-server
+    depends_on:
+      root-ca:
+        condition: service_completed_successfully
     environment:
       - MINIO_ROOT_USER=${MINIO_ACCESS_KEY}
       - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}
       - MINIO_KMS_SECRET_KEY=${MINIO_KMS_SECRET_KEY}
-    ports:
-      - "127.0.0.1:9000:9000"
-      - "127.0.0.1:9001:9001"
     volumes:
       - minio_data:/data
       - certs_data:/certs:ro
@@ -181,6 +198,9 @@ services:
   redis:
     image: redis:7-alpine
     container_name: redis-server
+    depends_on:
+      root-ca:
+        condition: service_completed_successfully
     command: >
       redis-server 
       --tls-port 6379 
@@ -190,13 +210,11 @@ services:
       --tls-ca-cert-file /certs/ca.crt 
       --tls-auth-clients no 
       --requirepass ${REDIS_PASSWORD}
-    ports:
-      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
       - certs_data:/certs:ro
     networks:
-      - backend_net
+      - admin_backend_net
     restart: unless-stopped
 
   admin-server:
@@ -204,8 +222,15 @@ services:
       context: .
       dockerfile: src/admin_server/fastapi/Dockerfile
     container_name: admin-server
-    ports:
-      - "127.0.0.1:8001:8000"
+    depends_on:
+      root-ca:
+        condition: service_completed_successfully
+      postgres-db:
+        condition: service_started
+      redis:
+        condition: service_started
+      minio:
+        condition: service_started
     environment:
       - MINIO_URL=minio:9000
       - REDIS_HOST=redis
@@ -229,14 +254,9 @@ services:
     env_file:
       - .env
     networks:
-      - edge_net
-      - backend_net
+      - admin_backend_net
       - data_net
     restart: unless-stopped
-    depends_on:
-      - minio
-      - redis
-      - postgres-db
 
   chromadb:
     image: chromadb/chroma:1.5.9
@@ -245,20 +265,28 @@ services:
       - CHROMA_SERVER_AUTHN_PROVIDER=chromadb.auth.token_authn.TokenAuthenticationServerProvider
       - CHROMA_SERVER_AUTHN_CREDENTIALS=${CHROMA_AUTH_TOKEN}
       - CHROMA_AUTH_TOKEN_TRANSPORT_HEADER=Authorization
-    ports:
-      - "127.0.0.1:8100:8000"
     volumes:
       - chroma_data:/chroma/chroma
     networks:
       - data_net
     restart: unless-stopped
 
-    
   vector-worker:
     build:
       context: .
       dockerfile: src/admin_server/vectors/Dockerfile
     container_name: vector-worker
+    depends_on:
+      root-ca:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+      minio:
+        condition: service_started
+      chromadb:
+        condition: service_started
+      postgres-db:
+        condition: service_started
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -285,20 +313,19 @@ services:
     env_file:
       - .env
     networks:
-      - backend_net
+      - admin_backend_net
       - data_net
     restart: unless-stopped
-    depends_on:
-      - redis
-      - minio
-      - chromadb
 
   caddy:
     image: caddy:2-alpine
     container_name: caddy-server
     restart: unless-stopped
     depends_on:
-      - admin-server
+      root-ca:
+        condition: service_completed_successfully
+      admin-server:
+        condition: service_started
     ports:
       - "80:80"
       - "443:443"
@@ -312,13 +339,24 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     networks:
-      - edge_net
+      edge_net:
+        aliases:
+          - caddy
+      admin_backend_net:
+        aliases:
+          - caddy-backend
+          - admin-server.internal
+      simulation_net:
+        aliases:
+          - caddy-sim
+          - simulation-api.internal
+          - bank-service.internal
 
 # -----------------------------------------------------------------------------
 # СЕТЕВАЯ МИКРОСЕГМЕНТАЦИЯ И БЕЗОПАСНОСТЬ (Defense-in-Depth / Zero-Trust)
 # 1. pki_net:        Изолированная подсеть Root CA (internal: true, нет доступа в интернет).
 # 2. edge_net:       Публичный контур ingress (Caddy обратный прокси с TLS 1.3 и mTLS).
-# 3. backend_net:   Внутренняя сеть сервисов управления (Admin Server, Vector Worker, Redis).
+# 3. admin_backend_net:   Внутренняя сеть сервисов управления (Admin Server, Vector Worker, Redis).
 # 4. data_net:      Изолированная сеть хранения (PostgreSQL, MinIO, ChromaDB) с internal: true
 #                   (запрещен любой прямой доступ в/из внешней сети Интернет).
 # 5. simulation_net: Изолированный контур банковских симуляций (API, воркеры EOD, смарт-контракты).
@@ -334,7 +372,7 @@ networks:
     internal: true
   edge_net:
     driver: bridge
-  backend_net:
+  admin_backend_net:
     driver: bridge
   data_net:
     driver: bridge

@@ -23,24 +23,34 @@ from .software_bridge import SoftwareSigningBridge
 class ZeroTrustClientSigner:
     """
     Управляет клиентской криптографической подписью запросов к RAG API и валидацией квитанций сервера.
-    Поддерживает режимы:
-    - 'auto': Автоматическое определение (TPM -> Fallback к Software / Simulated);
-    - 'hardware': Строго аппаратный TPM 2.0 (Windows CNG);
+    Система функционирует строго в аппаратном режиме:
+    - 'hardware': Строго аппаратный TPM 2.0 (Windows CNG). Используется по умолчанию.
+    Для изолированного тестирования в CI/тестовых стендах доступны специализированные мосты:
     - 'simulated_tpm': Эмуляция TPM 2.0 / Windows Hello с подтверждением биометрии;
     - 'software': Программные ключи (admin_client.key / admin_client.crt).
+
+    Внимание: режим 'auto' полностью исключен из соображений Zero-Trust безопасности.
     """
 
     def __init__(
         self,
-        mode: str = "auto",
+        mode: str = "hardware",
         cert_path: Optional[str] = None,
         key_path: Optional[str] = None,
         ca_cert_path: Optional[str] = None,
         key_pem: Optional[str] = None,
         cert_pem: Optional[str] = None,
         ca_cert_pem: Optional[str] = None,
-        signing_scheme: str = "PSS"
+        signing_scheme: str = "PSS",
+        hardware_key_name: str = "FinancialAI_Admin_TPM_Key",
+        require_biometrics: bool = False
     ):
+        if mode == "auto":
+            raise ValueError(
+                "Режим 'auto' запрещен спецификацией безопасности Zero-Trust: "
+                "система работает строго в режиме 'hardware' (TPM 2.0)"
+            )
+
         self.mode = mode
         self.signing_scheme = signing_scheme
         self.cert_path = cert_path
@@ -53,36 +63,36 @@ class ZeroTrustClientSigner:
         if mode == "hardware":
             if not HardwareSigningBridge.is_tpm_available():
                 raise RuntimeError("Аппаратный криптомодуль TPM 2.0 недоступен на данном хосте")
-            # Для практического использования без регистрации в реестре Windows оборачиваем в изолированный мост
-            self._active_bridge = HardwareSigningBridge()
+            self._active_bridge = HardwareSigningBridge(
+                key_name=hardware_key_name,
+                require_biometrics=require_biometrics,
+                cert_path=cert_path,
+                cert_pem=cert_pem,
+                ca_cert_path=ca_cert_path
+            )
         elif mode == "simulated_tpm":
-            self._active_bridge = SimulatedTPMBridge()
+            self._active_bridge = SimulatedTPMBridge(
+                key_path=key_path,
+                key_pem=key_pem,
+                cert_path=cert_path,
+                cert_pem=cert_pem,
+                ca_cert_path=ca_cert_path,
+                ca_cert_pem=ca_cert_pem
+            )
         elif mode == "software":
             self._active_bridge = SoftwareSigningBridge(
                 cert_path=cert_path,
                 key_path=key_path,
                 key_pem=key_pem,
-                cert_pem=cert_pem
+                cert_pem=cert_pem,
+                ca_cert_path=ca_cert_path,
+                ca_cert_pem=ca_cert_pem
             )
-        else:  # 'auto'
-            # Если переданы пути к файлам ключей на диске, используем Software
-            if (key_path and os.path.exists(key_path)) or key_pem:
-                self._active_bridge = SoftwareSigningBridge(
-                    cert_path=cert_path,
-                    key_path=key_path,
-                    key_pem=key_pem,
-                    cert_pem=cert_pem
-                )
-            elif HardwareSigningBridge.is_tpm_available():
-                # Если TPM аппаратно доступен в системе Windows
-                self._active_bridge = SimulatedTPMBridge(key_name="Enterprise_TPM_Workstation")
-            else:
-                self._active_bridge = SoftwareSigningBridge(
-                    cert_path=cert_path,
-                    key_path=key_path,
-                    key_pem=key_pem,
-                    cert_pem=cert_pem
-                )
+        else:
+            raise ValueError(
+                f"Недопустимый режим криптографической подписи '{mode}'. "
+                "Система функционирует строго в режиме 'hardware'."
+            )
 
     def get_certificate_pem(self) -> str:
         """Возвращает клиентский X.509 сертификат в формате PEM."""

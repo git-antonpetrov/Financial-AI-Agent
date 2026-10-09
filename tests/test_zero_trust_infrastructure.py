@@ -77,7 +77,7 @@ def test_docker_compose_zero_trust_topology():
 
     # 1. Проверка 5 изолированных подсетей
     networks = compose.get("networks", {})
-    expected_networks = ["pki_net", "edge_net", "backend_net", "data_net", "simulation_net"]
+    expected_networks = ["pki_net", "edge_net", "admin_backend_net", "data_net", "simulation_net"]
     for net in expected_networks:
         assert net in networks, f"Сеть {net} отсутствует в docker-compose.yml"
 
@@ -105,11 +105,23 @@ def test_docker_compose_zero_trust_topology():
         for v in vols:
             assert "root_ca_data" not in str(v), f"Утечка изоляции: сервис {svc_name} имеет доступ к root_ca_data!"
 
-    # 3. База данных PostgreSQL не должна быть доступна напрямую из внешнего контура edge_net
+    # 3. База данных PostgreSQL строго в data_net (internal: true), без edge_net и без simulation_net
     pg_svc = services.get("postgres-db", {})
     pg_networks = pg_svc.get("networks", [])
     assert "edge_net" not in pg_networks, "PostgreSQL не должен быть подключен к публичной edge_net"
-    assert "data_net" in pg_networks, "PostgreSQL должен быть подключен к защищенной data_net"
+    assert "simulation_net" not in pg_networks, "PostgreSQL не должен быть в simulation_net (нарушение internal: true)"
+    assert pg_networks == ["data_net"], "PostgreSQL должен быть подключен исключительно к защищенной data_net"
+
+    # 4. Проверка исключительности публичной edge_net (только Caddy)
+    for svc_name, svc_conf in services.items():
+        nets = svc_conf.get("networks", [])
+        if isinstance(nets, dict):
+            nets = list(nets.keys())
+        if svc_name == "caddy":
+            assert "edge_net" in nets
+        else:
+            assert "edge_net" not in nets, f"Сервис {svc_name} не должен иметь прямого подключения к edge_net!"
+
 
 
 def test_caddyfile_mtls_ingress_rules():

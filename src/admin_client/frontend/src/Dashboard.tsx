@@ -1,23 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { Users, FileText, UploadCloud, Clock, CheckCircle2, Globe, Server, Check, X, LogOut, RefreshCw, KeyRound } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { invoke } from '@tauri-apps/api/core'
-
-const getLocalSidecarSecret = async (): Promise<string> => {
-  try {
-    return await invoke<string>('get_sidecar_secret')
-  } catch {
-    return ''
-  }
-}
-
-const getLocalSidecarUrl = async (): Promise<string> => {
-  try {
-    return await invoke<string>('get_sidecar_url')
-  } catch {
-    return 'http://127.0.0.1:8005'
-  }
-}
+import { localFetch, getLocalSidecarSecret, getLocalSidecarUrl } from './api'
 
 type Tab = 'rag' | 'agents'
 
@@ -44,11 +28,6 @@ interface AgentRequest {
   created_at?: string
 }
 
-interface ContentAiConfig {
-  username: string
-  password: string
-  api_uri: string
-}
 
 interface DashboardProps {
   lang: 'en' | 'ru'
@@ -126,18 +105,7 @@ const translateStatusMessage = (msg: string | undefined, lang: 'en' | 'ru') => {
   return translatedMsg;
 };
 
-const getResolvedServerUrl = (): string => {
-  const rawUrl = localStorage.getItem('admin_server') || ''
-  try {
-    const parsedUrl = new URL(rawUrl || 'http://127.0.0.1:8000')
-    if (import.meta.env.DEV && parsedUrl.hostname === 'admin.fin-ai-agent.ru') {
-      return '/api_proxy'
-    }
-  } catch {
-    // Возвращает исходный URL при ошибке разбора
-  }
-  return rawUrl
-}
+
 
 export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
   const [activeTab, setActiveTab] = useState<Tab>('rag')
@@ -153,8 +121,6 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
   const [approvingRequests, setApprovingRequests] = useState<AgentRequest[]>([])
   const [requestFiles, setRequestFiles] = useState<Record<number, File>>({})
   const [selectedAgent, setSelectedAgent] = useState('main')
-  const contentAiConfigPromiseRef = useRef<Promise<ContentAiConfig> | null>(null)
-
   // Состояние управления ключами и безопасностью агентов
   const [showAgentKeysModal, setShowAgentKeysModal] = useState(false)
   const [agentList, setAgentList] = useState<any[]>([])
@@ -165,51 +131,14 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
     langRef.current = lang;
   }, [lang]);
 
-  const authFetch = useCallback(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    const token = sessionStorage.getItem('admin_token')
-    const headers = new Headers(init?.headers || {})
-    if (token && !headers.has('Authorization')) {
-      headers.set('Authorization', `Bearer ${token}`)
-    }
-    const res = await fetch(input, { ...init, headers })
-    if (res.status === 401) {
-      // Пытаемся прозрачно обновить токен через Refresh Token Rotation (RTR)
-      const refreshToken = sessionStorage.getItem('admin_refresh_token')
-      const serverUrl = getResolvedServerUrl()
-      if (refreshToken && serverUrl) {
-        try {
-          const refreshRes = await fetch(`${serverUrl}/api/auth/refresh`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ refresh_token: refreshToken })
-          })
-          if (refreshRes.ok) {
-            const data = await refreshRes.json()
-            if (data.access_token) {
-              sessionStorage.setItem('admin_token', data.access_token)
-              if (data.refresh_token) {
-                sessionStorage.setItem('admin_refresh_token', data.refresh_token)
-              }
-              const retryHeaders = new Headers(init?.headers || {})
-              retryHeaders.set('Authorization', `Bearer ${data.access_token}`)
-              return await fetch(input, { ...init, headers: retryHeaders })
-            }
-          }
-        } catch {
-          // Игнорируем сетевые ошибки рефреша и переходим к логауту
-        }
-      }
-      onLogout?.('errorSessionExpired')
-      throw new Error('Unauthorized (401): Session expired')
-    }
-    return res
-  }, [onLogout])
-
   const fetchRequests = useCallback(async () => {
     setIsLoadingRequests(true)
     try {
-      const serverUrl = getResolvedServerUrl()
-      const res = await authFetch(`${serverUrl}/api/agent-requests`)
+      const res = await localFetch('/api/local/agent-requests')
+      if (res.status === 401) {
+        onLogout?.('errorSessionExpired')
+        return
+      }
       if (res.ok) {
         const data = await res.json()
         setRequests(data)
@@ -219,13 +148,16 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
     } finally {
       setIsLoadingRequests(false)
     }
-  }, [authFetch])
+  }, [onLogout])
 
   const fetchAgentList = useCallback(async () => {
     setLoadingAgents(true)
     try {
-      const serverUrl = getResolvedServerUrl()
-      const res = await authFetch(`${serverUrl}/api/agents`)
+      const res = await localFetch('/api/local/agents')
+      if (res.status === 401) {
+        onLogout?.('errorSessionExpired')
+        return
+      }
       if (res.ok) {
         const data = await res.json()
         setAgentList(data)
@@ -235,29 +167,50 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
     } finally {
       setLoadingAgents(false)
     }
-  }, [authFetch])
+  }, [onLogout])
 
   const handleSuspendAgent = async (agentName: string) => {
-    const serverUrl = getResolvedServerUrl()
-    await authFetch(`${serverUrl}/api/agents/${agentName}/suspend`, { method: 'POST' })
-    void fetchAgentList()
+    try {
+      const res = await localFetch(`/api/local/agents/${agentName}/suspend`, { method: 'POST' })
+      if (res.status === 401) {
+        onLogout?.('errorSessionExpired')
+        return
+      }
+      void fetchAgentList()
+    } catch (e) {
+      console.error(e)
+    }
   }
 
   const handleReactivateAgent = async (agentName: string) => {
-    const serverUrl = getResolvedServerUrl()
-    await authFetch(`${serverUrl}/api/agents/${agentName}/reactivate`, { method: 'POST' })
-    void fetchAgentList()
+    try {
+      const res = await localFetch(`/api/local/agents/${agentName}/reactivate`, { method: 'POST' })
+      if (res.status === 401) {
+        onLogout?.('errorSessionExpired')
+        return
+      }
+      void fetchAgentList()
+    } catch (e) {
+      console.error(e)
+    }
   }
 
   const handleRevokeKey = async (agentName: string, kid?: string) => {
     const reason = prompt(lang === 'en' ? 'Revocation reason:' : 'Причина отзыва:') || 'Compromised'
-    const serverUrl = getResolvedServerUrl()
-    await authFetch(`${serverUrl}/api/agents/${agentName}/revoke`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ agent_name: agentName, kid, reason })
-    })
-    void fetchAgentList()
+    try {
+      const res = await localFetch(`/api/local/agents/${agentName}/revoke`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kid, reason })
+      })
+      if (res.status === 401) {
+        onLogout?.('errorSessionExpired')
+        return
+      }
+      void fetchAgentList()
+    } catch (e) {
+      console.error(e)
+    }
   }
 
   useEffect(() => {
@@ -284,14 +237,17 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
     setRequests(prev => prev.map(r => ids.includes(r.id) ? { ...r, status: 'rejected' } : r))
     setSelectedRequests(new Set())
     try {
-      const serverUrl = getResolvedServerUrl()
-      const res = await authFetch(`${serverUrl}/api/agent-requests/reject`, {
+      const res = await localFetch('/api/local/agent-requests/reject', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({ request_ids: ids })
       })
+      if (res.status === 401) {
+        onLogout?.('errorSessionExpired')
+        return
+      }
       if (!res.ok) {
         throw new Error(`Reject failed with status ${res.status}`)
       }
@@ -341,21 +297,23 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
       }).filter(f => f.file !== undefined)
 
       setLocalFiles(prev => [...prev, ...newLocalFiles])
-      // Передает управление запуском файлов планировщику очереди
 
       setIsApproveModalOpen(false)
       setSelectedRequests(new Set())
       setActiveTab('rag')
 
-      // Пытается обновить статусы на сервере
-      const serverUrl = getResolvedServerUrl()
-      const res = await authFetch(`${serverUrl}/api/agent-requests/approve`, {
+      // Обновляем статусы через локальный BFF
+      const res = await localFetch('/api/local/agent-requests/approve', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({ request_ids: ids })
       })
+      if (res.status === 401) {
+        onLogout?.('errorSessionExpired')
+        return
+      }
       if (!res.ok) {
         throw new Error(`Approve failed with status ${res.status}`)
       }
@@ -379,7 +337,6 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
           display_message: 'В очереди...'
         }))
         setLocalFiles((prev) => [...prev, ...newFiles])
-        // Передает управление запуском файлов планировщику очереди
       }
       if (fileInputRef.current) {
         fileInputRef.current.value = ''
@@ -394,42 +351,9 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
       // Устанавливает статус обработки для исключения повторного захвата
       setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'processing', display_message: 'Отправка файла...' } : f))
 
-      const serverUrl = getResolvedServerUrl()
-
-      if (!contentAiConfigPromiseRef.current) {
-        contentAiConfigPromiseRef.current = (async () => {
-          const configRes = await authFetch(`${serverUrl}/api/config/contentai`)
-
-          if (!configRes.ok) {
-            throw new Error('Не удалось получить учетные данные Content AI с сервера. Возможно, сервер еще обновляется.')
-          }
-
-          const config = await configRes.json()
-          const username = config.username || ''
-          const password = config.password || ''
-          const api_uri = config.api_uri || ''
-
-          if (!username || !password) {
-            throw new Error('Учетные данные Content AI не настроены на главном сервере (.env)')
-          }
-
-          return { username, password, api_uri }
-        })().catch(err => {
-          contentAiConfigPromiseRef.current = null
-          throw err
-        })
-      }
-
-      const { username: contentaiUsername, password: contentaiPassword, api_uri: contentaiApiUri } = await contentAiConfigPromiseRef.current
-
       const formData = new FormData()
       formData.append('file', fileObj.file)
       formData.append('agent_name', fileObj.agent_name || 'main')
-      formData.append('server_url', localStorage.getItem('admin_server') || '')
-      formData.append('admin_token', sessionStorage.getItem('admin_token') || '')
-      formData.append('contentai_username', contentaiUsername)
-      formData.append('contentai_password', contentaiPassword)
-      formData.append('contentai_api_uri', contentaiApiUri)
 
       const localSecret = await getLocalSidecarSecret()
       const sidecarBaseUrl = await getLocalSidecarUrl()
@@ -498,7 +422,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
       setLocalFiles(prev => prev.map(f => f.id === fileObj.id ? { ...f, status: 'error', display_message: 'Ошибка загрузки' } : f))
       processingRef.current.delete(fileObj.id)
     }
-  }, [authFetch, onLogout])
+  }, [onLogout])
 
   const processingRef = useRef<Set<string>>(new Set());
 

@@ -10,6 +10,7 @@ import ipaddress
 from concurrent.futures import ThreadPoolExecutor
 import urllib.parse
 import secrets
+import requests
 # pyrefly: ignore [missing-import]
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Response, status
 # pyrefly: ignore [missing-import]
@@ -22,17 +23,114 @@ except ImportError:
         from starlette.responses import StreamingResponse as EventSourceResponse
 # pyrefly: ignore [missing-import]
 from fastapi.middleware.cors import CORSMiddleware
+from typing import Optional, List, Dict, Any
+from pydantic import BaseModel
 from contextlib import asynccontextmanager
 from pipeline import DocumentPipeline
 
 try:
-    from src.admin_client.backend.core.crypto import HardwareSigningBridge, ZeroTrustClientSigner
+    from src.admin_client.backend.core.crypto import (
+        HardwareSigningBridge,
+        ZeroTrustClientSigner,
+        find_root_ca_in_windows_store,
+        find_client_cert_in_windows_store,
+        get_windows_cert_store_help_message,
+        WindowsCertificateStoreError,
+        CertificateMissingError,
+        CertificateValidationError,
+    )
 except ImportError:
     try:
-        from core.crypto import HardwareSigningBridge, ZeroTrustClientSigner
+        from core.crypto import (
+            HardwareSigningBridge,
+            ZeroTrustClientSigner,
+            find_root_ca_in_windows_store,
+            find_client_cert_in_windows_store,
+            get_windows_cert_store_help_message,
+            WindowsCertificateStoreError,
+            CertificateMissingError,
+            CertificateValidationError,
+        )
     except ImportError:
         HardwareSigningBridge = None
         ZeroTrustClientSigner = None
+        find_root_ca_in_windows_store = None
+        find_client_cert_in_windows_store = None
+        get_windows_cert_store_help_message = lambda x: "Сертификаты Zero-Trust не найдены"
+        WindowsCertificateStoreError = RuntimeError
+        CertificateMissingError = RuntimeError
+        CertificateValidationError = RuntimeError
+
+try:
+    from src.admin_client.backend.core.remote_client import (
+        RemoteAdminClient,
+        AuthenticationError,
+        SessionExpiredError,
+        RemoteClientError,
+    )
+except ImportError:
+    try:
+        from core.remote_client import (
+            RemoteAdminClient,
+            AuthenticationError,
+            SessionExpiredError,
+            RemoteClientError,
+        )
+    except ImportError:
+        RemoteAdminClient = None
+        AuthenticationError = Exception
+        SessionExpiredError = Exception
+        RemoteClientError = Exception
+
+# Инициализация синглтона удаленного доверенного клиента (BFF)
+remote_client = RemoteAdminClient() if RemoteAdminClient else None
+
+def get_remote_client() -> RemoteAdminClient:
+    """Возвращает инициализированный доверенный клиент или вызывает ошибку сервера."""
+    if not remote_client:
+        raise HTTPException(status_code=500, detail="RemoteAdminClient is not available")
+    return remote_client
+
+
+class LoginRequest(BaseModel):
+    server_url: str
+    username: str = "admin"
+    password: str
+    otp_code: str = ""
+
+
+class Pair2FARequest(BaseModel):
+    server_url: Optional[str] = None
+    username: str = "admin"
+    password: str
+
+
+class AgentRevokeRequest(BaseModel):
+    kid: Optional[str] = None
+    reason: str = "Compromised"
+
+
+class AgentBatchRequest(BaseModel):
+    request_ids: List[int]
+
+
+def handle_remote_error(e: Exception):
+    """Преобразует исключения удаленного взаимодействия в корректные HTTP-ответы."""
+    if isinstance(e, SessionExpiredError):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired")
+    if isinstance(e, requests.HTTPError) and e.response is not None:
+        status_code = e.response.status_code
+        detail_msg = e.response.text
+        try:
+            detail_msg = e.response.json().get("detail", detail_msg)
+        except Exception:
+            pass
+        raise HTTPException(status_code=status_code, detail=detail_msg)
+    if isinstance(e, AuthenticationError):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
+    if isinstance(e, RemoteClientError):
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
+    raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 # Очереди в памяти для SSE-ответов и время их создания
 job_queues = {}
@@ -246,11 +344,145 @@ def validate_server_url(server_url: str) -> None:
             detail=f"Invalid server_url: unable to resolve hostname {hostname}",
         )
 
+@app.post("/api/local/auth/login")
+async def local_auth_login(req: LoginRequest):
+    """Выполняет аутентификацию администратора на удаленном сервере по mTLS."""
+    client = get_remote_client()
+    try:
+        validate_server_url(req.server_url)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    try:
+        return client.login(
+            server_url=req.server_url,
+            username=req.username,
+            password=req.password,
+            otp_code=req.otp_code,
+        )
+    except Exception as e:
+        handle_remote_error(e)
+
+
+@app.get("/api/local/auth/status")
+async def local_auth_status():
+    """Возвращает информацию о текущей активной сессии администратора."""
+    client = get_remote_client()
+    return client.get_session_info()
+
+
+@app.post("/api/local/auth/logout")
+async def local_auth_logout():
+    """Аннулирует текущую сессию администратора."""
+    client = get_remote_client()
+    client.logout()
+    return {"status": "ok"}
+
+
+@app.post("/api/local/auth/2fa/pair")
+async def local_auth_2fa_pair(req: Pair2FARequest):
+    """Инициирует генерацию секрета и QR-кода двухфакторной аутентификации (2FA)."""
+    client = get_remote_client()
+    if req.server_url:
+        validate_server_url(req.server_url)
+        client.set_server_url(req.server_url)
+    try:
+        return client.pair_2fa(username=req.username, password=req.password)
+    except Exception as e:
+        handle_remote_error(e)
+
+
+@app.get("/api/local/agents")
+async def local_get_agents():
+    """Возвращает актуальный список всех агентов системы."""
+    client = get_remote_client()
+    if not client.is_authenticated():
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin session not authenticated")
+    try:
+        return client.get_agents()
+    except Exception as e:
+        handle_remote_error(e)
+
+
+@app.post("/api/local/agents/{agent_name}/suspend")
+async def local_suspend_agent(agent_name: str):
+    """Приостанавливает операции указанного агента."""
+    client = get_remote_client()
+    if not client.is_authenticated():
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin session not authenticated")
+    try:
+        return client.suspend_agent(agent_name)
+    except Exception as e:
+        handle_remote_error(e)
+
+
+@app.post("/api/local/agents/{agent_name}/reactivate")
+async def local_reactivate_agent(agent_name: str):
+    """Возобновляет функционирование приостановленного агента."""
+    client = get_remote_client()
+    if not client.is_authenticated():
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin session not authenticated")
+    try:
+        return client.reactivate_agent(agent_name)
+    except Exception as e:
+        handle_remote_error(e)
+
+
+@app.post("/api/local/agents/{agent_name}/revoke")
+async def local_revoke_agent(agent_name: str, req: AgentRevokeRequest = AgentRevokeRequest()):
+    """Выполняет немедленный отзыв криптографического ключа агента (Instant Revocation)."""
+    client = get_remote_client()
+    if not client.is_authenticated():
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin session not authenticated")
+    try:
+        return client.revoke_agent(agent_name, kid=req.kid, reason=req.reason)
+    except Exception as e:
+        handle_remote_error(e)
+
+
+@app.get("/api/local/agent-requests")
+async def local_get_agent_requests():
+    """Возвращает список запросов на регламентные документы от агентов."""
+    client = get_remote_client()
+    if not client.is_authenticated():
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin session not authenticated")
+    try:
+        return client.get_agent_requests()
+    except Exception as e:
+        handle_remote_error(e)
+
+
+@app.post("/api/local/agent-requests/approve")
+async def local_approve_agent_requests(req: AgentBatchRequest):
+    """Одобряет выбранные заявки агентов на доступ к документам."""
+    client = get_remote_client()
+    if not client.is_authenticated():
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin session not authenticated")
+    try:
+        return client.approve_agent_requests(req.request_ids)
+    except Exception as e:
+        handle_remote_error(e)
+
+
+@app.post("/api/local/agent-requests/reject")
+async def local_reject_agent_requests(req: AgentBatchRequest):
+    """Отклоняет выбранные заявки агентов."""
+    client = get_remote_client()
+    if not client.is_authenticated():
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin session not authenticated")
+    try:
+        return client.reject_agent_requests(req.request_ids)
+    except Exception as e:
+        handle_remote_error(e)
+
+
 @app.post("/api/local/process")
 async def process_document(
     agent_name: str = Form(...),
-    server_url: str = Form(...),
-    admin_token: str = Form(...),
+    server_url: Optional[str] = Form(None),
+    admin_token: Optional[str] = Form(None),
     contentai_username: str = Form(""),
     contentai_password: str = Form(""),
     contentai_api_uri: str = Form(""),
@@ -266,12 +498,64 @@ async def process_document(
     if agent_name not in VALID_AGENTS:
         raise HTTPException(status_code=400, detail=f"Invalid agent: {agent_name}")
 
+    # Подтягиваем параметры из активной сессии remote_client, если они не переданы напрямую
+    if not server_url and remote_client:
+        server_url = remote_client.server_url
+    if not admin_token and remote_client:
+        admin_token = remote_client.access_token
+
+    if not server_url:
+        raise HTTPException(status_code=400, detail="server_url is required or session must be authenticated")
+
     # Валидация server_url с защитой от SSRF
     validate_server_url(server_url)
 
     # Базовая проверка наличия и структуры JWT admin_token
     if not admin_token or len(admin_token.strip().split(".")) != 3:
-        raise HTTPException(status_code=401, detail="Invalid admin_token format")
+        raise HTTPException(status_code=401, detail="Invalid admin_token format or not authenticated")
+
+    # Автоматическое получение учетных данных Content AI (OCR) через бэкенд, исключая утечку во фронтенд
+    if remote_client and not (contentai_username and contentai_password and contentai_api_uri):
+        try:
+            cfg = remote_client.get_contentai_config()
+            contentai_username = contentai_username or cfg.get("username", "")
+            contentai_password = contentai_password or cfg.get("password", "")
+            contentai_api_uri = contentai_api_uri or cfg.get("api_uri", "")
+        except Exception:
+            pass
+
+    if remote_client:
+        ca_cert_path = ca_cert_path or remote_client.ca_cert_path or ""
+        client_cert_path = client_cert_path or remote_client.client_cert_path or ""
+        client_key_path = client_key_path or remote_client.client_key_path or ""
+
+    # Проверка Zero-Trust сертификатов перед постановкой задачи
+    if use_zero_trust:
+        has_ca = (
+            bool(ca_cert_path and os.path.exists(ca_cert_path))
+            or bool(os.getenv("CA_CERT_PATH") and os.path.exists(os.getenv("CA_CERT_PATH", "")))
+            or os.path.exists("./certs/ca.crt")
+            or os.path.exists("certs/ca.crt")
+            or (bool(find_root_ca_in_windows_store and find_root_ca_in_windows_store()))
+        )
+        has_cert = (
+            bool(client_cert_path and os.path.exists(client_cert_path))
+            or bool(os.getenv("ADMIN_CLIENT_CERT_PATH") and os.path.exists(os.getenv("ADMIN_CLIENT_CERT_PATH", "")))
+            or os.path.exists("./certs/admin_client.crt")
+            or os.path.exists("certs/admin_client.crt")
+            or (bool(find_client_cert_in_windows_store and find_client_cert_in_windows_store()))
+        )
+        if not has_ca or not has_cert:
+            missing = "all" if (not has_ca and not has_cert) else ("root_ca" if not has_ca else "client_cert")
+            error_instruction = get_windows_cert_store_help_message(missing)
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={
+                    "error": "WINDOWS_CERT_STORE_CERTIFICATE_MISSING",
+                    "missing_component": missing,
+                    "message": error_instruction
+                }
+            )
 
     job_id = str(uuid.uuid4())
     job_queues[job_id] = asyncio.Queue()
@@ -322,26 +606,61 @@ async def process_document(
 
 @app.get("/api/local/security/status")
 async def get_security_status():
-    """Возвращает статус аппаратной безопасности (TPM 2.0 / Windows Hello) и mTLS сертификатов."""
+    """Возвращает статус аппаратной безопасности (TPM 2.0 / Windows Hello) и системного хранилища сертификатов Windows."""
     tpm_available = False
     if HardwareSigningBridge:
         tpm_available = HardwareSigningBridge.is_tpm_available()
 
+    win_client_found = False
+    win_root_found = False
+    if find_client_cert_in_windows_store:
+        try:
+            win_client_found = bool(find_client_cert_in_windows_store())
+        except Exception:
+            pass
+    if find_root_ca_in_windows_store:
+        try:
+            win_root_found = bool(find_root_ca_in_windows_store())
+        except Exception:
+            pass
+
     cert_mounted = False
     signer_fp = "none"
+    signer_error = None
     if ZeroTrustClientSigner:
         try:
             signer = ZeroTrustClientSigner()
             signer_fp = signer.get_key_fingerprint()
             cert_mounted = bool(signer.get_certificate_pem())
-        except Exception:
-            pass
+        except Exception as e:
+            signer_error = str(e)
+
+    # Определение статуса хранилища сертификатов Windows
+    if win_client_found and win_root_found:
+        store_status = "ready"
+        store_instruction = None
+    elif not win_root_found and not win_client_found:
+        store_status = "missing_both"
+        store_instruction = get_windows_cert_store_help_message("all")
+    elif not win_root_found:
+        store_status = "missing_root_ca"
+        store_instruction = get_windows_cert_store_help_message("root_ca")
+    else:
+        store_status = "missing_client_cert"
+        store_instruction = get_windows_cert_store_help_message("client_cert")
 
     return {
         "hardware_tpm_available": tpm_available,
         "platform": sys.platform,
-        "zero_trust_ready": cert_mounted or tpm_available,
-        "client_key_fingerprint": signer_fp
+        "zero_trust_ready": cert_mounted or (tpm_available and (win_root_found or bool(os.getenv("CA_CERT_PATH")))),
+        "client_key_fingerprint": signer_fp,
+        "windows_cert_store": {
+            "client_cert_found": win_client_found,
+            "root_ca_found": win_root_found,
+            "status": store_status,
+            "instruction": store_instruction
+        },
+        "signer_error": signer_error
     }
 
 @app.get("/api/local/progress/{job_id}", response_class=EventSourceResponse)

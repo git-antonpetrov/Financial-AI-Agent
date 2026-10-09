@@ -167,3 +167,132 @@ def test_frozen_execution_requires_secret():
     import main
     # При sys.frozen == False и пустом секрете (режим разработки) модуль импортируется без ошибок
     assert getattr(sys, "frozen", False) is False
+
+
+def test_local_auth_login_and_status():
+    """Проверяет локальную авторизацию через BFF и получение статуса сессии."""
+    from fastapi.testclient import TestClient
+    import main
+    from unittest.mock import MagicMock
+
+    client = TestClient(main.app)
+
+    # 1. Проверка SSRF в server_url при логине
+    res_ssrf = client.post(
+        "/api/local/auth/login",
+        json={"server_url": "http://192.168.1.1:8000", "password": "secret"}
+    )
+    assert res_ssrf.status_code == 400
+    assert "SSRF protection" in res_ssrf.text
+
+    # 2. Успешный логин с моком remote_client.login
+    with patch.object(main.remote_client, "login", return_value={"status": "ok", "username": "admin", "role": "admin", "server_url": "https://remote.bank.internal"}) as mock_login:
+        res_ok = client.post(
+            "/api/local/auth/login",
+            json={"server_url": "https://localhost:8000", "password": "secret", "otp_code": "123456"}
+        )
+        assert res_ok.status_code == 200
+        data = res_ok.json()
+        assert data["status"] == "ok"
+        assert data["username"] == "admin"
+        mock_login.assert_called_once()
+
+    # 3. Проверка статуса авторизации
+    with patch.object(main.remote_client, "get_session_info", return_value={"is_authenticated": True, "server_url": "https://localhost:8000", "username": "admin", "role": "admin"}):
+        res_status = client.get("/api/local/auth/status")
+        assert res_status.status_code == 200
+        assert res_status.json()["is_authenticated"] is True
+
+    # 4. Проверка logout
+    with patch.object(main.remote_client, "logout") as mock_logout:
+        res_logout = client.post("/api/local/auth/logout")
+        assert res_logout.status_code == 200
+        assert res_logout.json() == {"status": "ok"}
+        mock_logout.assert_called_once()
+
+
+def test_local_agent_endpoints_unauthorized_and_authorized():
+    """Проверяет эндпоинты управления агентами и заявками через BFF."""
+    from fastapi.testclient import TestClient
+    import main
+
+    client = TestClient(main.app)
+
+    # 1. Запрос к агентам без авторизации возвращает 401
+    with patch.object(main.remote_client, "is_authenticated", return_value=False):
+        res_unauth = client.get("/api/local/agents")
+        assert res_unauth.status_code == 401
+        assert "not authenticated" in res_unauth.text
+
+    # 2. Авторизованные вызовы
+    with patch.object(main.remote_client, "is_authenticated", return_value=True):
+        # Список агентов
+        with patch.object(main.remote_client, "get_agents", return_value=[{"name": "bank", "status": "active"}]):
+            res_agents = client.get("/api/local/agents")
+            assert res_agents.status_code == 200
+            assert res_agents.json() == [{"name": "bank", "status": "active"}]
+
+        # Suspend
+        with patch.object(main.remote_client, "suspend_agent", return_value={"status": "suspended"}):
+            res_suspend = client.post("/api/local/agents/bank/suspend")
+            assert res_suspend.status_code == 200
+            assert res_suspend.json()["status"] == "suspended"
+
+        # Reactivate
+        with patch.object(main.remote_client, "reactivate_agent", return_value={"status": "active"}):
+            res_reactivate = client.post("/api/local/agents/bank/reactivate")
+            assert res_reactivate.status_code == 200
+            assert res_reactivate.json()["status"] == "active"
+
+        # Revoke
+        with patch.object(main.remote_client, "revoke_agent", return_value={"status": "revoked"}):
+            res_revoke = client.post("/api/local/agents/bank/revoke", json={"reason": "Compromised"})
+            assert res_revoke.status_code == 200
+            assert res_revoke.json()["status"] == "revoked"
+
+        # Agent requests
+        with patch.object(main.remote_client, "get_agent_requests", return_value=[{"id": 1, "agent": "invest"}]):
+            res_reqs = client.get("/api/local/agent-requests")
+            assert res_reqs.status_code == 200
+            assert len(res_reqs.json()) == 1
+
+        # Approve
+        with patch.object(main.remote_client, "approve_agent_requests", return_value={"approved": [1]}):
+            res_approve = client.post("/api/local/agent-requests/approve", json={"request_ids": [1]})
+            assert res_approve.status_code == 200
+            assert res_approve.json()["approved"] == [1]
+
+        # Reject
+        with patch.object(main.remote_client, "reject_agent_requests", return_value={"rejected": [1]}):
+            res_reject = client.post("/api/local/agent-requests/reject", json={"request_ids": [1]})
+            assert res_reject.status_code == 200
+            assert res_reject.json()["rejected"] == [1]
+
+
+def test_process_document_uses_session_credentials():
+    """Проверяет подхват server_url, admin_token и данных Content AI из активной сессии remote_client."""
+    from fastapi.testclient import TestClient
+    import main
+    import io
+
+    client = TestClient(main.app)
+
+    # Настраиваем сессию в remote_client
+    with patch.object(main.remote_client, "server_url", "https://localhost:8000"), \
+         patch.object(main.remote_client, "access_token", "header.payload.signature"), \
+         patch.object(main.remote_client, "get_contentai_config", return_value={"username": "ocr_user", "password": "ocr_pass", "api_uri": "https://ocr.internal"}), \
+         patch.object(main, "run_pipeline") as mock_pipeline:
+
+        dummy_file = io.BytesIO(b"PDF document content")
+        # Отправляем форму без явных server_url, admin_token и contentai_* (они подтягиваются из remote_client)
+        res = client.post(
+            "/api/local/process",
+            data={
+                "agent_name": "bank",
+                "use_zero_trust": "false"  # Отключаем требование локальных сертификатов для юнит-теста
+            },
+            files={"file": ("test.pdf", dummy_file, "application/pdf")}
+        )
+        assert res.status_code == 200
+        assert "job_id" in res.json()
+

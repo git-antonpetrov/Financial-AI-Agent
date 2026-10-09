@@ -33,6 +33,7 @@ try:
         sign_server_receipt,
         get_minio_sse,
         calculate_key_fingerprint,
+        validate_x509_certificate_chain,
     )
     from core.utils.console_logger import log_info, log_error, log_warning, log_success
 except ImportError:
@@ -46,6 +47,7 @@ except ImportError:
             sign_server_receipt,
             get_minio_sse,
             calculate_key_fingerprint,
+            validate_x509_certificate_chain,
         )
         from ..core.utils.console_logger import log_info, log_error, log_warning, log_success
     except ImportError:
@@ -58,6 +60,7 @@ except ImportError:
             sign_server_receipt,
             get_minio_sse,
             calculate_key_fingerprint,
+            validate_x509_certificate_chain,
         )
         from src.admin_server.core.utils.console_logger import log_info, log_error, log_warning, log_success
 
@@ -110,44 +113,6 @@ def _get_external_services():
     return minio, red
 
 
-def _resolve_client_public_key(x_cert: Optional[str]) -> Optional[str]:
-    """
-    Разрешает публичный ключ или сертификат администратора для проверки X-Signature.
-    1. Извлекает из заголовка X-Cert (PEM / Base64-PEM);
-    2. Из доверенного файла certs/admin_client.crt;
-    3. Из настроек окружения (dev/test fallback).
-    """
-    if x_cert and x_cert.strip():
-        cert_val = x_cert.strip()
-        if "BEGIN " in cert_val:
-            return cert_val
-        # Попытка декодировать из Base64
-        try:
-            import base64
-            decoded = base64.b64decode(cert_val).decode("utf-8")
-            if "BEGIN " in decoded:
-                return decoded
-        except Exception:
-            pass
-        return cert_val
-
-    # Проверка смонтированного сертификата клиента (внутри контейнера)
-    cert_paths = [
-        os.getenv("ADMIN_CLIENT_CERT_PATH", ""),
-        "/certs/admin_client.crt",
-    ]
-    for p in cert_paths:
-        if p and os.path.exists(p):
-            try:
-                with open(p, "r", encoding="utf-8") as f:
-                    return f.read().strip()
-            except Exception:
-                pass
-
-    # В тестовом / dev окружении возвращаем публичный ключ сервера
-    return settings.PUBLIC_KEY or None
-
-
 @router.post(
     "/documents",
     response_model=RAGDocumentResponse,
@@ -161,7 +126,8 @@ async def submit_rag_document(
     x_signature: str = Header(..., alias="X-Signature", description="Цифровая подпись полезной нагрузки (Base64)"),
     x_nonce: str = Header(..., alias="X-Nonce", description="Уникальный одноразовый Nonce"),
     x_timestamp: str = Header(..., alias="X-Timestamp", description="Временная метка запроса (Unix Epoch)"),
-    x_cert: Optional[str] = Header(None, alias="X-Cert", description="Клиентский сертификат или открытый ключ в PEM/Base64"),
+    x_cert: Optional[str] = Header(None, alias="X-Cert", description="Клиентский сертификат X.509 в формате PEM/Base64"),
+    x_enclave_cert: Optional[str] = Header(None, alias="X-Enclave-Cert", description="Промежуточный сертификат Анклава (при наличии)"),
     db: AsyncSession = Depends(get_db),
     cert_identity: dict = Depends(verify_mtls_client_identity),
 ):
@@ -170,6 +136,8 @@ async def submit_rag_document(
     - Проверяет срок действия временной метки (окно 300 секунд);
     - Защищает от Replay-атак через атомарный захват Nonce в Redis;
     - Валидирует mTLS идентичность через verify_mtls_client_identity;
+    - Выполняет строгую серверную валидацию клиентского сертификата X.509 против Root CA,
+      проверку срока действия, запрет самоподписанных сертификатов и проверку отзыва в Redis;
     - Проверяет аппаратную цифровую подпись X-Signature;
     - Шифрует сырой документ в PostgreSQL с помощью AES-256-GCM;
     - Загружает файл в MinIO (с поддержкой SSE);
@@ -205,20 +173,47 @@ async def submit_rag_document(
             detail=f"Replay attack detected: Nonce '{x_nonce}' уже был использован"
         )
 
-    # 3. Верификация цифровой подписи (X-Signature)
+    # 3. Разрешение и строгая Zero-Trust валидация клиентского сертификата X.509
+    raw_cert = x_cert
+    if not raw_cert:
+        cert_paths = [
+            os.getenv("ADMIN_CLIENT_CERT_PATH", ""),
+            "/certs/admin_client.crt",
+        ]
+        for p in cert_paths:
+            if p and os.path.exists(p):
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        raw_cert = f.read().strip()
+                        break
+                except Exception:
+                    pass
+
+    if not raw_cert:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Клиентский сертификат X.509 обязателен (отсутствует заголовок X-Cert)"
+        )
+
+    # Строгая серверная проверка:
+    # 1. Формат X.509
+    # 2. Срок действия (NotBefore <= now <= NotAfter)
+    # 3. Запрет самоподписанных (Subject == Issuer)
+    # 4. Проверка цепочки доверия Root CA
+    # 5. Проверка отзыва в Redis (CRL: serial dec/hex, fingerprint, subject CN)
+    leaf_cert, client_pub_key = validate_x509_certificate_chain(
+        cert_input=raw_cert,
+        enclave_cert_input=x_enclave_cert,
+        redis_conn=redis_client
+    )
+
+    # 4. Верификация цифровой подписи (X-Signature)
     raw_body = await request.body()
     canonical_bytes = compute_rag_canonical_digest(
         timestamp=int(req_ts),
         nonce=x_nonce,
         body_bytes=raw_body
     )
-
-    client_pub_key = _resolve_client_public_key(x_cert)
-    if not client_pub_key:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Не удалось получить публичный ключ клиента для проверки подписи"
-        )
 
     sig_verified = verify_digital_signature(
         public_key_or_cert=client_pub_key,
@@ -241,7 +236,7 @@ async def submit_rag_document(
         )
 
     if not sig_verified:
-        log_warning("RAG Security", "Цифровая подпись X-Signature не прошла криптографическую валидацию")
+        log_warning("RAG Security", f"Цифровая подпись X-Signature не прошла валидацию для документа '{doc_req.document_title}'")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Недействительная цифровая подпись запроса (X-Signature verification failed)"

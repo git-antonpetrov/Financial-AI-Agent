@@ -49,8 +49,8 @@
     }
 }
 
-# 2. Внутренний банковский контур (Шифрование транзита между контейнерами)
-simulation-api.internal {
+# 2. Внутренний банковский контур (Шифрование транзита между контейнерами и подсетями)
+simulation-api.internal, bank-service.internal {
     tls internal
 
     header {
@@ -73,3 +73,29 @@ simulation-api.internal {
         }
     }
 }
+
+# 3. Внутренний контур Администратора (Межсетевое TLS-взаимодействие)
+admin-server.internal {
+    tls internal
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        -Server
+    }
+
+    reverse_proxy admin-server:8000 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto https
+
+        transport http {
+            response_header_timeout 180s
+            read_timeout 180s
+            write_timeout 180s
+        }
+    }
+}
+

@@ -1,9 +1,10 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import {
   Globe, Lock, Server, ArrowRight, Loader2, Eye, EyeOff, KeyRound,
   QrCode, ShieldCheck, Copy, Check, X, CheckCircle2
 } from 'lucide-react'
 import Dashboard from './Dashboard'
+import { localFetch } from './api'
 
 // Словарь локализации
 const translations = {
@@ -83,7 +84,19 @@ function App() {
   const [otpCode, setOtpCode] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState('')
-  const [isAuthenticated, setIsAuthenticated] = useState(() => !!sessionStorage.getItem('admin_token'))
+  const [isAuthenticated, setIsAuthenticated] = useState(false)
+
+  // Проверка статуса сессии в локальном бэкенде (BFF) при запуске интерфейса
+  useEffect(() => {
+    localFetch('/api/local/auth/status')
+      .then(res => res.ok ? res.json() : null)
+      .then(data => {
+        if (data?.is_authenticated) {
+          setIsAuthenticated(true)
+        }
+      })
+      .catch(() => {})
+  }, [])
 
   // Состояние модального окна первичной привязки 2FA / QR-кода
   const [show2FaModal, setShow2FaModal] = useState(false)
@@ -131,59 +144,37 @@ function App() {
       }
     }
 
-    // Используем локальный прокси Vite для обхода CORS только в dev-режиме
-    let loginEndpoint = `${baseUrl.replace(/\/$/, '')}/login`
-    if (import.meta.env.DEV && parsedUrl.hostname === 'admin.fin-ai-agent.ru') {
-      loginEndpoint = '/api_proxy/login'
-    }
-
-    const formData = new URLSearchParams()
-    formData.append('username', 'admin')
-    formData.append('password', passwordToUse)
-    if (otpToUse.trim()) {
-      formData.append('otp_code', otpToUse.trim())
-    }
-
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/x-www-form-urlencoded',
-    }
-    if (otpToUse.trim()) {
-      headers['X-OTP-Code'] = otpToUse.trim()
-    }
-
-    const response = await fetch(loginEndpoint, {
+    // Выполняем аутентификацию через локальный sidecar (BFF) по mTLS
+    const response = await localFetch('/api/local/auth/login', {
       method: 'POST',
-      headers,
-      body: formData,
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        server_url: baseUrl,
+        username: 'admin',
+        password: passwordToUse,
+        otp_code: otpToUse.trim(),
+      }),
     })
 
     if (!response.ok) {
       const errData = await response.json().catch(() => null)
       const detail = errData?.detail || ''
-      if (detail === '2FA code required') {
+      if (detail === 'errorEmptyOtp' || detail === '2FA code required') {
         throw new Error('errorEmptyOtp')
-      } else if (detail === 'Invalid 2FA TOTP code') {
+      } else if (detail === 'errorBadOtp' || detail === 'Invalid 2FA TOTP code') {
         throw new Error('errorBadOtp')
-      } else if (typeof detail === 'string' && detail.includes('already been used')) {
+      } else if (typeof detail === 'string' && (detail === 'errorOtpReused' || detail.includes('already been used'))) {
         throw new Error('errorOtpReused')
       } else {
         throw new Error('errorAuth')
       }
     }
 
-    const data = await response.json()
-    
-    if (data.access_token) {
-      // Сохраняем токен в sessionStorage (автоматически очищается при закрытии сессии/окна)
-      sessionStorage.setItem('admin_token', data.access_token)
-      if (data.refresh_token) {
-        sessionStorage.setItem('admin_refresh_token', data.refresh_token)
-      }
-      localStorage.setItem('admin_server', baseUrl.replace(/\/$/, ''))
-      setIsAuthenticated(true)
-    } else {
-      throw new Error('errorAuth')
-    }
+    // Сохраняем адрес сервера для подсказки при следующем вводе
+    localStorage.setItem('admin_server', baseUrl.replace(/\/$/, ''))
+    setIsAuthenticated(true)
   }
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -217,11 +208,11 @@ function App() {
       if (!baseUrl.startsWith('http://') && !baseUrl.startsWith('https://')) {
         baseUrl = 'https://' + baseUrl
       }
-      const pairEndpoint = `${baseUrl.replace(/\/$/, '')}/api/auth/2fa/pair`
-      const res = await fetch(pairEndpoint, {
+      const res = await localFetch('/api/local/auth/2fa/pair', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          server_url: baseUrl,
           username: 'admin',
           password: pwdToUse.trim(),
         })
@@ -275,24 +266,10 @@ function App() {
 
   const handleLogout = async (reason?: string) => {
     try {
-      const token = sessionStorage.getItem('admin_token')
-      const refreshToken = sessionStorage.getItem('admin_refresh_token')
-      const serverUrl = localStorage.getItem('admin_server') || ''
-      if (token && serverUrl && reason !== 'errorSessionExpired') {
-        await fetch(`${serverUrl}/api/auth/logout`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({ refresh_token: refreshToken })
-        })
-      }
+      await localFetch('/api/local/auth/logout', { method: 'POST' })
     } catch (e) {
       console.error('Logout error:', e)
     } finally {
-      sessionStorage.removeItem('admin_token')
-      sessionStorage.removeItem('admin_refresh_token')
       setIsAuthenticated(false)
       if (reason) {
         setError(reason)

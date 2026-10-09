@@ -1,22 +1,41 @@
 """
 Программный криптографический мост (Software Signing Bridge).
-Используется как fallback в тестовом окружении или при отсутствии аппаратного токена TPM.
+Используется для работы с файловыми ключами в изолированных стендах и тестировании.
+Строго требует наличия легитимного сертификата, подписанного Root CA. Генерация самоподписанных сертификатов исключена.
 """
 
 import os
+import sys
 import base64
-from typing import Optional, Union
+import hashlib
+from typing import Optional
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography import x509
-from cryptography.x509.oid import NameOID
-import datetime
+
+try:
+    from .cert_validator import (
+        resolve_and_validate_client_certificate,
+        find_certificate_file,
+        CertificateMissingError,
+        CertificateValidationError,
+        KeyMissingError,
+    )
+except ImportError:
+    from cert_validator import (
+        resolve_and_validate_client_certificate,
+        find_certificate_file,
+        CertificateMissingError,
+        CertificateValidationError,
+        KeyMissingError,
+    )
 
 
 class SoftwareSigningBridge:
     """
     Программное управление ключами и сертификатами для клиентской стороны.
-    Загружает приватный ключ и сертификат с диска или генерирует их в оперативной памяти.
+    Загружает приватный ключ и сертификат с диска или параметров.
+    Строго требует наличия ключей и сертификата, подписанного Root CA.
     """
 
     def __init__(
@@ -25,90 +44,91 @@ class SoftwareSigningBridge:
         key_path: Optional[str] = None,
         key_pem: Optional[str] = None,
         cert_pem: Optional[str] = None,
+        ca_cert_path: Optional[str] = None,
+        ca_cert_pem: Optional[str] = None,
         key_password: Optional[str] = None,
     ):
         self.cert_path = cert_path
         self.key_path = key_path
+        self.ca_cert_path = ca_cert_path
         self.key_password = key_password
-        
-        self._private_key: Optional[rsa.RSAPrivateKey] = None
-        self._cert_pem: Optional[str] = None
-        
-        if key_pem:
-            try:
-                self._private_key = self._load_private_key_pem(key_pem, key_password)
-            except Exception:
-                self._private_key = None
-        elif key_path and os.path.exists(key_path):
-            try:
-                with open(key_path, "rb") as f:
-                    self._private_key = self._load_private_key_pem(f.read().decode("utf-8"), key_password)
-            except Exception:
-                self._private_key = None
-                
-        if cert_pem:
-            self._cert_pem = cert_pem.strip()
-        elif cert_path and os.path.exists(cert_path):
-            try:
-                with open(cert_path, "r", encoding="utf-8") as f:
-                    data = f.read().strip()
-                    if "-----BEGIN CERTIFICATE-----" in data:
-                        self._cert_pem = data
-            except Exception:
-                self._cert_pem = None
-                
-        # Если ключ не был предоставлен или не удалось прочитать, создаем пару в памяти для локального тестирования
-        if self._private_key is None:
-            self._private_key = rsa.generate_private_key(
-                public_exponent=65537,
-                key_size=2048
-            )
-            
-        if self._cert_pem is None:
-            self._cert_pem = self._generate_fallback_cert()
 
-    def _load_private_key_pem(self, pem_str: str, password: Optional[str]) -> rsa.RSAPrivateKey:
+        # 1. Разрешение приватного ключа
+        self._private_key = self._resolve_private_key(key_path=key_path, key_pem=key_pem, password=key_password)
+
+        # 2. Разрешение и строгая валидация сертификата (без самоподписанных фоллбэков)
+        self._cert_pem, self._cert_obj = resolve_and_validate_client_certificate(
+            cert_path=cert_path,
+            cert_pem=cert_pem,
+            ca_cert_path=ca_cert_path,
+            ca_cert_pem=ca_cert_pem,
+            expected_public_key=self._private_key.public_key()
+        )
+
+    def _resolve_private_key(
+        self,
+        key_path: Optional[str],
+        key_pem: Optional[str],
+        password: Optional[str]
+    ) -> rsa.RSAPrivateKey:
+        """Загружает закрытый ключ из строки PEM или файла. При отсутствии выбрасывает KeyMissingError."""
         pwd = password.encode("utf-8") if password else None
-        key = serialization.load_pem_private_key(pem_str.encode("utf-8"), password=pwd)
-        if not isinstance(key, rsa.RSAPrivateKey):
-            raise TypeError("Поддерживаются только RSA приватные ключи")
-        return key
 
-    def _generate_fallback_cert(self) -> str:
-        subject = issuer = x509.Name([
-            x509.NameAttribute(NameOID.COUNTRY_NAME, "RU"),
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "FinancialAI Admin Client Software"),
-            x509.NameAttribute(NameOID.COMMON_NAME, "admin-workstation-software"),
-        ])
-        cert = x509.CertificateBuilder().subject_name(
-            subject
-        ).issuer_name(
-            issuer
-        ).public_key(
-            self._private_key.public_key()
-        ).serial_number(
-            int(datetime.datetime.now(datetime.timezone.utc).timestamp())
-        ).not_valid_before(
-            datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)
-        ).not_valid_after(
-            datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=365)
-        ).sign(self._private_key, hashes.SHA256())
+        if key_pem and key_pem.strip():
+            try:
+                loaded = serialization.load_pem_private_key(key_pem.strip().encode("utf-8"), password=pwd)
+                if not isinstance(loaded, rsa.RSAPrivateKey):
+                    raise TypeError("Поддерживаются только RSA приватные ключи")
+                return loaded
+            except Exception as e:
+                raise KeyMissingError(f"Ошибка загрузки переданного приватного ключа: {e}")
 
-        return cert.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+        # Поиск файла ключа
+        found_key_file = find_certificate_file(
+            custom_path=key_path,
+            env_var="ADMIN_CLIENT_KEY_PATH",
+            default_filenames=("admin_client.key",)
+        )
+        if not found_key_file:
+            raise KeyMissingError(
+                "Приватный ключ администратора не найден. "
+                "Для боевого запуска ключ должен быть установлен по пути certs/admin_client.key "
+                "или передан через ADMIN_CLIENT_KEY_PATH / key_path. "
+                "Генерация случайных ключей без параметров строго запрещена."
+            )
+
+        try:
+            with open(found_key_file, "rb") as f:
+                loaded = serialization.load_pem_private_key(f.read(), password=pwd)
+                if not isinstance(loaded, rsa.RSAPrivateKey):
+                    raise TypeError("Поддерживаются только RSA приватные ключи")
+                return loaded
+        except Exception as e:
+            raise KeyMissingError(f"Ошибка чтения файла приватного ключа {found_key_file}: {e}")
 
     def get_public_key_pem(self) -> str:
+        """Возвращает открытый ключ в формате PEM."""
         return self._private_key.public_key().public_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         ).decode("utf-8")
 
+    def get_key_fingerprint(self) -> str:
+        """Вычисляет SHA-256 отпечаток открытого ключа."""
+        der = self._private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        return f"sha256:{hashlib.sha256(der).hexdigest()}"
+
     def get_certificate_pem(self) -> str:
+        """Возвращает валидный X.509 сертификат в формате PEM."""
         return self._cert_pem
 
     def sign_digest(self, canonical_bytes: bytes, scheme: str = "PSS") -> str:
         """
         Подписывает канонические байты.
-        
+
         Args:
             canonical_bytes: Байты для подписи.
             scheme: 'PSS' (по умолчанию) или 'PKCS1'.

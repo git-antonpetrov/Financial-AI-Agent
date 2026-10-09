@@ -18,12 +18,31 @@ except ImportError:
     from core.utils.content_ai import ContentCaptureRecognizer
 
 try:
-    from src.admin_client.backend.core.crypto import ZeroTrustClientSigner
+    from src.admin_client.backend.core.crypto import (
+        ZeroTrustClientSigner,
+        find_root_ca_in_windows_store,
+        find_client_cert_in_windows_store,
+        export_windows_cert_to_cache,
+        WindowsCertificateStoreError,
+        get_windows_cert_store_help_message,
+    )
 except ImportError:
     try:
-        from core.crypto import ZeroTrustClientSigner
+        from core.crypto import (
+            ZeroTrustClientSigner,
+            find_root_ca_in_windows_store,
+            find_client_cert_in_windows_store,
+            export_windows_cert_to_cache,
+            WindowsCertificateStoreError,
+            get_windows_cert_store_help_message,
+        )
     except ImportError:
         ZeroTrustClientSigner = None
+        find_root_ca_in_windows_store = None
+        find_client_cert_in_windows_store = None
+        export_windows_cert_to_cache = None
+        WindowsCertificateStoreError = RuntimeError
+        get_windows_cert_store_help_message = lambda x: "Сертификаты Zero-Trust не найдены"
 
 import threading
 
@@ -76,12 +95,24 @@ class DocumentPipeline:
                     self.ca_cert_path = default_ca
                     break
 
+        if not self.ca_cert_path or not os.path.exists(self.ca_cert_path):
+            if find_root_ca_in_windows_store and export_windows_cert_to_cache:
+                win_ca = find_root_ca_in_windows_store()
+                if win_ca:
+                    self.ca_cert_path = export_windows_cert_to_cache(win_ca[0], "windows_root_ca.crt")
+
         self.client_cert_path = client_cert_path or os.getenv("ADMIN_CLIENT_CERT_PATH")
         if not self.client_cert_path or not os.path.exists(self.client_cert_path):
             for default_cert in ["./certs/admin_client.crt", "/certs/admin_client.crt", "certs/admin_client.crt"]:
                 if os.path.exists(default_cert):
                     self.client_cert_path = default_cert
                     break
+
+        if not self.client_cert_path or not os.path.exists(self.client_cert_path):
+            if find_client_cert_in_windows_store and export_windows_cert_to_cache:
+                win_client = find_client_cert_in_windows_store()
+                if win_client:
+                    self.client_cert_path = export_windows_cert_to_cache(win_client[0], "windows_admin_client.crt")
 
         self.client_key_path = client_key_path or os.getenv("ADMIN_CLIENT_KEY_PATH")
         if not self.client_key_path or not os.path.exists(self.client_key_path):
@@ -105,9 +136,10 @@ class DocumentPipeline:
         # Инициализация ZeroTrustClientSigner
         if signer is not None:
             self.signer = signer
-        elif ZeroTrustClientSigner is not None:
+        elif ZeroTrustClientSigner is not None and self.use_zero_trust:
             try:
                 self.signer = ZeroTrustClientSigner(
+                    mode="hardware",
                     cert_path=self.client_cert_path,
                     key_path=self.client_key_path,
                     ca_cert_path=self.ca_cert_path

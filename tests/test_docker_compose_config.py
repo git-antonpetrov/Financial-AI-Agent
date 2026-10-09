@@ -103,7 +103,7 @@ def test_docker_compose_root_ca_service_and_pki_network():
 def test_docker_compose_five_isolated_networks():
     """
     Проверяет сетевую топологию Defense-in-Depth / Zero-Trust (5 подсетей):
-    - Наличие pki_net, edge_net, backend_net, data_net, simulation_net;
+    - Наличие pki_net, edge_net, admin_backend_net, data_net, simulation_net;
     - Строгая изоляция: pki_net и data_net имеют флаг internal: true;
     - Изоляция Root CA: ни один другой сервис не подключен к pki_net.
     """
@@ -112,7 +112,7 @@ def test_docker_compose_five_isolated_networks():
         compose_data = yaml.safe_load(f)
 
     networks = compose_data.get("networks", {})
-    required_nets = {"pki_net", "edge_net", "backend_net", "data_net", "simulation_net"}
+    required_nets = {"pki_net", "edge_net", "admin_backend_net", "data_net", "simulation_net"}
     for net_name in required_nets:
         assert net_name in networks, f"Сеть {net_name} отсутствует в docker-compose.yml"
 
@@ -133,8 +133,8 @@ def test_docker_compose_five_isolated_networks():
 def test_docker_compose_caddy_and_volumes_configuration():
     """
     Проверяет конфигурацию Caddy шлюза и персистентных томов:
-    - caddy зависит от admin-server;
-    - caddy изолирован в edge_net;
+    - caddy зависит от admin-server и root-ca (холодный старт без гонок);
+    - caddy является единственной точкой входа в edge_net и связывает admin_backend_net и simulation_net;
     - Наличие персистентных томов root_ca_data, postgres_data, redis_data, chroma_data, minio_data.
     """
     compose_path = Path(__file__).parent.parent / "docker-compose.yml"
@@ -147,13 +147,76 @@ def test_docker_compose_caddy_and_volumes_configuration():
     if isinstance(deps, dict):
         deps = list(deps.keys())
     assert "admin-server" in deps
+    assert "root-ca" in deps
 
     caddy_nets = caddy.get("networks", [])
-    assert caddy_nets == ["edge_net"]
+    if isinstance(caddy_nets, dict):
+        caddy_nets = list(caddy_nets.keys())
+    assert "edge_net" in caddy_nets
+    assert "admin_backend_net" in caddy_nets
+    assert "simulation_net" in caddy_nets
+    assert "data_net" not in caddy_nets
+    assert "pki_net" not in caddy_nets
+
+    # Проверяем, что edge_net не имеет никаких других сервисов, кроме caddy
+    for s_name, s_conf in services.items():
+        s_nets = s_conf.get("networks", [])
+        if isinstance(s_nets, dict):
+            s_nets = list(s_nets.keys())
+        if s_name == "caddy":
+            assert "edge_net" in s_nets
+        else:
+            assert "edge_net" not in s_nets, f"Сервис {s_name} не должен быть в публичной edge_net"
 
     vols = compose_data.get("volumes", {})
     for vol in ["root_ca_data", "postgres_data", "redis_data", "chroma_data", "minio_data", "caddy_data", "caddy_config"]:
         assert vol in vols, f"Том {vol} должен быть объявлен в volumes"
+
+
+def test_docker_compose_host_process_isolation_no_internal_ports():
+    """
+    Проверяет защиту от других процессов на хосте:
+    Внутренние сервисы (postgres, redis, minio, chroma, admin-server, simulation-api)
+    НЕ должны пробрасывать порты на хост (ports:).
+    Единственный сервис с портами на хост — caddy (80, 443).
+    """
+    compose_path = Path(__file__).parent.parent / "docker-compose.yml"
+    with open(compose_path, "r", encoding="utf-8") as f:
+        compose_data = yaml.safe_load(f)
+
+    services = compose_data["services"]
+    for s_name, s_conf in services.items():
+        ports = s_conf.get("ports", [])
+        if s_name == "caddy":
+            assert len(ports) > 0, "Caddy должен иметь порты 80 и 443"
+            assert "80:80" in ports
+            assert "443:443" in ports
+        else:
+            assert len(ports) == 0, f"Уязвимость изоляции процессов: сервис {s_name} имеет проброшенные порты на хост: {ports}"
+
+
+def test_docker_compose_root_ca_race_condition_protection():
+    """
+    Проверяет устранение гонок холодного старта:
+    Все сервисы, использующие сертификаты PKI, должны дожидаться успешного завершения root-ca.
+    """
+    compose_path = Path(__file__).parent.parent / "docker-compose.yml"
+    with open(compose_path, "r", encoding="utf-8") as f:
+        compose_data = yaml.safe_load(f)
+
+    services = compose_data["services"]
+    dependent_on_ca = [
+        "postgres-db", "redis", "minio", "admin-server", "vector-worker",
+        "simulation-api", "bank-worker", "invest-worker", "digital-worker", "caddy"
+    ]
+    for s_name in dependent_on_ca:
+        assert s_name in services, f"Сервис {s_name} отсутствует"
+        deps = services[s_name].get("depends_on", {})
+        assert isinstance(deps, dict), f"Сервис {s_name} должен использовать словарь depends_on с condition"
+        assert "root-ca" in deps, f"Сервис {s_name} должен зависеть от root-ca"
+        assert deps["root-ca"].get("condition") == "service_completed_successfully", (
+            f"Сервис {s_name} должен ожидать condition: service_completed_successfully для root-ca"
+        )
 
 
 def test_env_example_pki_and_mtls_variables():

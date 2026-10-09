@@ -943,9 +943,10 @@ def revoke_certificate_in_redis(
     ttl_seconds: int = 86400 * 365,
     redis_conn=None,
     reason: str | None = None,
+    agent_id: str | None = None,
 ) -> None:
     """
-    Помещает серийный номер и/или отпечаток сертификата в черный список отзыва (CRL / Blacklist).
+    Помещает серийный номер, отпечаток сертификата или идентификатор агента в черный список отзыва (CRL / Blacklist).
     """
     client = redis_conn or redis_blacklist
     if serial:
@@ -957,6 +958,14 @@ def revoke_certificate_in_redis(
                 client.setex(f"revoked:cert:{s_clean}", ttl_seconds, "revoked")
             except Exception as e:
                 log_warning("PKI", f"Не удалось сохранить отзыв сертификата {serial} в Redis: {e}")
+        try:
+            val = int(s_clean, 0)
+            hex_val = format(val, "x")
+            _revoked_certs_memory.add(f"serial:{hex_val}")
+            if client:
+                client.setex(f"revoked:cert:serial:{hex_val}", ttl_seconds, "revoked")
+        except ValueError:
+            pass
 
     if fingerprint:
         fp_clean = str(fingerprint).strip().lower()
@@ -968,14 +977,28 @@ def revoke_certificate_in_redis(
             except Exception as e:
                 log_warning("PKI", f"Не удалось сохранить отзыв отпечатка {fingerprint} в Redis: {e}")
 
+    if agent_id:
+        a_clean = str(agent_id).strip().lower()
+        _revoked_certs_memory.add(f"agent:{a_clean}")
+        if client:
+            try:
+                client.setex(f"revoked:agent:{a_clean}", ttl_seconds, "revoked")
+                try:
+                    client.publish("security:revocations", f"agent:{a_clean}")
+                except Exception:
+                    pass
+            except Exception as e:
+                log_warning("PKI", f"Не удалось сохранить отзыв агента {agent_id} в Redis: {e}")
+
 
 def is_certificate_revoked_in_redis(
     serial: str | None = None,
     fingerprint: str | None = None,
+    agent_id: str | None = None,
     redis_conn=None
 ) -> bool:
     """
-    Проверяет статус отзыва сертификата по серийному номеру и/или отпечатку.
+    Проверяет статус отзыва сертификата по серийному номеру (dec/hex), отпечатку и/или идентификатору агента/CN.
     """
     client = redis_conn or redis_blacklist
     if serial:
@@ -990,6 +1013,17 @@ def is_certificate_revoked_in_redis(
                     return True
             except Exception as e:
                 log_warning("PKI", f"Ошибка проверки отзыва сертификата в Redis: {e}")
+        try:
+            val = int(s_clean, 0)
+            hex_val = format(val, "x")
+            if f"serial:{hex_val}" in _revoked_certs_memory:
+                return True
+            if client:
+                res_hex = client.exists(f"revoked:cert:serial:{hex_val}")
+                if res_hex in (1, True, "1"):
+                    return True
+        except ValueError:
+            pass
 
     if fingerprint:
         fp_clean = str(fingerprint).strip().lower()
@@ -1003,6 +1037,18 @@ def is_certificate_revoked_in_redis(
                     return True
             except Exception as e:
                 log_warning("PKI", f"Ошибка проверки отзыва отпечатка в Redis: {e}")
+
+    if agent_id:
+        a_clean = str(agent_id).strip().lower()
+        if f"agent:{a_clean}" in _revoked_certs_memory:
+            return True
+        if client:
+            try:
+                res_ag = client.exists(f"revoked:agent:{a_clean}")
+                if res_ag in (1, True, "1"):
+                    return True
+            except Exception as e:
+                log_warning("PKI", f"Ошибка проверки отзыва агента в Redis: {e}")
 
     return False
 
@@ -1144,27 +1190,34 @@ def verify_digital_signature(
 
         raw_sig = base64.b64decode(signature_b64.strip())
 
-        if isinstance(public_key_or_cert, str):
-            pem_bytes = public_key_or_cert.strip().encode("utf-8")
-        else:
-            pem_bytes = bytes(public_key_or_cert).strip()
-
         pub_key = None
-        if b"-----BEGIN CERTIFICATE-----" in pem_bytes:
-            cert = x509.load_pem_x509_certificate(pem_bytes)
-            pub_key = cert.public_key()
-        elif b"-----BEGIN PUBLIC KEY-----" in pem_bytes or b"-----BEGIN RSA PUBLIC KEY-----" in pem_bytes:
-            pub_key = serialization.load_pem_public_key(pem_bytes)
+        if isinstance(public_key_or_cert, x509.Certificate):
+            pub_key = public_key_or_cert.public_key()
+        elif isinstance(public_key_or_cert, (rsa.RSAPublicKey, ec.EllipticCurvePublicKey)):
+            pub_key = public_key_or_cert
+        elif hasattr(public_key_or_cert, "verify") and not isinstance(public_key_or_cert, (str, bytes, bytearray)):
+            pub_key = public_key_or_cert
         else:
-            try:
-                der_bytes = base64.b64decode(pem_bytes)
-                cert = x509.load_der_x509_certificate(der_bytes)
+            if isinstance(public_key_or_cert, str):
+                pem_bytes = public_key_or_cert.strip().encode("utf-8")
+            else:
+                pem_bytes = bytes(public_key_or_cert).strip()
+
+            if b"-----BEGIN CERTIFICATE-----" in pem_bytes:
+                cert = x509.load_pem_x509_certificate(pem_bytes)
                 pub_key = cert.public_key()
-            except Exception:
+            elif b"-----BEGIN PUBLIC KEY-----" in pem_bytes or b"-----BEGIN RSA PUBLIC KEY-----" in pem_bytes:
+                pub_key = serialization.load_pem_public_key(pem_bytes)
+            else:
                 try:
-                    pub_key = serialization.load_der_public_key(der_bytes)
+                    der_bytes = base64.b64decode(pem_bytes)
+                    cert = x509.load_der_x509_certificate(der_bytes)
+                    pub_key = cert.public_key()
                 except Exception:
-                    pass
+                    try:
+                        pub_key = serialization.load_der_public_key(der_bytes)
+                    except Exception:
+                        pass
 
         if pub_key is None:
             log_warning("Криптография", "Не удалось извлечь открытый ключ для проверки подписи")
@@ -1265,6 +1318,317 @@ def sign_server_receipt(receipt_data: dict, private_key_pem: str | None = None) 
     except Exception as e:
         log_error("Криптография", f"Сбой подписания квитанции сервера: {e}")
         return "", "sha256:unknown"
+
+
+# --- СЕРВЕРНАЯ ВАЛИДАЦИЯ ЦЕПОЧКИ ДОВЕРИЯ X.509 И СТАТУСА ОТЗЫВА (ZERO-TRUST PKI) ---
+
+_trusted_root_ca_cache: Optional[Any] = None
+
+
+def set_trusted_root_ca(ca_input: Any) -> None:
+    """Устанавливает доверенный Root CA в оперативной памяти (для тестов и кастомной инициализации)."""
+    global _trusted_root_ca_cache
+    _trusted_root_ca_cache = parse_x509_certificate(ca_input)
+
+
+def reset_trusted_root_ca() -> None:
+    """Сбрасывает закешированный Root CA."""
+    global _trusted_root_ca_cache
+    _trusted_root_ca_cache = None
+
+
+def parse_x509_certificate(cert_input: Any) -> Optional[Any]:
+    """
+    Универсально парсит X.509 сертификат из объекта Certificate, пути Path/str, PEM-строки или байт (DER/PEM).
+    """
+    if not cert_input:
+        return None
+
+    from cryptography import x509
+
+    if isinstance(cert_input, x509.Certificate):
+        return cert_input
+
+    try:
+        from pathlib import Path
+
+        # 1. Если передан Path или строка пути к файлу
+        if isinstance(cert_input, (str, Path)):
+            cert_str = str(cert_input).strip()
+            if len(cert_str) < 1024 and "\n" not in cert_str:
+                p = Path(cert_str)
+                if p.exists() and p.is_file():
+                    content = p.read_bytes().strip()
+                    if b"BEGIN CERTIFICATE" in content:
+                        return x509.load_pem_x509_certificate(content)
+                    else:
+                        return x509.load_der_x509_certificate(content)
+
+            # 2. Если это PEM-строка с заголовком
+            if "BEGIN CERTIFICATE" in cert_str:
+                return x509.load_pem_x509_certificate(cert_str.encode("utf-8"))
+
+            # 3. Если это Base64-закодированный PEM или DER
+            try:
+                raw = base64.b64decode(cert_str)
+                if b"BEGIN CERTIFICATE" in raw:
+                    return x509.load_pem_x509_certificate(raw)
+                return x509.load_der_x509_certificate(raw)
+            except Exception:
+                pass
+
+        # 4. Если переданы байты
+        if isinstance(cert_input, (bytes, bytearray)):
+            b = bytes(cert_input).strip()
+            if b"BEGIN CERTIFICATE" in b:
+                return x509.load_pem_x509_certificate(b)
+            return x509.load_der_x509_certificate(b)
+    except Exception as e:
+        log_warning("X509Parser", f"Ошибка парсинга X.509 сертификата: {e}")
+        return None
+
+    return None
+
+
+def get_trusted_root_ca(custom_ca: Optional[Any] = None) -> Optional[Any]:
+    """
+    Разрешает доверенный корневой сертификат Root CA:
+    1. Переданный аргумент custom_ca;
+    2. Установленный в памяти Root CA (_trusted_root_ca_cache);
+    3. Переменные окружения ROOT_CA_CERT_PATH, SSL_CERT_FILE, CA_CERT_PATH, REDIS_SSL_CA_CERTS;
+    4. Стандартные пути файловой системы (/certs/ca.crt, /etc/caddy/certs/ca.crt, certs/ca.crt, и др.).
+    """
+    global _trusted_root_ca_cache
+
+    if custom_ca is not None:
+        parsed = parse_x509_certificate(custom_ca)
+        if parsed:
+            return parsed
+
+    if _trusted_root_ca_cache is not None:
+        return _trusted_root_ca_cache
+
+    env_vars = ["ROOT_CA_CERT_PATH", "SSL_CERT_FILE", "CA_CERT_PATH", "REDIS_SSL_CA_CERTS"]
+    for var in env_vars:
+        val = os.getenv(var, "").strip()
+        if val and os.path.exists(val):
+            parsed = parse_x509_certificate(val)
+            if parsed:
+                _trusted_root_ca_cache = parsed
+                return parsed
+
+    default_paths = [
+        "/certs/ca.crt",
+        "/etc/caddy/certs/ca.crt",
+        "./certs/ca.crt",
+        "certs/ca.crt",
+    ]
+    try:
+        repo_ca = Path(__file__).resolve().parents[3] / "certs" / "ca.crt"
+        default_paths.append(str(repo_ca))
+    except Exception:
+        pass
+
+    for p in default_paths:
+        if p and os.path.exists(p):
+            parsed = parse_x509_certificate(p)
+            if parsed:
+                _trusted_root_ca_cache = parsed
+                return parsed
+
+    return None
+
+
+def verify_certificate_signature(cert: Any, issuer_public_key: Any) -> None:
+    """
+    Верифицирует цифровую подпись сертификата открытым ключом издателя (Root CA / Intermediate CA).
+    Возбуждает исключение (InvalidSignature / ValueError / TypeError), если подпись неверна.
+    """
+    from cryptography.hazmat.primitives.asymmetric import rsa, ec, padding
+
+    if isinstance(issuer_public_key, rsa.RSAPublicKey):
+        issuer_public_key.verify(
+            cert.signature,
+            cert.tbs_certificate_bytes,
+            padding.PKCS1v15(),
+            cert.signature_hash_algorithm
+        )
+    elif isinstance(issuer_public_key, ec.EllipticCurvePublicKey):
+        issuer_public_key.verify(
+            cert.signature,
+            cert.tbs_certificate_bytes,
+            ec.ECDSA(cert.signature_hash_algorithm)
+        )
+    elif hasattr(issuer_public_key, "verify"):
+        issuer_public_key.verify(
+            cert.signature,
+            cert.tbs_certificate_bytes,
+            cert.signature_hash_algorithm
+        )
+    else:
+        raise TypeError(f"Неподдерживаемый тип открытого ключа издателя: {type(issuer_public_key)}")
+
+
+def validate_x509_certificate_chain(
+    cert_input: Any,
+    enclave_cert_input: Optional[Any] = None,
+    root_ca_input: Optional[Any] = None,
+    redis_conn=None,
+    at_time: Optional[datetime] = None,
+) -> Tuple[Any, Any]:
+    """
+    Серверная Zero-Trust валидация клиентского сертификата X.509:
+    1. Парсинг сертификата leaf_cert и промежуточного enclave_cert;
+    2. Проверка срока действия (NotBefore <= now <= NotAfter);
+    3. Строгий запрет самоподписанных сертификатов (Subject == Issuer);
+    4. Разрешение доверенного Root CA (при отсутствии -> 500 Internal Server Error);
+    5. Проверка цепочки доверия (Root CA -> Leaf или Root CA -> Enclave -> Leaf);
+    6. Проверка статуса отзыва в Redis (CRL: serial dec/hex, fingerprint, subject CN);
+    7. Возврат кортежа (leaf_cert, pub_key).
+
+    При нарушении правил безопасности вызывает HTTPException(401).
+    """
+    from cryptography import x509
+
+    # 1. Парсинг целевого сертификата
+    leaf_cert = parse_x509_certificate(cert_input)
+    if not leaf_cert:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Некорректный формат клиентского сертификата X.509 (ожидается PEM/Base64)"
+        )
+
+    # 2. Проверка срока действия
+    check_time = at_time or datetime.now(timezone.utc)
+    if check_time < leaf_cert.not_valid_before_utc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Срок действия клиентского сертификата еще не наступил (действителен с: {leaf_cert.not_valid_before_utc})"
+        )
+    if check_time > leaf_cert.not_valid_after_utc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Срок действия клиентского сертификата истек (действителен до: {leaf_cert.not_valid_after_utc})"
+        )
+
+    # 3. Строгий запрет самоподписанных сертификатов
+    if leaf_cert.issuer == leaf_cert.subject:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=(
+                f"Клиентский сертификат является самоподписанным (Subject == Issuer: '{leaf_cert.subject.rfc4514_string()}'). "
+                "В боевой Zero-Trust архитектуре самоподписанные сертификаты строго запрещены: "
+                "сертификат обязан быть подписан доверенным Root CA."
+            )
+        )
+
+    # 4. Разрешение Root CA
+    root_ca = get_trusted_root_ca(root_ca_input)
+    if not root_ca:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Корневой удостоверяющий центр (Root CA / ca.crt) не настроен на сервере"
+        )
+
+    # 5. Проверка цепочки доверия
+    if enclave_cert_input:
+        enclave_cert = parse_x509_certificate(enclave_cert_input)
+        if not enclave_cert:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Некорректный формат промежуточного сертификата Анклава (X-Enclave-Cert)"
+            )
+        # Проверка срока действия анклава
+        if check_time < enclave_cert.not_valid_before_utc:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Срок действия промежуточного сертификата Анклава еще не наступил"
+            )
+        if check_time > enclave_cert.not_valid_after_utc:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Срок действия промежуточного сертификата Анклава истек"
+            )
+        # Проверка, что Анклав подписан Root CA
+        if enclave_cert.issuer != root_ca.subject:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"Эмитент сертификата Анклава ({enclave_cert.issuer.rfc4514_string()}) не совпадает с Root CA ({root_ca.subject.rfc4514_string()})"
+            )
+        try:
+            verify_certificate_signature(enclave_cert, root_ca.public_key())
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"Сертификат Анклава не прошел верификацию подписи доверенным Root CA: {e}"
+            )
+        # Проверка, что leaf_cert подписан Анклавом
+        if leaf_cert.issuer != enclave_cert.subject:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"Эмитент сертификата клиента ({leaf_cert.issuer.rfc4514_string()}) не совпадает с сертификатом Анклава ({enclave_cert.subject.rfc4514_string()})"
+            )
+        try:
+            verify_certificate_signature(leaf_cert, enclave_cert.public_key())
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"Клиентский сертификат не прошел верификацию подписи промежуточным Анклавом: {e}"
+            )
+        # Проверка отзыва сертификата Анклава в Redis
+        enc_serial_dec = str(enclave_cert.serial_number)
+        enc_serial_hex = format(enclave_cert.serial_number, "x")
+        enc_fp = f"sha256:{hashlib.sha256(enclave_cert.public_bytes(serialization.Encoding.DER)).hexdigest()}"
+        enc_cn = extract_cn_from_subject(enclave_cert.subject.rfc4514_string())
+        if (
+            is_certificate_revoked_in_redis(serial=enc_serial_dec, redis_conn=redis_conn)
+            or is_certificate_revoked_in_redis(serial=enc_serial_hex, redis_conn=redis_conn)
+            or is_certificate_revoked_in_redis(fingerprint=enc_fp, redis_conn=redis_conn)
+            or (enc_cn and is_certificate_revoked_in_redis(agent_id=enc_cn, redis_conn=redis_conn))
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Промежуточный сертификат Анклава отозван в Redis CRL (Parent CA has been revoked)"
+            )
+    else:
+        # Прямая 2-уровневая цепочка: Root CA -> Leaf Cert
+        if leaf_cert.issuer != root_ca.subject:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=(
+                    f"Эмитент сертификата ({leaf_cert.issuer.rfc4514_string()}) "
+                    f"не совпадает с доверенным Root CA ({root_ca.subject.rfc4514_string()})"
+                )
+            )
+        try:
+            verify_certificate_signature(leaf_cert, root_ca.public_key())
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"Клиентский сертификат не прошел верификацию подписи доверенным Root CA: {e}"
+            )
+
+    # 6. Проверка отзыва клиентского сертификата в Redis
+    serial_dec = str(leaf_cert.serial_number)
+    serial_hex = format(leaf_cert.serial_number, "x")
+    der_bytes = leaf_cert.public_bytes(serialization.Encoding.DER)
+    fp = f"sha256:{hashlib.sha256(der_bytes).hexdigest()}"
+    cn = extract_cn_from_subject(leaf_cert.subject.rfc4514_string())
+
+    if (
+        is_certificate_revoked_in_redis(serial=serial_dec, redis_conn=redis_conn)
+        or is_certificate_revoked_in_redis(serial=serial_hex, redis_conn=redis_conn)
+        or is_certificate_revoked_in_redis(fingerprint=fp, redis_conn=redis_conn)
+        or (cn and is_certificate_revoked_in_redis(agent_id=cn, redis_conn=redis_conn))
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Клиентский сертификат или идентичность отозваны в Redis CRL (Certificate has been revoked)"
+        )
+
+    # 7. Извлечение открытого ключа
+    pub_key = leaf_cert.public_key()
+    return leaf_cert, pub_key
 
 
 
