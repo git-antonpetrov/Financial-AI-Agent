@@ -4,6 +4,7 @@ import re
 import json
 import time
 import datetime
+import hashlib
 import yaml
 from minio import Minio
 # pyrefly: ignore [missing-import]
@@ -49,6 +50,14 @@ except ImportError:
             encrypt_chroma_metadata,
             decrypt_chroma_metadata,
         )
+
+try:
+    from fastapi.security import get_minio_sse
+except ImportError:
+    try:
+        from src.admin_server.fastapi.security import get_minio_sse
+    except ImportError:
+        get_minio_sse = None
 
 # --- Настройки окружения ---
 # Redis
@@ -320,20 +329,59 @@ def process_task(task: dict):
     
     try:
         # 1. Скачиваем файл из MinIO
+        markdown_text = None
         try:
-            get_kwargs = {}
-            ssec_obj = get_minio_ssec()
-            if ssec_obj is not None:
-                get_kwargs["ssec"] = ssec_obj
-            response = minio_client.get_object(bucket, file_path, **get_kwargs)
+            get_kwargs = {"bucket_name": bucket, "object_name": file_path}
+            if (os.getenv("MINIO_SSE_TYPE") or "").lower().strip() == "ssec" and get_minio_sse:
+                ssec_obj = get_minio_sse(sse_type="ssec")
+                if ssec_obj is not None:
+                    get_kwargs["ssec"] = ssec_obj
+            response = minio_client.get_object(**get_kwargs)
             markdown_text = response.read().decode('utf-8')
         except Exception as e:
             log_error("MinIO", f"Ошибка скачивания файла {file_path} из MinIO: {e}")
-            update_document_status(file_hash, agent, "error", f"MinIO error: {e}")
-            return
+            if task.get("content"):
+                log_info("MinIO", "Использование содержимого документа из полезной нагрузки задачи (fallback)")
+                markdown_text = task["content"]
+            else:
+                update_document_status(file_hash, agent, "error", f"MinIO error: {e}")
+                return
         finally:
-            if 'response' in locals():
-                response.close()
+            if 'response' in locals() and response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    pass
+
+        if not markdown_text:
+            err_msg = f"Содержимое файла {file_path} пустое или не было прочитано."
+            log_error("Целостность данных", err_msg)
+            update_document_status(file_hash, agent, "error", err_msg)
+            return
+
+        # 1.1. Проверка криптографической целостности SHA-256 (Zero-Trust verification)
+        if file_hash:
+            computed_sha256 = hashlib.sha256(markdown_text.encode("utf-8")).hexdigest()
+            if len(file_hash) == 64 and all(c in "0123456789abcdefABCDEF" for c in file_hash):
+                if computed_sha256.lower() != file_hash.lower():
+                    err_msg = (
+                        f"Нарушение целостности файла {file_path}: ожидаемый SHA-256={file_hash}, "
+                        f"фактический SHA-256={computed_sha256}. Задача отклонена."
+                    )
+                    log_error("Целостность данных", err_msg)
+                    update_document_status(file_hash, agent, "error", err_msg)
+                    return
+            elif len(file_hash) == 32 and all(c in "0123456789abcdefABCDEF" for c in file_hash):
+                computed_md5 = hashlib.md5(markdown_text.encode("utf-8")).hexdigest()
+                if computed_md5.lower() != file_hash.lower() and computed_sha256.lower() != file_hash.lower():
+                    err_msg = (
+                        f"Нарушение целостности файла {file_path}: ожидаемый MD5={file_hash}, "
+                        f"фактический MD5={computed_md5}. Задача отклонена."
+                    )
+                    log_error("Целостность данных", err_msg)
+                    update_document_status(file_hash, agent, "error", err_msg)
+                    return
+
                 
         # Получаем/создаем коллекцию для конкретного агента
         collection_name = f"knowledge-{agent}"
@@ -365,8 +413,13 @@ def process_task(task: dict):
         elif action == "upsert":
             # 2. Парсинг и санитизация метаданных для ChromaDB
             raw_metadata = extract_metadata_from_markdown(markdown_text)
-            short_name = raw_metadata.get("short_name")
-            
+            if task.get("metadata") and isinstance(task.get("metadata"), dict):
+                for k, v in task["metadata"].items():
+                    if k not in raw_metadata or not raw_metadata[k]:
+                        raw_metadata[k] = v
+
+            short_name = raw_metadata.get("short_name") or task.get("short_name")
+
             if not short_name:
                 log_error("Метаданные", "Не удалось найти 'short_name' в метаданных (YAML frontmatter) документа.")
                 update_document_status(file_hash, agent, "error", "Отсутствует short_name в метаданных")
@@ -376,6 +429,8 @@ def process_task(task: dict):
             log_info("Метаданные", f"Документ распознан. short_name: '{short_name}'")
             metadata = sanitize_chroma_metadata(raw_metadata)
             metadata["short_name"] = short_name
+            if "system_name" not in metadata and task.get("system_name"):
+                metadata["system_name"] = str(task["system_name"])
             
             # 3. Очистка старых векторов перед записью новых
             try:
@@ -394,6 +449,10 @@ def process_task(task: dict):
             splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
             chunks = splitter.split_text(clean_text)
             log_info("Разбивка текста", f"Текст разбит на {len(chunks)} чанков.")
+            if not chunks:
+                log_warning("Векторизация", f"Документ '{short_name}' не содержит текстовых чанков для векторизации.")
+                update_document_status(file_hash, agent, "completed", "Документ не содержит текстовых данных")
+                return
             
             # 5. Батчинг и векторизация с откатом при ошибках
             try:

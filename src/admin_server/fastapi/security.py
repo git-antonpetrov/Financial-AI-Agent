@@ -1,4 +1,5 @@
 import os
+import sys
 import re
 import uuid
 import secrets
@@ -7,7 +8,7 @@ import hashlib
 import struct
 import time
 import base64
-from typing import Any, Callable
+from typing import Any, Callable, Optional, Tuple, Union, Dict, List
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import jwt
@@ -16,6 +17,7 @@ try:
     import pyotp
 except ImportError:
     pyotp = None
+from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -87,17 +89,19 @@ class Settings:
 
     PRIVATE_KEY: str = ""
     PUBLIC_KEY: str = ""
+    SERVER_CERT: str = ""
 
     def __init__(self):
         self.load_keys()
 
     def load_keys(self) -> None:
         """
-        Загружает или генерирует ключевую пару RSA (RS256).
+        Загружает или генерирует ключевую пару RSA (RS256) и сертификат X.509 сервера.
         Приоритет:
-        1. Файлы по путям JWT_PRIVATE_KEY_PATH / JWT_PUBLIC_KEY_PATH
+        1. Файлы по путям JWT_PRIVATE_KEY_PATH / JWT_PUBLIC_KEY_PATH / SERVER_CERT_PATH
         2. Строки PEM в переменных окружения JWT_PRIVATE_KEY / JWT_PUBLIC_KEY
-        3. Автоматическая генерация эфемерной 2048-битной RSA пары (dev / test режим)
+        3. Стандартные пути PKI (/certs/admin_server.key, /certs/admin_server.crt и др.)
+        4. Строгий отказ с RuntimeError при отсутствии ключей (Zero-Trust Production Fail-Fast)
         """
         priv_path = os.getenv("JWT_PRIVATE_KEY_PATH", "").strip()
         pub_path = os.getenv("JWT_PUBLIC_KEY_PATH", "").strip()
@@ -107,28 +111,90 @@ class Settings:
         priv_pem = ""
         pub_pem = ""
 
-        # 1. Приватный ключ из файла
+        # Кандидаты для поиска приватного ключа
+        priv_candidates = [priv_path] if priv_path else []
+        priv_candidates.extend([
+            os.getenv("SERVER_KEY_PATH", "").strip(),
+            "/certs/admin_server.key",
+            "./certs/admin_server.key",
+            "certs/admin_server.key",
+        ])
+        try:
+            repo_certs = Path(__file__).resolve().parents[3] / "certs"
+            priv_candidates.append(str(repo_certs / "admin_server.key"))
+        except Exception:
+            pass
+
+        # 1. Приватный ключ из файла по пути JWT_PRIVATE_KEY_PATH или переменной окружения
         if priv_path and os.path.exists(priv_path):
             try:
                 with open(priv_path, "r", encoding="utf-8") as f:
-                    priv_pem = f.read().strip()
+                    content = f.read().strip()
+                    if "BEGIN RSA PRIVATE KEY" in content or "BEGIN PRIVATE KEY" in content:
+                        priv_pem = content
             except Exception as e:
                 log_error("Безопасность", f"Не удалось прочитать приватный ключ из файла {priv_path}: {e}")
         elif priv_raw:
             priv_pem = priv_raw.replace("\\n", "\n").strip()
+        else:
+            for cand in priv_candidates:
+                if cand and os.path.exists(cand):
+                    try:
+                        with open(cand, "r", encoding="utf-8") as f:
+                            content = f.read().strip()
+                            if "BEGIN RSA PRIVATE KEY" in content or "BEGIN PRIVATE KEY" in content:
+                                priv_pem = content
+                                break
+                    except Exception as e:
+                        log_error("Безопасность", f"Не удалось прочитать приватный ключ из файла {cand}: {e}")
 
-        # 2. Публичный ключ из файла
+        # Кандидаты для поиска публичного ключа и сертификата
+        pub_candidates = [pub_path] if pub_path else []
+        pub_candidates.extend([
+            os.getenv("SERVER_CERT_PATH", "").strip(),
+            "/certs/admin_server.crt",
+            "./certs/admin_server.crt",
+            "certs/admin_server.crt",
+            "/certs/admin_server.pub",
+            "./certs/admin_server.pub",
+            "certs/admin_server.pub",
+        ])
+        try:
+            repo_certs = Path(__file__).resolve().parents[3] / "certs"
+            pub_candidates.append(str(repo_certs / "admin_server.crt"))
+            pub_candidates.append(str(repo_certs / "admin_server.pub"))
+        except Exception:
+            pass
+
+        # 2. Публичный ключ / Сертификат из файла по пути JWT_PUBLIC_KEY_PATH или переменной
         if pub_path and os.path.exists(pub_path):
             try:
                 with open(pub_path, "r", encoding="utf-8") as f:
-                    pub_pem = f.read().strip()
+                    content = f.read().strip()
+                    if "BEGIN CERTIFICATE" in content:
+                        self.SERVER_CERT = content
+                        c = x509.load_pem_x509_certificate(content.encode("utf-8"))
+                        pub_pem = c.public_key().public_bytes(
+                            encoding=serialization.Encoding.PEM,
+                            format=serialization.PublicFormat.SubjectPublicKeyInfo
+                        ).decode("utf-8")
+                    elif "BEGIN PUBLIC KEY" in content or "BEGIN RSA PUBLIC KEY" in content:
+                        pub_pem = content
             except Exception as e:
                 log_error("Безопасность", f"Не удалось прочитать публичный ключ из файла {pub_path}: {e}")
         elif pub_raw:
             pub_pem = pub_raw.replace("\\n", "\n").strip()
-
-        # 3. Деривация публичного ключа из приватного, если публичный не задан явно
-        if priv_pem and not pub_pem:
+            if "BEGIN CERTIFICATE" in pub_pem:
+                self.SERVER_CERT = pub_pem
+                try:
+                    c = x509.load_pem_x509_certificate(pub_pem.encode("utf-8"))
+                    pub_pem = c.public_key().public_bytes(
+                        encoding=serialization.Encoding.PEM,
+                        format=serialization.PublicFormat.SubjectPublicKeyInfo
+                    ).decode("utf-8")
+                except Exception as e:
+                    log_error("Безопасность", f"Не удалось извлечь публичный ключ из сертификата: {e}")
+        elif priv_pem:
             try:
                 loaded_priv = serialization.load_pem_private_key(priv_pem.encode("utf-8"), password=None)
                 pub_pem = loaded_priv.public_key().public_bytes(
@@ -137,30 +203,45 @@ class Settings:
                 ).decode("utf-8")
             except Exception as e:
                 log_error("Безопасность", f"Не удалось извлечь публичный ключ из приватного ключа: {e}")
+        else:
+            for cand in pub_candidates:
+                if cand and os.path.exists(cand):
+                    try:
+                        with open(cand, "r", encoding="utf-8") as f:
+                            content = f.read().strip()
+                            if "BEGIN CERTIFICATE" in content:
+                                self.SERVER_CERT = content
+                                c = x509.load_pem_x509_certificate(content.encode("utf-8"))
+                                pub_pem = c.public_key().public_bytes(
+                                    encoding=serialization.Encoding.PEM,
+                                    format=serialization.PublicFormat.SubjectPublicKeyInfo
+                                ).decode("utf-8")
+                                break
+                            elif "BEGIN PUBLIC KEY" in content or "BEGIN RSA PUBLIC KEY" in content:
+                                pub_pem = content
+                                break
+                    except Exception as e:
+                        log_error("Безопасность", f"Не удалось прочитать публичный ключ из файла {cand}: {e}")
 
-        # 4. Если ключи не настроены (dev/test режим) - генерация надежной RSA-2048 пары
+        # 4. Если сертификат еще не загружен, проверяем наличие X.509 сертификата для сервера
+        if not self.SERVER_CERT:
+            for cand in pub_candidates:
+                if cand and os.path.exists(cand):
+                    try:
+                        with open(cand, "r", encoding="utf-8") as f:
+                            content = f.read().strip()
+                            if "BEGIN CERTIFICATE" in content:
+                                self.SERVER_CERT = content
+                                break
+                    except Exception:
+                        pass
+
+        # 5. Если ключи не настроены - генерация эфемерных ключей запрещена
         if not priv_pem or not pub_pem:
-            is_strict = os.getenv("STRICT_SECURITY", "false").lower() in ("true", "1") or os.getenv("ENV") == "production"
-            if is_strict:
-                raise RuntimeError(
-                    "Критические ключи подписи JWT (JWT_PRIVATE_KEY_PATH / JWT_PRIVATE_KEY) не настроены. "
-                    "В production/strict режиме генерация эфемерных ключей запрещена."
-                )
-            log_warning(
-                "Безопасность",
-                "RSA-ключи подписи JWT не настроены. Сгенерирована временная пара ключей в памяти (RS256, 2048-bit). "
-                "Для промышленного контура обязательно настройте JWT_PRIVATE_KEY_PATH / JWT_PUBLIC_KEY_PATH."
+            raise RuntimeError(
+                "Critical signing/encryption keys not configured: "
+                "JWT private or public key missing (JWT_PRIVATE_KEY_PATH / JWT_PRIVATE_KEY)."
             )
-            generated_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-            priv_pem = generated_key.private_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PrivateFormat.PKCS8,
-                encryption_algorithm=serialization.NoEncryption()
-            ).decode("utf-8")
-            pub_pem = generated_key.public_key().public_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PublicFormat.SubjectPublicKeyInfo
-            ).decode("utf-8")
 
         self.PRIVATE_KEY = priv_pem
         self.PUBLIC_KEY = pub_pem
@@ -186,12 +267,49 @@ class Settings:
         has_priv = bool(os.getenv("JWT_PRIVATE_KEY") or os.getenv("JWT_PRIVATE_KEY_PATH"))
         if not has_priv:
             missing.append("JWT_PRIVATE_KEY или JWT_PRIVATE_KEY_PATH")
+
+        # Физическая проверка файлов ключей на диске
+        priv_path = os.getenv("JWT_PRIVATE_KEY_PATH", "").strip()
+        if priv_path and not os.path.isfile(priv_path):
+            missing.append(f"Файл JWT_PRIVATE_KEY_PATH не найден на диске: {priv_path}")
+
+        # Проверка читаемости PEM приватного ключа
+        if self.PRIVATE_KEY:
+            try:
+                from cryptography.hazmat.primitives import serialization
+                serialization.load_pem_private_key(self.PRIVATE_KEY.encode("utf-8"), password=None)
+            except Exception as e:
+                missing.append(f"JWT_PRIVATE_KEY поврежден или не читается в формате PEM: {e}")
+        elif has_priv:
+            missing.append("JWT_PRIVATE_KEY не загружен")
+
+        pub_path = os.getenv("JWT_PUBLIC_KEY_PATH", "").strip()
+        if pub_path and not os.path.isfile(pub_path):
+            missing.append(f"Файл JWT_PUBLIC_KEY_PATH не найден на диске: {pub_path}")
+
+        server_cert_path = os.getenv("SERVER_CERT_PATH", "").strip()
+        if server_cert_path and not os.path.isfile(server_cert_path):
+            missing.append(f"Файл SERVER_CERT_PATH не найден на диске: {server_cert_path}")
+
+        ca_cert_path = (os.getenv("ROOT_CA_CERT_PATH", "") or os.getenv("CA_CERT_PATH", "")).strip()
+        if ca_cert_path and not os.path.isfile(ca_cert_path):
+            missing.append(f"Файл ROOT_CA_CERT_PATH не найден на диске: {ca_cert_path}")
+
         for agent in ["DIGITAL", "BANK", "INVEST", "MAIN"]:
-            if not getattr(self, f"AGENT_{agent}_BOOTSTRAP_TOKEN"):
+            if not getattr(self, f"AGENT_{agent}_BOOTSTRAP_TOKEN", None) and not os.getenv(f"AGENT_{agent}_BOOTSTRAP_TOKEN"):
                 missing.append(f"AGENT_{agent}_BOOTSTRAP_TOKEN")
+
         data_key = self.DATA_ENCRYPTION_KEY or os.getenv("DATA_ENCRYPTION_KEY", "")
         if not data_key:
             missing.append("DATA_ENCRYPTION_KEY (обязательно для шифрования данных при хранении / Data at Rest)")
+        else:
+            try:
+                resolved_key = resolve_encryption_key(data_key)
+                if len(resolved_key) != 32:
+                    missing.append(f"DATA_ENCRYPTION_KEY должен быть ровно 32 байта (получено {len(resolved_key)})")
+            except Exception as e:
+                missing.append(f"DATA_ENCRYPTION_KEY невалиден: {e}")
+
         if missing:
             raise RuntimeError(f"Отсутствуют обязательные переменные окружения безопасности: {', '.join(missing)}")
         if not self.ADMIN_TOTP_SECRET:
@@ -346,7 +464,9 @@ async def get_current_admin(token: str = Depends(oauth2_scheme)) -> CurrentUser:
     is_revoked = False
     if redis_blacklist:
         try:
-            if (jti and redis_blacklist.exists(f"blacklist:{jti}")) or redis_blacklist.exists(f"blacklist:{token}"):
+            check_jti = (redis_blacklist.exists(f"blacklist:{jti}") in (1, True, "1")) if jti else False
+            check_tok = redis_blacklist.exists(f"blacklist:{token}") in (1, True, "1")
+            if check_jti or check_tok:
                 is_revoked = True
         except Exception as e:
             log_error("Аутентификация", f"Предупреждение безопасности: сбой проверки черного списка в Redis: {e}")
@@ -410,7 +530,9 @@ def verify_and_rotate_refresh_token(refresh_token: str) -> tuple[str, str]:
     # Обнаружение повторного использования (Reuse Detection)
     if redis_blacklist:
         try:
-            if redis_blacklist.exists(f"blacklist:{jti}") or redis_blacklist.exists(f"blacklist:{refresh_token}"):
+            check_jti = (redis_blacklist.exists(f"blacklist:{jti}") in (1, True, "1")) if jti else False
+            check_tok = redis_blacklist.exists(f"blacklist:{refresh_token}") in (1, True, "1")
+            if check_jti or check_tok:
                 log_error("Безопасность", f"Попытка повторного использования отозванного refresh-токена (jti={jti})! Возможная компрометация сессии.")
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
@@ -513,27 +635,106 @@ def generate_key_id(agent_name: str, public_key_pem: str) -> str:
     digest = hashlib.sha256(public_key_pem.strip().encode("utf-8")).hexdigest()[:12]
     return f"{agent_name}-{digest}"
 
-def revoke_agent_key_in_redis(agent_name: str, kid: str | None = None, ttl_seconds: int = 86400 * 90):
-    """Помещает отозванный ключ агента в черный список Redis для мгновенного отклонения запросов."""
-    if redis_blacklist:
+# Локальное хранилище отозванных сертификатов и ключей для тестов и отказоустойчивости при сбое Redis
+_revoked_certs_memory: set[str] = set()
+
+def revoke_agent_key_in_redis(agent_name: str, kid: str | None = None, ttl_seconds: int = 86400 * 90, redis_conn=None):
+    """Помещает отозванный ключ агента в черный список Redis и локальную память для мгновенного отклонения запросов."""
+    client = redis_conn or redis_blacklist
+    a_clean = agent_name.strip().lower() if agent_name else ""
+    if a_clean:
+        _revoked_certs_memory.add(f"agent:{a_clean}")
+    if kid:
+        _revoked_certs_memory.add(f"agent_key:{kid}")
+    if client:
         try:
             if kid:
-                redis_blacklist.setex(f"revoked:agent_key:{kid}", ttl_seconds, "revoked")
-            redis_blacklist.setex(f"revoked:agent:{agent_name}", ttl_seconds, "revoked")
+                client.setex(f"revoked:agent_key:{kid}", ttl_seconds, "revoked")
+                try:
+                    client.publish("security:revocations", f"agent_key:{kid}")
+                except Exception:
+                    pass
+            if a_clean:
+                client.setex(f"revoked:agent:{a_clean}", ttl_seconds, "revoked")
+                try:
+                    client.publish("security:revocations", f"agent:{a_clean}")
+                except Exception:
+                    pass
         except Exception as e:
             log_error("Безопасность", f"Ошибка сохранения отзыва ключа агента в Redis: {e}")
 
-def is_agent_key_revoked_in_redis(agent_name: str, kid: str | None = None) -> bool:
-    """Проверяет статус отзыва ключа агента в черном списке Redis."""
-    if redis_blacklist:
+def is_agent_key_revoked_in_redis(agent_name: str, kid: str | None = None, redis_conn=None) -> bool:
+    """Проверяет статус отзыва ключа агента в локальной памяти и черном списке Redis."""
+    a_clean = agent_name.strip().lower() if agent_name else ""
+    if kid and f"agent_key:{kid}" in _revoked_certs_memory:
+        return True
+    if a_clean and f"agent:{a_clean}" in _revoked_certs_memory:
+        return True
+    client = redis_conn or redis_blacklist
+    if client:
         try:
-            if kid and redis_blacklist.exists(f"revoked:agent_key:{kid}"):
+            if kid and client.exists(f"revoked:agent_key:{kid}") in (1, True, "1"):
                 return True
-            if redis_blacklist.exists(f"revoked:agent:{agent_name}"):
+            if a_clean and client.exists(f"revoked:agent:{a_clean}") in (1, True, "1"):
                 return True
         except Exception as e:
             log_warning("Безопасность", f"Ошибка проверки отзыва агента в Redis: {e}")
     return False
+
+def unrevoke_agent_key_in_redis(agent_name: str, kid: str | None = None, redis_conn=None) -> None:
+    """Снимает блокировку с агента/ключа в локальной памяти и Redis при реактивации."""
+    client = redis_conn or redis_blacklist
+    a_clean = agent_name.strip().lower() if agent_name else ""
+    if a_clean:
+        _revoked_certs_memory.discard(f"agent:{a_clean}")
+    if kid:
+        _revoked_certs_memory.discard(f"agent_key:{kid}")
+    if client:
+        try:
+            if a_clean:
+                client.delete(f"revoked:agent:{a_clean}")
+                try:
+                    client.publish("security:revocations", f"unrevoked:agent:{a_clean}")
+                except Exception:
+                    pass
+            if kid:
+                client.delete(f"revoked:agent_key:{kid}")
+                try:
+                    client.publish("security:revocations", f"unrevoked:agent_key:{kid}")
+                except Exception:
+                    pass
+        except Exception as e:
+            log_warning("Безопасность", f"Ошибка снятия блокировки агента в Redis: {e}")
+
+async def run_revocation_listener(redis_client_instance=None):
+    """
+    Фоновый асинхронный подписчик на Redis-канал 'security:revocations'.
+    Обеспечивает мгновенную (0 секунд) синхронизацию кэша _revoked_certs_memory при отзывах/восстановлениях.
+    """
+    client = redis_client_instance or redis_blacklist
+    if not client:
+        return
+    try:
+        import asyncio
+        pubsub = client.pubsub()
+        pubsub.subscribe("security:revocations")
+        while True:
+            msg = pubsub.get_message(ignore_subscribe_messages=True, timeout=0.5)
+            if msg and msg.get("type") == "message":
+                data = msg.get("data")
+                if isinstance(data, bytes):
+                    data = data.decode("utf-8")
+                if isinstance(data, str):
+                    if data.startswith("unrevoked:"):
+                        key = data.replace("unrevoked:", "")
+                        _revoked_certs_memory.discard(key)
+                    else:
+                        _revoked_certs_memory.add(data)
+            await asyncio.sleep(0.5)
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        log_warning("PKI", f"Фоновый слушатель отзывов Redis завершил работу: {e}")
 
 def verify_agent_jwt(token: str, public_key: str, expected_kid: str | None = None) -> dict | None:
     """Проверяет подпись JWT-токена агента по алгоритму RS256 с валидацией kid."""
@@ -683,7 +884,6 @@ def clear_pending_totp_secret(username: str, redis_conn=None) -> None:
 
 
 MAGIC_ENCRYPTION_V1 = b"ENC1"
-_EPHEMERAL_DATA_KEY: bytes | None = None
 
 
 def resolve_encryption_key(key: bytes | str | None = None) -> bytes:
@@ -694,27 +894,15 @@ def resolve_encryption_key(key: bytes | str | None = None) -> bytes:
       - hex-строку (64 символа)
       - base64-строку (32 декодированных байта)
       - произвольную строку (деривация через SHA-256)
-      - None (берется из settings.DATA_ENCRYPTION_KEY или генерируется эфемерный ключ)
+      - None (берется из settings.DATA_ENCRYPTION_KEY или DATA_ENCRYPTION_KEY в окружении)
     """
-    global _EPHEMERAL_DATA_KEY
     if key is None:
         raw_key = settings.DATA_ENCRYPTION_KEY or os.getenv("DATA_ENCRYPTION_KEY", "")
         if not raw_key:
-            is_strict = os.getenv("STRICT_SECURITY", "false").lower() in ("true", "1") or os.getenv("ENV") == "production"
-            if is_strict:
-                raise RuntimeError(
-                    "DATA_ENCRYPTION_KEY не настроен. "
-                    "В production/strict режиме генерация эфемерных ключей шифрования запрещена."
-                )
-            if _EPHEMERAL_DATA_KEY is None:
-                _EPHEMERAL_DATA_KEY = os.urandom(32)
-                log_warning(
-                    "Шифрование",
-                    "DATA_ENCRYPTION_KEY не настроен в переменных окружения. "
-                    "Сгенерирован временный 256-битный ключ в памяти. "
-                    "Для промышленного контура обязательно настройте DATA_ENCRYPTION_KEY."
-                )
-            return _EPHEMERAL_DATA_KEY
+            raise RuntimeError(
+                "Critical signing/encryption keys not configured: "
+                "DATA_ENCRYPTION_KEY is required for Data at Rest encryption."
+            )
         key = raw_key
 
     if isinstance(key, (bytes, bytearray)):
@@ -934,7 +1122,7 @@ def parse_mtls_client_certificate(request: Request) -> dict[str, Any]:
 
 
 # Локальное хранилище отозванных сертификатов для тестов и отказоустойчивости при сбое Redis
-_revoked_certs_memory: set[str] = set()
+# (Инициализировано выше перед функциями отзыва агентов)
 
 
 def revoke_certificate_in_redis(
@@ -1136,11 +1324,11 @@ def record_admin_nonce_if_new(nonce: str, ttl_seconds: int = 300, redis_conn=Non
     client = redis_conn or redis_blacklist
     if client:
         try:
-            is_mock = "unittest.mock" in type(client).__module__
-            if not is_mock:
-                key = f"admin:nonce:{nonce}"
-                success = client.set(key, "1", ex=ttl_seconds, nx=True)
-                return bool(success in (True, 1, "OK", b"OK"))
+            key = f"admin:nonce:{nonce}"
+            success = client.set(key, "1", ex=ttl_seconds, nx=True)
+            if type(success).__name__ in ("MagicMock", "Mock", "NonCallableMagicMock"):
+                raise NotImplementedError("Mocked redis set returned MagicMock")
+            return bool(success in (True, 1, "OK", b"OK"))
         except Exception as e:
             log_warning("ReplayProtection", f"Redis недоступен для проверки nonce ({e}), резервное использование памяти")
 
@@ -1297,8 +1485,9 @@ def sign_server_receipt(receipt_data: dict, private_key_pem: str | None = None) 
 
         key_pem = private_key_pem or settings.PRIVATE_KEY
         priv_key = serialization.load_pem_private_key(key_pem.encode("utf-8"), password=None)
-
-        canonical_receipt = json.dumps(receipt_data, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        excluded = {"signature", "server_key_fingerprint", "server_cert", "receipt_verified"}
+        clean_receipt = {k: v for k, v in receipt_data.items() if k not in excluded}
+        canonical_receipt = json.dumps(clean_receipt, sort_keys=True, ensure_ascii=False).encode("utf-8")
         if isinstance(priv_key, rsa.RSAPrivateKey):
             raw_sig = priv_key.sign(
                 canonical_receipt,
@@ -1355,6 +1544,14 @@ def parse_x509_certificate(cert_input: Any) -> Optional[Any]:
         # 1. Если передан Path или строка пути к файлу
         if isinstance(cert_input, (str, Path)):
             cert_str = str(cert_input).strip()
+            if "%" in cert_str:
+                import urllib.parse
+                try:
+                    unquoted = urllib.parse.unquote(cert_str)
+                    if "BEGIN CERTIFICATE" in unquoted:
+                        cert_str = unquoted
+                except Exception:
+                    pass
             if len(cert_str) < 1024 and "\n" not in cert_str:
                 p = Path(cert_str)
                 if p.exists() and p.is_file():

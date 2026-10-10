@@ -431,3 +431,71 @@ class RemoteAdminClient:
         with self._lock:
             self._contentai_cache = cfg
         return cfg
+
+    # --- МЕТОДЫ УПРАВЛЕНИЯ КЛЮЧАМИ АГЕНТОВ ---
+
+    def get_agent_keys(self, agent_name: str) -> List[Dict[str, Any]]:
+        """Возвращает историю и текущее состояние публичных ключей агента."""
+        resp = self.request("GET", f"/api/agents/{agent_name}/keys")
+        resp.raise_for_status()
+        return resp.json()
+
+    def rotate_agent_key(self, agent_name: str, new_public_key: str, ttl_days: int = 90) -> Dict[str, Any]:
+        """Выполняет принудительную ротацию публичного ключа агента."""
+        resp = self.request(
+            "POST",
+            f"/api/agents/{agent_name}/rotate",
+            json={"agent_name": agent_name, "new_public_key": new_public_key, "ttl_days": ttl_days}
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    # --- МЕТОДЫ АУДИТА И КРИПТОГРАФИЧЕСКОГО КОНТРОЛЯ ЦЕЛОСТНОСТИ ---
+
+    def get_audit_logs(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        actor: Optional[str] = None,
+        action: Optional[str] = None,
+        status: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Возвращает страницу записей неизменяемого журнала аудита."""
+        params: Dict[str, Any] = {"limit": limit, "offset": offset}
+        if actor:
+            params["actor"] = actor
+        if action:
+            params["action"] = action
+        if status:
+            params["status"] = status
+        resp = self.request("GET", "/api/audit/logs", params=params)
+        resp.raise_for_status()
+        return resp.json()
+
+    def verify_audit_log(self) -> Dict[str, Any]:
+        """Криптографически проверяет целостность всей цепочки хешей журнала аудита (Audit Trail Hash-Chain)."""
+        resp = self.request("GET", "/api/audit/verify")
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_audit_summary(self) -> Dict[str, Any]:
+        """Возвращает сводную статистику по журналу аудита и статусу целостности."""
+        resp = self.request("GET", "/api/audit/summary")
+        resp.raise_for_status()
+        return resp.json()
+
+    # --- СТАТУС ВЗАИМНОГО TLS (mTLS) ---
+
+    def get_mtls_status(self) -> Dict[str, Any]:
+        """Возвращает информацию о текущем статусе mTLS сессии и настроенных сертификатах."""
+        return {
+            "server_url": self.server_url,
+            "mtls_configured": bool(self.session.cert),
+            "ca_configured": bool(self.session.verify and self.session.verify != True),
+            "ca_cert_path": self.ca_cert_path,
+            "client_cert_path": self.client_cert_path,
+            "client_key_path": self.client_key_path,
+            "authenticated": self.is_authenticated(),
+            "username": self.username,
+            "role": self.role,
+        }

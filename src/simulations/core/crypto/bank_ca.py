@@ -28,15 +28,7 @@ class BankCertificateAuthority:
         self.bank_cert = bank_cert
         self.bank_private_key = bank_private_key
 
-    @classmethod
-    def create_in_memory(cls, key_size: int = 2048) -> "BankCertificateAuthority":
-        """
-        Создает новый экземпляр Root CA и выпускает сертификат Банка в оперативной памяти.
-        """
-        instance = cls()
-        instance.initialize_ca(key_size=key_size)
-        instance.issue_bank_certificate(key_size=key_size)
-        return instance
+
 
     def initialize_ca(
         self,
@@ -385,8 +377,10 @@ def get_bank_ca() -> BankCertificateAuthority:
     Возвращает синглтон-экземпляр Bank CA.
     Приоритет:
     1. Централизованный Zero-Trust Root CA (/certs/ca.crt + bank.crt + bank.key);
-    2. Локальная директория сертификатов BANK_CERTS_DIR (если явно задана);
-    3. Автоматическая генерация в оперативной памяти (dev/test fallback без сохранения на диск).
+    2. Локальная директория сертификатов BANK_CERTS_DIR (если явно задана).
+    
+    В соответствии с моделью Zero-Trust, при отсутствии сертификатов на диске
+    выбрасывается RuntimeError.
     """
     global _BANK_CA_INSTANCE
     if _BANK_CA_INSTANCE is not None:
@@ -401,16 +395,18 @@ def get_bank_ca() -> BankCertificateAuthority:
         if certs_dir:
             instance = BankCertificateAuthority.load_from_dir(certs_dir)
 
-    # 3. Эфемерная генерация в оперативной памяти (без сохранения приватных ключей на диск)
+    # 3. Строгий режим Zero-Trust: отсутствие сертификатов на диске недопустимо
     if instance is None:
-        instance = BankCertificateAuthority.create_in_memory()
+        raise RuntimeError(
+            "PKI сертификаты банка не найдены на диске (ca.crt, bank.crt, bank.key). "
+            "Генерация в оперативной памяти запрещена моделью Zero-Trust."
+        )
 
     _BANK_CA_INSTANCE = instance
     return _BANK_CA_INSTANCE
 
 
-def reset_bank_ca_for_tests() -> BankCertificateAuthority:
+def reset_bank_ca_for_tests() -> None:
     """Сбрасывает синглтон (для изолированного тестирования)."""
     global _BANK_CA_INSTANCE
-    _BANK_CA_INSTANCE = BankCertificateAuthority.create_in_memory()
-    return _BANK_CA_INSTANCE
+    _BANK_CA_INSTANCE = None

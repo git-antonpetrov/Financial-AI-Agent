@@ -10,6 +10,7 @@ services:
       - ROOT_CA_DATA_DIR=/data/ca
       - SHARED_CERTS_DIR=/shared_certs
       - FORCE_REGENERATE=${FORCE_REGENERATE:-false}
+      - STRICT_SECURITY=true
     volumes:
       - root_ca_data:/data/ca
       - certs_data:/shared_certs
@@ -163,6 +164,7 @@ services:
       root-ca:
         condition: service_completed_successfully
     environment:
+      - STRICT_SECURITY=true
       - BANK_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/bank_db
       - INVEST_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/invest_db
       - RUBLE_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/digital_db
@@ -232,15 +234,18 @@ services:
       minio:
         condition: service_started
     environment:
+      - STRICT_SECURITY=true
       - MINIO_URL=minio:9000
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - DB_HOST=postgres-db
       - GOOGLE_APPLICATION_CREDENTIALS=/app/data/gcp-service-account.json
       - DATA_ENCRYPTION_KEY=${DATA_ENCRYPTION_KEY}
-      - MINIO_SSE_ENABLED=${MINIO_SSE_ENABLED:-false}
+      - JWT_PRIVATE_KEY_PATH=${JWT_PRIVATE_KEY_PATH:-/certs/admin_server.key}
+      - JWT_PUBLIC_KEY_PATH=${JWT_PUBLIC_KEY_PATH:-/certs/admin_server.crt}
+      - MINIO_SSE_ENABLED=${MINIO_SSE_ENABLED:-true}
       - CHROMA_ENVELOPE_ENCRYPTION_ENABLED=${CHROMA_ENVELOPE_ENCRYPTION_ENABLED:-true}
-      - REQUIRE_MTLS=${REQUIRE_MTLS:-false}
+      - REQUIRE_MTLS=${REQUIRE_MTLS:-true}
       - ALLOWED_MTLS_SUBJECTS=${ALLOWED_MTLS_SUBJECTS:-}
       - ALLOWED_MTLS_ISSUERS=${ALLOWED_MTLS_ISSUERS:-}
       - MINIO_SECURE=${MINIO_SECURE:-true}
@@ -288,6 +293,7 @@ services:
       postgres-db:
         condition: service_started
     environment:
+      - STRICT_SECURITY=true
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - MINIO_URL=minio:9000

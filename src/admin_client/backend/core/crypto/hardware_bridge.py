@@ -367,26 +367,42 @@ class HardwareSigningBridge:
         return None
 
     def close(self) -> None:
-        """Освобождает дескрипторы CNG."""
-        import ctypes
-        if sys.platform == "win32":
-            ncrypt = getattr(ctypes.windll, "ncrypt", None)
-            if ncrypt:
-                if self._key_handle:
-                    try:
-                        ncrypt.NCryptFreeObject(self._key_handle)
-                    except Exception:
-                        pass
-                    self._key_handle = None
-                if self._provider_handle:
-                    try:
-                        ncrypt.NCryptFreeObject(self._provider_handle)
-                    except Exception:
-                        pass
-                    self._provider_handle = None
+        """Освобождает дескрипторы CNG с защитой от сбоев во время выгрузки интерпретатора Python."""
+        try:
+            import sys
+            import ctypes
+        except Exception:
+            return
+
+        try:
+            if getattr(sys, "platform", None) == "win32":
+                windll = getattr(ctypes, "windll", None)
+                ncrypt = getattr(windll, "ncrypt", None) if windll else None
+                if ncrypt:
+                    free_func = getattr(ncrypt, "NCryptFreeObject", None)
+                    if free_func and self._key_handle:
+                        try:
+                            free_func(self._key_handle)
+                        except Exception:
+                            pass
+                        self._key_handle = None
+                    if free_func and self._provider_handle:
+                        try:
+                            free_func(self._provider_handle)
+                        except Exception:
+                            pass
+                        self._provider_handle = None
+        except Exception:
+            pass
+        finally:
+            self._key_handle = None
+            self._provider_handle = None
 
     def __del__(self) -> None:
-        self.close()
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 class SimulatedTPMBridge:

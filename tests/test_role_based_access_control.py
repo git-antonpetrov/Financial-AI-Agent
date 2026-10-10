@@ -274,10 +274,8 @@ def test_auditor_access_restrictions():
     aud_token = create_access_token({"sub": "auditor"}, role=Role.AUDITOR)
     headers = {"Authorization": f"Bearer {aud_token}"}
 
-    # 1. Запрет на выгрузку документа (documents:write) -> 403
-    files = {"file": ("test.md", b"# Content", "text/markdown")}
-    data = {"file_hash": "1234567890abcdef"}
-    resp_upload = client.post("/api/upload/main/upsert", files=files, data=data, headers=headers)
+    # 1. Запрет на операцию с документами (documents:write) -> 403
+    resp_upload = client.post("/api/llm/analyze", json={"text": "Confidential content"}, headers=headers)
     assert resp_upload.status_code == 403
     assert "documents:write" in resp_upload.json()["detail"]
 

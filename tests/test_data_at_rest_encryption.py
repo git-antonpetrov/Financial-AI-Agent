@@ -327,30 +327,86 @@ def test_validate_production_env_requires_data_encryption_key():
 
 
 def test_upload_document_passes_minio_sse():
-    """Проверяет передачу параметра sse в minio_client.put_object при выгрузке документа в /api/upload/{agent}/{action}."""
-    from unittest.mock import AsyncMock
+    """Проверяет передачу параметра sse в minio_client.put_object при выгрузке документа в /api/v1/rag/documents."""
+    import sys
+    import time
+    import uuid
+    import json
+    import base64
+    import tempfile
+    import datetime
+    from pathlib import Path
+    from unittest.mock import MagicMock, patch
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    from cryptography.hazmat.backends import default_backend
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa, padding
     from fastapi.testclient import TestClient
-    from server import app, minio_client, get_current_admin
+    from server import app, minio_client
+    from security import compute_rag_canonical_digest, set_trusted_root_ca
 
-    app.dependency_overrides[get_current_admin] = lambda: "admin"
+    certs_dir = Path(tempfile.gettempdir()) / "fin_ai_test_pki_certs"
+    ca_pem = (certs_dir / "ca.crt").read_text(encoding="utf-8")
+    ca_key = serialization.load_pem_private_key((certs_dir / "ca.key").read_bytes(), password=None)
+    ca_cert = x509.load_pem_x509_certificate(ca_pem.encode("utf-8"))
+    set_trusted_root_ca(ca_pem)
+
+    # Выпускаем валидный сертификат с ролью admin_operator, подписанный Root CA
+    client_key = rsa.generate_private_key(65537, 2048, default_backend())
+    now_dt = datetime.datetime.now(datetime.timezone.utc)
+    client_subject = x509.Name([
+        x509.NameAttribute(NameOID.COUNTRY_NAME, "RU"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Financial AI Test"),
+        x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "admin_operator"),
+        x509.NameAttribute(NameOID.COMMON_NAME, "superadmin-workstation"),
+    ])
+    client_cert = (
+        x509.CertificateBuilder()
+        .subject_name(client_subject)
+        .issuer_name(ca_cert.subject)
+        .public_key(client_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now_dt - datetime.timedelta(days=1))
+        .not_valid_after(now_dt + datetime.timedelta(days=365))
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .sign(ca_key, hashes.SHA256(), default_backend())
+    )
+    client_cert_pem = client_cert.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+
     minio_client.put_object = MagicMock()
+    minio_client.bucket_exists = MagicMock(return_value=True)
 
-    with patch("server.crud.update_checking_to_processing", new=AsyncMock(return_value=True)), \
-         patch("server.redis_client.lpush", return_value=1), \
-         patch("server.get_minio_sse") as mock_sse:
-        
-        mock_sse_obj = MagicMock()
-        mock_sse.return_value = mock_sse_obj
-        
+    mock_sse_obj = MagicMock()
+    now_ts = int(time.time())
+    nonce = f"test_nonce_sse_{uuid.uuid4().hex[:8]}"
+    doc_data = {
+        "document_title": "Test SSE Policy",
+        "collection_name": "knowledge-main",
+        "content": "# Test content for SSE verification\nSome text here.",
+        "metadata": {"short_name": "sse_test"}
+    }
+    body_bytes = json.dumps(doc_data, ensure_ascii=False).encode("utf-8")
+    canonical = compute_rag_canonical_digest(now_ts, nonce, body_bytes)
+    sig = client_key.sign(canonical, padding.PKCS1v15(), hashes.SHA256())
+    sig_b64 = base64.b64encode(sig).decode("ascii")
+
+    headers = {
+        "X-Timestamp": str(now_ts),
+        "X-Nonce": nonce,
+        "X-Signature": sig_b64,
+        "X-Cert": client_cert_pem,
+        "Content-Type": "application/json",
+        "X-Client-Cert-Verify": "SUCCESS",
+        "X-Client-Cert-Subject": "CN=superadmin-workstation,OU=admin_operator"
+    }
+
+    rag_mod = sys.modules.get("routers.rag_documents") or sys.modules.get("src.admin_server.fastapi.routers.rag_documents")
+    with patch.object(rag_mod, "get_minio_sse", return_value=mock_sse_obj):
         client = TestClient(app)
-        files = {"file": ("test_doc.md", b"# Frontmatter\n---\nshort_name: test\nsystem_name: test_01012026\n---\nBody", "text/markdown")}
-        data = {"file_hash": "a1b2c3d4e5f60718"}
-        response = client.post("/api/upload/main/upsert", files=files, data=data)
-        
-        assert response.status_code == 200
+        response = client.post("/api/v1/rag/documents", content=body_bytes, headers=headers)
+        assert response.status_code == 201
         minio_client.put_object.assert_called_once()
         _, kwargs = minio_client.put_object.call_args
         assert kwargs.get("sse") == mock_sse_obj
-
-    app.dependency_overrides.clear()
 

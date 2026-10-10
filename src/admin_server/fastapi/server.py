@@ -1,3 +1,4 @@
+import asyncio
 import os
 import re
 import json
@@ -23,6 +24,7 @@ from security import (
     verify_password,
     create_access_token,
     create_refresh_token,
+    run_revocation_listener,
     decode_access_token,
     verify_and_rotate_refresh_token,
     get_current_admin,
@@ -37,6 +39,7 @@ from security import (
     calculate_key_fingerprint,
     revoke_agent_key_in_redis,
     is_agent_key_revoked_in_redis,
+    unrevoke_agent_key_in_redis,
     get_minio_sse,
     verify_mtls_client_certificate,
     settings,
@@ -131,7 +134,22 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log_warning("Security", f"Не удалось загрузить настройки безопасности из БД: {e}")
 
+    # Фоновая задача мгновенной синхронизации отозванных сертификатов через Redis Pub/Sub
+    listener_task = None
+    try:
+        listener_task = asyncio.create_task(run_revocation_listener(redis_client))
+        log_info("Security", "Фоновый слушатель отзывов Redis запущен")
+    except Exception as e:
+        log_warning("Security", f"Не удалось запустить фоновый слушатель отзывов: {e}")
+
     yield
+
+    if listener_task:
+        listener_task.cancel()
+        try:
+            await listener_task
+        except asyncio.CancelledError:
+            pass
 
 app = FastAPI(title="Financial MAS - Admin Server", version="1.0.0", lifespan=lifespan)
 
@@ -163,6 +181,9 @@ app.add_middleware(
         "x-nonce",
         "x-timestamp",
         "x-cert",
+        "x-agent-cert",
+        "x-enclave-cert",
+        "x-server-cert",
         "x-admin-signature",
         "x-server-signature",
         "x-server-key-fingerprint",
@@ -172,6 +193,7 @@ app.add_middleware(
         "x-admin-signature",
         "x-server-signature",
         "x-server-key-fingerprint",
+        "x-server-cert",
         "x-ack-nonce",
     ],
 )
@@ -186,10 +208,25 @@ except ImportError:
         from src.admin_server.fastapi.routers.rag_documents import router as rag_router
 
 app.include_router(rag_router)
+for r in rag_router.routes:
+    if r not in app.routes:
+        app.routes.append(r)
 
 @app.get("/health")
 async def health_check():
     return {"status": "ok"}
+
+
+@app.get("/api/auth/public-key")
+@app.get("/api/v1/auth/public-key")
+async def get_server_public_key():
+    """Возвращает публичный ключ и сертификат сервера для проверки подписей квитанций."""
+    return {
+        "algorithm": settings.ALGORITHM,
+        "public_key": settings.PUBLIC_KEY,
+        "certificate": settings.SERVER_CERT or None,
+        "fingerprint": calculate_key_fingerprint(settings.PUBLIC_KEY),
+    }
 
 
 def get_client_ip(request: Request) -> str:
@@ -661,14 +698,6 @@ async def verify_2fa_test(
         raise HTTPException(status_code=400, detail="Invalid verification code")
     return {"status": "ok", "message": "2FA TOTP code verified successfully"}
 
-@app.get("/api/auth/public-key")
-async def get_jwt_public_key():
-    """Возвращает публичный RSA-ключ сервера (RS256) для проверки подписи токенов внешними сервисами."""
-    return {
-        "algorithm": settings.ALGORITHM,
-        "public_key": settings.PUBLIC_KEY
-    }
-
 @app.get("/api/auth/mtls/status")
 async def get_mtls_status(cert_info: dict = Depends(verify_mtls_client_certificate)):
     """
@@ -780,144 +809,7 @@ async def check_date(
     )
     return schemas.CheckDateResponse(status=status_str)
 
-# --- МАРШРУТЫ: ЗАГРУЗКА ДОКУМЕНТОВ ---
-@app.post("/api/upload/{agent_name}/{action}", response_model=schemas.UploadResponse)
-async def upload_document(
-    agent_name: str,
-    action: str,
-    file_hash: str = Form(...),
-    system_name: str = Form(None),
-    short_name: str = Form(None),
-    file: UploadFile = File(...),
-    db: AsyncSession = Depends(get_db),
-    current_admin: CurrentUser = Depends(get_current_user)
-):
-    """
-    Загружает markdown документ в MinIO и помещает задачу векторизации в очередь Redis.
-    """
-    if agent_name not in VALID_AGENTS:
-        raise HTTPException(status_code=400, detail=f"Invalid agent name. Must be one of {VALID_AGENTS}")
-    
-    if action not in VALID_ACTIONS:
-        raise HTTPException(status_code=400, detail=f"Invalid action. Must be 'upsert' or 'delete'")
 
-    # Проверка гранулярных прав RBAC на загрузку / удаление
-    if action == "delete":
-        if not current_admin.has_permission(Permission.DOCUMENTS_DELETE):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Forbidden: missing required permission '{Permission.DOCUMENTS_DELETE.value}'"
-            )
-    else:
-        if not current_admin.has_permission(Permission.DOCUMENTS_WRITE):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Forbidden: missing required permission '{Permission.DOCUMENTS_WRITE.value}'"
-            )
-
-    if not file.filename or not file.filename.endswith(".md"):
-        raise HTTPException(status_code=400, detail="Only markdown (.md) files are allowed")
-
-    # Ограничение размера до 50 МБ для Markdown файлов (защита от OOM DoS)
-    MAX_SIZE = 50 * 1024 * 1024
-    
-    # SpooledTemporaryFile: буферизует до 5 МБ в памяти, свыше — автоматически сбрасывает во временный файл на диске
-    content_stream = tempfile.SpooledTemporaryFile(max_size=5 * 1024 * 1024, mode="w+b")
-    bytes_read = 0
-    try:
-        while True:
-            chunk = await file.read(1024 * 1024) # читаем по 1 МБ
-            if not chunk:
-                break
-            bytes_read += len(chunk)
-            if bytes_read > MAX_SIZE:
-                raise HTTPException(status_code=413, detail="File too large. Maximum size for markdown is 50MB.")
-            content_stream.write(chunk)
-            
-        content_stream.seek(0)
-
-        # Очистка имени файла для предотвращения path traversal (кроссплатформенная, включая Windows \ на Linux)
-        raw_name = (file.filename or "").replace("\\", "/").split("/")[-1]
-        safe_filename = re.sub(r'[^a-zA-Z0-9_.-]', '_', raw_name)
-        if not safe_filename or not safe_filename.strip("_.") or safe_filename.startswith("."):
-            safe_filename = f"upload_{file_hash[:8]}.md"
-        if not safe_filename.endswith(".md"):
-            safe_filename += ".md"
-
-        bucket_name = f"knowledge-{agent_name}"
-        object_name = f"{action}/{safe_filename}"
-
-        sse_obj = get_minio_sse()
-        put_kwargs = {
-            "bucket_name": bucket_name,
-            "object_name": object_name,
-            "data": content_stream,
-            "length": bytes_read,
-            "content_type": "text/markdown",
-        }
-        if sse_obj is not None:
-            put_kwargs["sse"] = sse_obj
-
-        try:
-            await anyio.to_thread.run_sync(
-                lambda: minio_client.put_object(**put_kwargs)
-            )
-            sse_status = f" (SSE: {type(sse_obj).__name__})" if sse_obj else ""
-            log_success("MinIO", f"Uploaded {file.filename} to {bucket_name}{sse_status}")
-        except Exception as e:
-            log_error("MinIO", f"Failed to upload {file.filename}: {str(e)}")
-            await crud.mark_document_error(db, file_hash, file.filename, agent_name, system_name, short_name, str(e))
-            raise HTTPException(status_code=500, detail=f"MinIO error: {str(e)}")
-            
-        try:
-            message = {
-                "agent": agent_name,
-                "action": action,
-                "file_path": object_name,
-                "bucket": bucket_name,
-                "file_hash": file_hash,
-                "system_name": system_name,
-                "short_name": short_name,
-                "filename": file.filename
-            }
-            await anyio.to_thread.run_sync(redis_client.lpush, "document_tasks", json.dumps(message))
-            log_success("Redis", f"Task queued for {file.filename}")
-        except Exception as e:
-            log_error("Redis", f"Failed to queue task for {file.filename}: {str(e)}")
-            await crud.mark_document_error(db, file_hash, file.filename, agent_name, system_name, short_name, str(e))
-            raise HTTPException(status_code=500, detail=f"Redis error: {str(e)}")
-
-        if action == "delete":
-            await crud.create_document(
-                db,
-                file_hash=file_hash,
-                filename=safe_filename,
-                agent_name=agent_name,
-                status="processing",
-                system_name=system_name,
-                short_name=short_name,
-                message="Служебная задача удаления устаревших актов в очереди"
-            )
-        else:
-            await crud.update_checking_to_processing(db, file_hash, agent_name, system_name, short_name, "Задача в очереди у воркера")
-
-        await audit.log_audit_event(
-            db,
-            actor=current_admin,
-            action="DOC_UPLOADED" if action != "delete" else "DOC_DELETE_QUEUED",
-            status="SUCCESS",
-            resource=f"doc:{file_hash}",
-            details={"filename": safe_filename, "agent": agent_name, "action": action}
-        )
-
-        return {
-            "status": "success", 
-            "message": f"File {file.filename} uploaded to {bucket_name}/{object_name}",
-            "agent": agent_name,
-            "action": action
-        }
-    finally:
-        content_stream.close()
 
 # --- МАРШРУТЫ: ЗАЯВКИ АГЕНТОВ ---
 @app.get("/api/agent-requests", response_model=list[schemas.AgentRequestResponse])
@@ -1085,7 +977,7 @@ async def admin_revoke_agent_key(
         raise HTTPException(status_code=400, detail=str(e))
 
     for k in revoked_keys:
-        revoke_agent_key_in_redis(agent_name, k.kid)
+        revoke_agent_key_in_redis(agent_name, k.kid, redis_conn=redis_client)
 
     log_warning("Admin Agent Key", f"Admin {current_admin} revoked {len(revoked_keys)} key(s) for agent {agent_name}, reason: {req.reason}")
     await audit.log_audit_event(
@@ -1114,7 +1006,7 @@ async def admin_suspend_agent(
         agent = await crud.suspend_agent(db, agent_name)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    revoke_agent_key_in_redis(agent_name)
+    revoke_agent_key_in_redis(agent_name, redis_conn=redis_client)
     log_warning("Admin Agent Key", f"Admin {current_admin} SUSPENDED agent {agent_name}")
     await audit.log_audit_event(
         db,
@@ -1141,12 +1033,8 @@ async def admin_reactivate_agent(
         agent = await crud.reactivate_agent(db, agent_name)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    # Снимаем блокировку в Redis при реактивации
-    if redis_client:
-        try:
-            redis_client.delete(f"revoked:agent:{agent_name}")
-        except Exception:
-            pass
+    # Снимаем блокировку в локальной памяти и Redis при реактивации
+    unrevoke_agent_key_in_redis(agent_name, redis_conn=redis_client)
     log_success("Admin Agent Key", f"Admin {current_admin} reactivated agent {agent_name}")
     await audit.log_audit_event(
         db,

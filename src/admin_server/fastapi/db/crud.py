@@ -1,5 +1,6 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy import update
 from sqlalchemy.orm import selectinload
 from datetime import datetime, timezone, timedelta
 import hashlib
@@ -202,11 +203,14 @@ async def update_checking_to_processing(
     agent_name: str,
     system_name: str,
     short_name: str,
-    message: str = "Задача в очереди у воркера"
+    message: str = "Задача в очереди у воркера",
+    filename: str | None = None,
+    raw_content: str | None = None,
+    new_file_hash: str | None = None
 ):
     """
     Обновляет запись со статуса 'checking' на 'processing' после успешной валидации.
-    Заполняет системное и короткое имя документа.
+    Заполняет системное и короткое имя документа, синхронизирует хэш и сырой контент при наличии.
     """
     query = select(models.Document).where(
         models.Document.file_hash == file_hash,
@@ -215,17 +219,68 @@ async def update_checking_to_processing(
     ).order_by(models.Document.created_at.desc())
     result = await db.execute(query)
     doc = result.scalars().first()
+
+    # Если по file_hash не найдено, пробуем найти по filename + agent_name + status='checking'
+    if not doc and filename:
+        query_fn = select(models.Document).where(
+            models.Document.filename == filename,
+            models.Document.agent_name == agent_name,
+            models.Document.status == 'checking'
+        ).order_by(models.Document.created_at.desc())
+        result_fn = await db.execute(query_fn)
+        doc = result_fn.scalars().first()
     
     if doc:
         doc.status = "processing"
         doc.system_name = system_name
         doc.short_name = short_name
         doc.message = message
+        if new_file_hash:
+            doc.file_hash = new_file_hash
+        if filename:
+            doc.filename = filename
+        if raw_content is not None:
+            doc.raw_content = raw_content
         await db.commit()
         return doc
     
-    # Запасной вариант: если 'checking' запись не найдена (не должно быть), создаём новую
-    return await create_document(db, file_hash, "", agent_name, "processing", system_name, short_name, message)
+    # Запасной вариант: если 'checking' запись не найдена, создаём новую
+    target_hash = new_file_hash or file_hash
+    target_fn = filename or ""
+    return await create_document(
+        db=db,
+        file_hash=target_hash,
+        filename=target_fn,
+        agent_name=agent_name,
+        status="processing",
+        system_name=system_name,
+        short_name=short_name,
+        message=message,
+        raw_content=raw_content
+    )
+
+
+async def mark_document_repealed(
+    db: AsyncSession,
+    short_name: str,
+    agent_name: str,
+    message: str = "Документ отменен"
+) -> int:
+    """Переводит отмененный документ в статус 'repealed' в таблице documents."""
+    if not short_name or not agent_name:
+        return 0
+    query = (
+        update(models.Document)
+        .where(
+            models.Document.short_name == short_name,
+            models.Document.agent_name == agent_name,
+            models.Document.status != "repealed"
+        )
+        .values(status="repealed", message=message)
+    )
+    result = await db.execute(query)
+    await db.commit()
+    return getattr(result, "rowcount", 0)
 
 async def get_agent_requests(db: AsyncSession, skip: int = 0, limit: int = 50) -> list[models.AgentRequest]:
     """Возвращает список заявок агентов с пагинацией."""

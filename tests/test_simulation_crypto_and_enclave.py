@@ -37,7 +37,9 @@ def setup_test_env(monkeypatch):
 
 def test_bank_ca_generation_and_validation():
     """Проверка генерации Root CA и сертификата Банка, а также валидации цепочки доверия."""
-    ca = BankCertificateAuthority.create_in_memory()
+    ca = BankCertificateAuthority()
+    ca.initialize_ca()
+    ca.issue_bank_certificate()
     assert ca.ca_cert is not None
     assert ca.bank_cert is not None
 
@@ -70,7 +72,9 @@ def test_bank_ca_generation_and_validation():
 
 def test_receipt_signing_and_verification():
     """Проверка формирования и криптографической проверки чека-квитанции приватным ключом Банка."""
-    ca = BankCertificateAuthority.create_in_memory()
+    ca = BankCertificateAuthority()
+    ca.initialize_ca()
+    ca.issue_bank_certificate()
     signer = ReceiptSigner(ca=ca)
 
     sample_data = {

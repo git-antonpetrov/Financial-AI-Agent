@@ -21,7 +21,9 @@ def compute_rag_canonical_digest(timestamp: Union[int, str], nonce: str, body_by
 def compute_receipt_canonical_bytes(receipt_dict: dict[str, Any]) -> bytes:
     """
     Вычисляет канонические байты для проверки цифровой подписи квитанции сервера (AckReceipt).
-    Исключает поле 'signature' (если оно присутствует в словаре) и сериализует с сортировкой ключей.
+    Исключает служебные поля ('signature', 'server_key_fingerprint', 'server_cert', 'receipt_verified')
+    и сериализует с сортировкой ключей.
     """
-    clean_data = {k: v for k, v in receipt_dict.items() if k not in ("signature", "server_key_fingerprint")}
+    excluded = {"signature", "server_key_fingerprint", "server_cert", "receipt_verified"}
+    clean_data = {k: v for k, v in receipt_dict.items() if k not in excluded}
     return json.dumps(clean_data, sort_keys=True, ensure_ascii=False).encode("utf-8")

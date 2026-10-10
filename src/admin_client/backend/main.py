@@ -110,6 +110,11 @@ class AgentRevokeRequest(BaseModel):
     reason: str = "Compromised"
 
 
+class AgentRotateKeyRequest(BaseModel):
+    new_public_key: str
+    ttl_days: Optional[int] = 90
+
+
 class AgentBatchRequest(BaseModel):
     request_ids: List[int]
 
@@ -318,15 +323,37 @@ def validate_server_url(server_url: str) -> None:
     if not hostname:
         raise HTTPException(status_code=400, detail="Invalid server hostname")
 
-    # Разрешает локальную разработку на машине администратора
-    if hostname.lower() in {"localhost", "127.0.0.1", "::1"}:
+    admin_local_domain = os.getenv("ADMIN_LOCAL_DOMAIN", "admin.fin-ai-agent.local").strip().lower()
+    allowed_hostnames = {"localhost", "127.0.0.1", "::1"}
+    if admin_local_domain:
+        allowed_hostnames.add(admin_local_domain)
+
+    # Разрешает локальную разработку и доверенный административный локальный домен
+    if hostname.lower() in allowed_hostnames:
         return
+
+    # Разрешенные корпоративные подсети (например, для внутренних VDS/on-premise серверов)
+    enterprise_subnets_env = os.getenv("ENTERPRISE_SUBNETS", "")
+    enterprise_networks = []
+    if enterprise_subnets_env:
+        for cidr in enterprise_subnets_env.split(","):
+            cidr = cidr.strip()
+            if cidr:
+                try:
+                    enterprise_networks.append(ipaddress.ip_network(cidr, strict=False))
+                except ValueError:
+                    pass
 
     try:
         addr_info = socket.getaddrinfo(hostname, None)
         for item in addr_info:
             ip_str = item[4][0]
             ip_obj = ipaddress.ip_address(ip_str)
+
+            # Проверяем вхождение в доверенные корпоративные подсети
+            if any(ip_obj in net for net in enterprise_networks):
+                continue
+
             if (
                 ip_obj.is_private
                 or ip_obj.is_link_local
@@ -440,6 +467,79 @@ async def local_revoke_agent(agent_name: str, req: AgentRevokeRequest = AgentRev
         return client.revoke_agent(agent_name, kid=req.kid, reason=req.reason)
     except Exception as e:
         handle_remote_error(e)
+
+
+@app.get("/api/local/agents/{agent_name}/keys")
+async def local_get_agent_keys(agent_name: str):
+    """Возвращает историю открытых ключей агента."""
+    client = get_remote_client()
+    if not client.is_authenticated():
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin session not authenticated")
+    try:
+        return client.get_agent_keys(agent_name)
+    except Exception as e:
+        handle_remote_error(e)
+
+
+@app.post("/api/local/agents/{agent_name}/rotate")
+async def local_rotate_agent_key(agent_name: str, req: AgentRotateKeyRequest):
+    """Выполняет ротацию открытого ключа агента."""
+    client = get_remote_client()
+    if not client.is_authenticated():
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin session not authenticated")
+    try:
+        return client.rotate_agent_key(agent_name, req.new_public_key, req.ttl_days or 90)
+    except Exception as e:
+        handle_remote_error(e)
+
+
+@app.get("/api/local/audit/logs")
+async def local_get_audit_logs(
+    limit: int = 50,
+    offset: int = 0,
+    actor: Optional[str] = None,
+    action: Optional[str] = None,
+    status: Optional[str] = None
+):
+    """Возвращает список событий неизменяемого журнала аудита."""
+    client = get_remote_client()
+    if not client.is_authenticated():
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin session not authenticated")
+    try:
+        return client.get_audit_logs(limit=limit, offset=offset, actor=actor, action=action, status=status)
+    except Exception as e:
+        handle_remote_error(e)
+
+
+@app.get("/api/local/audit/verify")
+async def local_verify_audit_log():
+    """Проверяет криптографическую целостность хеш-цепочки журнала аудита."""
+    client = get_remote_client()
+    if not client.is_authenticated():
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin session not authenticated")
+    try:
+        return client.verify_audit_log()
+    except Exception as e:
+        handle_remote_error(e)
+
+
+@app.get("/api/local/audit/summary")
+async def local_get_audit_summary():
+    """Возвращает сводную статистику по журналу аудита."""
+    client = get_remote_client()
+    if not client.is_authenticated():
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin session not authenticated")
+    try:
+        return client.get_audit_summary()
+    except Exception as e:
+        handle_remote_error(e)
+
+
+@app.get("/api/local/auth/mtls/status")
+async def local_get_mtls_status():
+    """Возвращает статус взаимной аутентификации TLS (mTLS) и сертификатов."""
+    client = get_remote_client()
+    return client.get_mtls_status()
 
 
 @app.get("/api/local/agent-requests")

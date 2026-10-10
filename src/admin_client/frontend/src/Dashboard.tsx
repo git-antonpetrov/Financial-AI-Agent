@@ -1,9 +1,22 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { Users, FileText, UploadCloud, Clock, CheckCircle2, Globe, Server, Check, X, LogOut, RefreshCw, KeyRound } from 'lucide-react'
+import { Users, FileText, UploadCloud, Clock, CheckCircle2, Globe, Server, Check, X, LogOut, RefreshCw, KeyRound, Shield, ShieldCheck, ShieldAlert } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { localFetch, getLocalSidecarSecret, getLocalSidecarUrl } from './api'
 
-type Tab = 'rag' | 'agents'
+type Tab = 'rag' | 'agents' | 'audit'
+
+interface AuditLogItem {
+  id: number
+  timestamp: string
+  actor: string
+  action: string
+  status: string
+  resource?: string
+  actor_ip?: string
+  details?: any
+  prev_hash?: string
+  current_hash?: string
+}
 
 interface LocalFile {
   id: string
@@ -213,14 +226,56 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
     }
   }
 
+  // Состояние неизменяемого журнала аудита (Zero-Trust Audit Trail)
+  const [auditLogs, setAuditLogs] = useState<AuditLogItem[]>([])
+  const [auditVerifyResult, setAuditVerifyResult] = useState<{
+    status: string
+    verified: boolean
+    total_events?: number
+    verified_events?: number
+    message?: string
+  } | null>(null)
+  const [isLoadingAudit, setIsLoadingAudit] = useState(false)
+
+  const fetchAuditData = useCallback(async () => {
+    setIsLoadingAudit(true)
+    try {
+      const [logsRes, verifyRes] = await Promise.all([
+        localFetch('/api/local/audit/logs?limit=50'),
+        localFetch('/api/local/audit/verify')
+      ])
+      if (logsRes.status === 401 || verifyRes.status === 401) {
+        onLogout?.('errorSessionExpired')
+        return
+      }
+      if (logsRes.ok) {
+        const data = await logsRes.json()
+        setAuditLogs(data.items || [])
+      }
+      if (verifyRes.ok) {
+        const vData = await verifyRes.json()
+        setAuditVerifyResult(vData)
+      }
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setIsLoadingAudit(false)
+    }
+  }, [onLogout])
+
   useEffect(() => {
     if (activeTab === 'agents') {
       const timer = setTimeout(() => {
         void fetchRequests()
       }, 0)
       return () => clearTimeout(timer)
+    } else if (activeTab === 'audit') {
+      const timer = setTimeout(() => {
+        void fetchAuditData()
+      }, 0)
+      return () => clearTimeout(timer)
     }
-  }, [activeTab, fetchRequests])
+  }, [activeTab, fetchRequests, fetchAuditData])
 
   const toggleSelection = (id: number) => {
     const newSet = new Set(selectedRequests)
@@ -498,24 +553,41 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
       {/* Основной контейнер с перемонтированием при смене языка для запуска анимации */}
       <div key={lang} className="w-full flex flex-col items-center animate-fade-scale flex-1">
         {/* Верхний переключатель вкладок */}
-        <div className="relative flex items-center bg-[#1a0f3c] rounded-full p-1 border border-purple-500/20 shadow-xl mb-12 w-full max-w-md">
+        <div className="relative flex items-center bg-[#1a0f3c] rounded-full p-1 border border-purple-500/20 shadow-xl mb-12 w-full max-w-lg">
           <div
-            className="absolute top-1 bottom-1 left-1 w-[calc(50%-4px)] bg-gradient-to-r from-purple-600 to-indigo-600 rounded-full transition-transform duration-500 ease-out z-0"
-            style={{ transform: activeTab === 'rag' ? 'translateX(0)' : 'translateX(100%)' }}
+            className="absolute top-1 bottom-1 left-1 w-[calc(33.333%-2px)] bg-gradient-to-r from-purple-600 to-indigo-600 rounded-full transition-transform duration-500 ease-out z-0"
+            style={{
+              transform:
+                activeTab === 'rag'
+                  ? 'translateX(0)'
+                  : activeTab === 'agents'
+                  ? 'translateX(100%)'
+                  : 'translateX(200%)',
+            }}
           />
           <button
             onClick={() => setActiveTab('rag')}
-            className={`relative z-10 flex-1 py-3 px-6 text-center text-sm font-medium transition-colors duration-500 ${activeTab === 'rag' ? 'text-white' : 'text-purple-300 hover:text-white'
-              }`}
+            className={`relative z-10 flex-1 py-3 px-4 text-center text-sm font-medium transition-colors duration-500 ${
+              activeTab === 'rag' ? 'text-white' : 'text-purple-300 hover:text-white'
+            }`}
           >
             {lang === 'en' ? 'Load to RAG' : 'Загрузить в RAG'}
           </button>
           <button
             onClick={() => setActiveTab('agents')}
-            className={`relative z-10 flex-1 py-3 px-6 text-center text-sm font-medium transition-colors duration-500 ${activeTab === 'agents' ? 'text-white' : 'text-purple-300 hover:text-white'
-              }`}
+            className={`relative z-10 flex-1 py-3 px-4 text-center text-sm font-medium transition-colors duration-500 ${
+              activeTab === 'agents' ? 'text-white' : 'text-purple-300 hover:text-white'
+            }`}
           >
             {lang === 'en' ? 'Agent Requests' : 'Заявки агентов'}
+          </button>
+          <button
+            onClick={() => setActiveTab('audit')}
+            className={`relative z-10 flex-1 py-3 px-4 text-center text-sm font-medium transition-colors duration-500 ${
+              activeTab === 'audit' ? 'text-white' : 'text-purple-300 hover:text-white'
+            }`}
+          >
+            {lang === 'en' ? 'Audit Trail' : 'Журнал аудита'}
           </button>
         </div>
 
@@ -743,6 +815,115 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
                         </motion.div>
                       ))}
                     </AnimatePresence>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Вкладка 3: Неизменяемый журнал аудита и криптографическая целостность */}
+          <div
+            className={`absolute inset-0 p-8 transition-all duration-700 ease-in-out ${activeTab === 'audit'
+                ? 'opacity-100 translate-x-0 pointer-events-auto'
+                : 'opacity-0 translate-x-12 pointer-events-none'
+              }`}
+          >
+            <div className="flex flex-col h-full">
+              {/* Верхняя статусная панель аудита */}
+              <div className="flex flex-wrap items-center justify-between gap-4 mb-6 pb-4 border-b border-purple-500/10">
+                <div className="flex items-center gap-3">
+                  {auditVerifyResult?.verified ? (
+                    <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
+                      <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                      <span>{lang === 'en' ? 'Cryptographic Hash-Chain: Verified' : 'Криптографическая цепочка: Подтверждена'}</span>
+                    </div>
+                  ) : auditVerifyResult ? (
+                    <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs font-semibold">
+                      <ShieldAlert className="w-4 h-4 text-rose-400" />
+                      <span>{lang === 'en' ? 'Integrity Tamper Alert!' : 'Нарушение целостности цепочки!'}</span>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-purple-500/10 border border-purple-500/30 text-purple-300 text-xs font-semibold">
+                      <Shield className="w-4 h-4 text-purple-400" />
+                      <span>{lang === 'en' ? 'Immutable Audit Trail' : 'Неизменяемый журнал аудита'}</span>
+                    </div>
+                  )}
+
+                  {auditVerifyResult?.total_events !== undefined && (
+                    <span className="text-xs text-purple-300/70">
+                      {lang === 'en'
+                        ? `Events: ${auditVerifyResult.total_events} (Verified: ${auditVerifyResult.verified_events ?? auditVerifyResult.total_events})`
+                        : `Событий: ${auditVerifyResult.total_events} (Проверено: ${auditVerifyResult.verified_events ?? auditVerifyResult.total_events})`}
+                    </span>
+                  )}
+                </div>
+
+                <button
+                  onClick={() => void fetchAuditData()}
+                  disabled={isLoadingAudit}
+                  className="px-4 py-2 bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 border border-purple-500/30 rounded-xl transition-all flex items-center gap-2 text-xs font-medium cursor-pointer disabled:opacity-50"
+                  title={lang === 'en' ? 'Verify and refresh chain' : 'Проверить и обновить цепочку'}
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isLoadingAudit ? 'animate-spin' : ''}`} />
+                  <span>{lang === 'en' ? 'Verify & Refresh' : 'Проверить и обновить'}</span>
+                </button>
+              </div>
+
+              {/* Таблица событий аудита */}
+              <div className="flex-1 overflow-auto pr-2">
+                {isLoadingAudit && auditLogs.length === 0 ? (
+                  <div className="h-full flex items-center justify-center">
+                    <div className="w-8 h-8 border-4 border-purple-500/30 border-t-purple-500 rounded-full animate-spin"></div>
+                  </div>
+                ) : auditLogs.length === 0 ? (
+                  <div className="h-full flex flex-col items-center justify-center text-purple-300/50">
+                    <FileText className="w-16 h-16 mb-4 opacity-20" />
+                    <p>{lang === 'en' ? 'No audit events found.' : 'Записи в журнале аудита отсутствуют.'}</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {auditLogs.map((log) => (
+                      <div
+                        key={log.id}
+                        className="p-4 bg-[#1a0f3c]/80 border border-purple-500/20 rounded-2xl hover:border-purple-500/40 transition-colors flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+                      >
+                        <div className="flex items-start gap-3 min-w-0">
+                          <div className="p-2 rounded-xl bg-purple-500/10 border border-purple-500/20 text-purple-400 mt-0.5">
+                            <Clock className="w-4 h-4" />
+                          </div>
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2 mb-1">
+                              <span className="font-semibold text-white">{log.actor}</span>
+                              <span className="px-2 py-0.5 rounded-md bg-purple-500/20 text-purple-300 font-mono text-[11px]">
+                                {log.action}
+                              </span>
+                              <span
+                                className={`px-2 py-0.5 rounded-md text-[11px] font-medium ${
+                                  log.status === 'SUCCESS'
+                                    ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                                    : log.status === 'WARNING'
+                                    ? 'bg-yellow-500/10 text-yellow-400 border border-yellow-500/20'
+                                    : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                                }`}
+                              >
+                                {log.status}
+                              </span>
+                            </div>
+                            <div className="text-purple-300/70 font-mono text-[11px] truncate">
+                              {log.resource ? `resource: ${log.resource}` : ''}
+                              {log.actor_ip ? ` | ip: ${log.actor_ip}` : ''}
+                            </div>
+                            <div className="text-purple-400/50 font-mono text-[10px] mt-1 truncate">
+                              prev: {log.prev_hash ? log.prev_hash.slice(0, 16) + '...' : 'GENESIS'} → hash: {log.current_hash ? log.current_hash.slice(0, 16) + '...' : ''}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="text-right text-purple-300/60 font-mono text-[11px] whitespace-nowrap self-end sm:self-center">
+                          {log.timestamp ? new Date(log.timestamp).toLocaleString() : ''}
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>

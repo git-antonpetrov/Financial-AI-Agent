@@ -20,20 +20,17 @@ def test_passphrase_vault_env_resolution(monkeypatch):
     assert passphrase == "my-custom-strong-passphrase-999"
 
 
-def test_passphrase_vault_auto_generation(monkeypatch):
-    """Проверяет автогенерацию стойкой парольной фразы при ее отсутствии в dev/test режиме."""
+def test_passphrase_vault_missing_rejection(monkeypatch):
+    """Проверяет, что при отсутствии ROOT_CA_PASSPHRASE всегда выбрасывается критическая ошибка."""
     monkeypatch.delenv("ROOT_CA_PASSPHRASE", raising=False)
-    monkeypatch.setenv("STRICT_SECURITY", "false")
-    monkeypatch.delenv("ENV", raising=False)
-    passphrase = resolve_root_ca_passphrase()
-    assert len(passphrase) >= 24
-
-
-def test_passphrase_vault_strict_mode_rejection(monkeypatch):
-    """Проверяет, что в production/strict режиме отсутствие фразы вызывает ошибку."""
-    monkeypatch.delenv("ROOT_CA_PASSPHRASE", raising=False)
-    monkeypatch.setenv("STRICT_SECURITY", "true")
     with pytest.raises(RuntimeError, match="ROOT_CA_PASSPHRASE не задана"):
+        resolve_root_ca_passphrase()
+
+
+def test_passphrase_vault_short_rejection(monkeypatch):
+    """Проверяет отклонение слишком короткой парольной фразы (< 16 символов)."""
+    monkeypatch.setenv("ROOT_CA_PASSPHRASE", "short-phrase")
+    with pytest.raises(ValueError, match="слишком короткая"):
         resolve_root_ca_passphrase()
 
 

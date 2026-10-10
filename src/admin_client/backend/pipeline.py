@@ -85,7 +85,7 @@ class DocumentPipeline:
         self.contentai_username = contentai_username
         self.contentai_password = contentai_password
         self.contentai_api_uri = contentai_api_uri
-        self.use_zero_trust = use_zero_trust
+        self.use_zero_trust = True  # Zero-Trust PKI режим является единственным и обязательным
 
         # Zero-Trust mTLS & PKI конфигурация
         self.ca_cert_path = ca_cert_path or os.getenv("CA_CERT_PATH")
@@ -138,8 +138,9 @@ class DocumentPipeline:
             self.signer = signer
         elif ZeroTrustClientSigner is not None and self.use_zero_trust:
             try:
+                signer_mode = "software" if self.client_key_path else "hardware"
                 self.signer = ZeroTrustClientSigner(
-                    mode="hardware",
+                    mode=signer_mode,
                     cert_path=self.client_cert_path,
                     key_path=self.client_key_path,
                     ca_cert_path=self.ca_cert_path
@@ -349,67 +350,52 @@ class DocumentPipeline:
             # Приоритетный путь Zero-Trust с цифровой подписью документа
             zero_trust_used = False
             ack_receipt = None
-            if self.use_zero_trust and self.signer:
-                try:
-                    log_info("Pipeline", "Отправка документа через Zero-Trust RAG эндпоинт /api/v1/rag/documents...")
-                    ack_receipt = self.submit_zero_trust_document(
-                        document_title=str(system_name),
-                        content=markdown_content,
-                        collection_name=f"knowledge-{agent_name}",
-                        metadata={
-                            "source": "admin_workstation",
-                            "agent_name": agent_name,
-                            "short_name": str(short_name),
-                            "file_hash": file_hash,
-                            "filename": filename
-                        }
-                    )
-                    zero_trust_used = True
-                    log_info("Pipeline", f"Документ успешно передан в RAG через Zero-Trust (receipt_id={ack_receipt.get('receipt_id')})")
-                except requests.exceptions.HTTPError as he:
-                    if he.response is not None and he.response.status_code == 404:
-                        log_warning("Pipeline", "Эндпоинт /api/v1/rag/documents недоступен (404), используем fallback /upsert")
-                    else:
-                        raise he
-                except Exception as zte:
-                    log_warning("Pipeline", f"Предупреждение Zero-Trust отправки: {zte}, откат к /upsert...")
-
-            if not zero_trust_used:
-                upsert_url = f"{self.server_url}/api/upload/{agent_name}/upsert"
-                upsert_data = {
-                    "file_hash": file_hash,
-                    "system_name": system_name,
-                    "short_name": short_name
-                }
-                upsert_files = {
-                    "file": (f"{safe_system_name}.md", markdown_content.encode('utf-8'), "text/markdown")
-                }
-                
-                log_info("Pipeline", "Вызов ручки /upsert...")
-                upsert_resp = self.session.post(upsert_url, headers=self.headers, data=upsert_data, files=upsert_files, timeout=(5, 120))
-                upsert_resp.raise_for_status()
+            # Zero-Trust PKI является единственным и строго обязательным путем передачи документов
+            if not self.signer:
+                raise RuntimeError("ZeroTrustClientSigner не инициализирован для защищенной отправки документов в RAG")
+            try:
+                log_info("Pipeline", "Отправка документа через защищенный Zero-Trust RAG эндпоинт /api/v1/rag/documents...")
+                ack_receipt = self.submit_zero_trust_document(
+                    document_title=str(system_name),
+                    content=markdown_content,
+                    collection_name=f"knowledge-{agent_name}",
+                    metadata={
+                        "source": "admin_workstation",
+                        "agent_name": agent_name,
+                        "short_name": str(short_name),
+                        "file_hash": file_hash,
+                        "filename": filename
+                    }
+                )
+                if not ack_receipt.get("receipt_verified"):
+                    raise RuntimeError(f"Квитанция сервера AckReceipt не прошла криптографическую проверку подписи (receipt_id={ack_receipt.get('receipt_id')})")
+                zero_trust_used = True
+                log_info("Pipeline", f"Документ успешно передан в RAG через Zero-Trust (receipt_id={ack_receipt.get('receipt_id')})")
+            except Exception as zte:
+                log_error("Pipeline", f"Ошибка Zero-Trust отправки документа: {zte}")
+                raise RuntimeError(f"Zero-Trust передача документа завершилась ошибкой: {zte}") from zte
 
             # ==========================================
             # ШАГ 8: ОТПРАВКА СПИСКА УСТАРЕВШИХ АКТОВ
             # ==========================================
             if repealed_short_names:
                 self.on_progress_update(filename, "processing", "Шаг 8: Отправка списка устаревших актов на удаление...")
-                delete_content = "\n".join(repealed_short_names)
-                delete_hash = hashlib.md5(f"del_{file_hash}_{delete_content}".encode('utf-8')).hexdigest()
-                
-                delete_url = f"{self.server_url}/api/upload/{agent_name}/delete"
-                delete_data = {
-                    "file_hash": delete_hash,
-                    "system_name": f"delete_{system_name}",
-                    "short_name": short_name
-                }
-                delete_files = {
-                    "file": (f"delete_{safe_system_name}.md", delete_content.encode('utf-8'), "text/markdown")
-                }
-                
-                log_info("Pipeline", "Вызов ручки /delete...")
-                delete_resp = self.session.post(delete_url, headers=self.headers, data=delete_data, files=delete_files, timeout=(5, 120))
-                delete_resp.raise_for_status()
+                if not self.signer:
+                    raise RuntimeError("ZeroTrustClientSigner не инициализирован для защищенного удаления документов")
+                log_info("Pipeline", "Отправка списка устаревших актов через защищенный Zero-Trust эндпоинт /api/v1/rag/documents/delete...")
+                del_ack = self.submit_zero_trust_document_delete(
+                    repealed_short_names=repealed_short_names,
+                    collection_name=f"knowledge-{agent_name}",
+                    metadata={
+                        "source": "admin_workstation",
+                        "agent_name": agent_name,
+                        "file_hash": file_hash,
+                        "filename": filename
+                    }
+                )
+                if not del_ack.get("receipt_verified"):
+                    raise RuntimeError(f"Квитанция сервера AckReceipt для удаления не прошла криптографическую проверку (receipt_id={del_ack.get('receipt_id')})")
+                log_info("Pipeline", f"Устаревшие акты успешно удалены через Zero-Trust (receipt_id={del_ack.get('receipt_id')})")
 
             # Успешное завершение всего пайплайна для этого файла!
             success_msg = "Успешно! Документ отправлен в очередь на обработку."
@@ -489,11 +475,90 @@ class DocumentPipeline:
 
         resp_data = resp.json()
 
-        # Валидация подписи сервера в квитанции
+        # Валидация подписи сервера в квитанции (Zero-Trust AckReceipt)
         server_sig = resp_data.get("signature") or resp.headers.get("X-Admin-Signature", "")
         receipt_verified = False
         if server_sig:
-            receipt_verified = self.signer.verify_server_receipt(resp_data, server_sig)
+            server_cert = resp_data.get("server_cert") or resp.headers.get("X-Server-Cert")
+            receipt_verified = self.signer.verify_server_receipt(
+                resp_data, server_sig, trusted_server_cert_or_pubkey=server_cert
+            )
+            # Если сертификат не был передан в ответе, пробуем запросить открытый ключ сервера через API
+            if not receipt_verified and not server_cert:
+                try:
+                    pk_resp = self.session.get(f"{self.server_url}/api/auth/public-key", timeout=5.0)
+                    if pk_resp.ok:
+                        pk_data = pk_resp.json()
+                        server_key_or_cert = pk_data.get("certificate") or pk_data.get("public_key")
+                        if server_key_or_cert:
+                            receipt_verified = self.signer.verify_server_receipt(
+                                resp_data, server_sig, trusted_server_cert_or_pubkey=server_key_or_cert
+                            )
+                except Exception:
+                    pass
+
+            if not receipt_verified:
+                log_warning("Pipeline", f"Предупреждение: подпись квитанции сервера {resp_data.get('receipt_id')} не подтверждена")
+            else:
+                log_info("Pipeline", f"Квитанция сервера AckReceipt подтверждена криптографически: receipt_id={resp_data.get('receipt_id')}")
+
+        resp_data["receipt_verified"] = receipt_verified
+        return resp_data
+
+    def submit_zero_trust_document_delete(
+        self,
+        repealed_short_names: list[str],
+        collection_name: str = "financial_kb",
+        metadata: Optional[dict[str, Any]] = None
+    ) -> dict[str, Any]:
+        """
+        Отправляет список отмененных актов в защищенный эндпоинт отмены (POST /api/v1/rag/documents/delete)
+        с цифровой подписью X-Signature, Nonce, Timestamp и валидацией серверной квитанции AckReceipt.
+        """
+        if not self.signer:
+            raise RuntimeError("ZeroTrustClientSigner не инициализирован")
+
+        payload = {
+            "short_names": repealed_short_names,
+            "collection_name": collection_name,
+            "reason": "Repealed by newer regulatory act",
+            "metadata": metadata or {}
+        }
+        body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+        zt_headers = self.signer.create_rag_request_headers(body_bytes)
+        combined_headers = {
+            **self.headers,
+            **zt_headers,
+            "Content-Type": "application/json"
+        }
+
+        url = f"{self.server_url}/api/v1/rag/documents/delete"
+        resp = self.session.post(url, data=body_bytes, headers=combined_headers, timeout=(5, 120))
+        resp.raise_for_status()
+
+        resp_data = resp.json()
+
+        server_sig = resp_data.get("signature") or resp.headers.get("X-Admin-Signature", "")
+        receipt_verified = False
+        if server_sig:
+            server_cert = resp_data.get("server_cert") or resp.headers.get("X-Server-Cert")
+            receipt_verified = self.signer.verify_server_receipt(
+                resp_data, server_sig, trusted_server_cert_or_pubkey=server_cert
+            )
+            if not receipt_verified and not server_cert:
+                try:
+                    pk_resp = self.session.get(f"{self.server_url}/api/auth/public-key", timeout=5.0)
+                    if pk_resp.ok:
+                        pk_data = pk_resp.json()
+                        server_key_or_cert = pk_data.get("certificate") or pk_data.get("public_key")
+                        if server_key_or_cert:
+                            receipt_verified = self.signer.verify_server_receipt(
+                                resp_data, server_sig, trusted_server_cert_or_pubkey=server_key_or_cert
+                            )
+                except Exception:
+                    pass
+
             if not receipt_verified:
                 log_warning("Pipeline", f"Предупреждение: подпись квитанции сервера {resp_data.get('receipt_id')} не подтверждена")
             else:

@@ -8,6 +8,7 @@
 """
 
 import os
+import sys
 import base64
 import hashlib
 from typing import Any
@@ -15,7 +16,6 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from core.utils.console_logger import log_warning, log_info
 
 MAGIC_ENVELOPE_V1 = b"ENC1"
-_EPHEMERAL_KEY: bytes | None = None
 
 # Ключи метаданных, сохраняемые в открытом виде для фильтрации ChromaDB (where={"short_name": ...})
 DEFAULT_PRESERVED_KEYS = {
@@ -43,25 +43,14 @@ def resolve_encryption_key(key: bytes | str | None = None) -> bytes:
       - произвольную строку (деривация через SHA-256)
       - None (берется из DATA_ENCRYPTION_KEY / CHROMA_ENVELOPE_KEY или генерируется эфемерный ключ)
     """
-    global _EPHEMERAL_KEY
     if key is None:
         raw_key = os.getenv("CHROMA_ENVELOPE_KEY") or os.getenv("DATA_ENCRYPTION_KEY", "")
         raw_key = raw_key.strip()
         if not raw_key:
-            is_strict = os.getenv("STRICT_SECURITY", "false").lower() in ("true", "1") or os.getenv("ENV") == "production"
-            if is_strict:
-                raise RuntimeError(
-                    "Ключ шифрования ChromaDB (DATA_ENCRYPTION_KEY / CHROMA_ENVELOPE_KEY) не настроен. "
-                    "В production/strict режиме генерация эфемерных ключей запрещена."
-                )
-            if _EPHEMERAL_KEY is None:
-                _EPHEMERAL_KEY = os.urandom(32)
-                log_warning(
-                    "ChromaDB Envelope",
-                    "Ключ шифрования ChromaDB не настроен в окружении (DATA_ENCRYPTION_KEY). "
-                    "Сгенерирован временный 256-битный ключ в памяти (dev/test режим)."
-                )
-            return _EPHEMERAL_KEY
+            raise RuntimeError(
+                "Critical signing/encryption keys not configured: "
+                "DATA_ENCRYPTION_KEY or CHROMA_ENVELOPE_KEY is required for ChromaDB envelope encryption."
+            )
         key = raw_key
 
     if isinstance(key, (bytes, bytearray)):

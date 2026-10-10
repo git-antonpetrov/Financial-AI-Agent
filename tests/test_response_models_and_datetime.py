@@ -210,7 +210,7 @@ def test_admin_server_response_models():
 
     assert routes[("/login", "POST")].response_model.__name__ == "TokenResponse"
     assert routes[("/api/config/contentai", "GET")].response_model.__name__ == "ContentAiConfigResponse"
-    assert routes[("/api/upload/{agent_name}/{action}", "POST")].response_model.__name__ == "UploadResponse"
+    assert routes[("/api/v1/rag/documents", "POST")].response_model.__name__ == "RAGDocumentResponse"
     assert routes[("/api/agent-requests/approve", "POST")].response_model.__name__ == "BatchActionResponse"
     assert routes[("/api/agent-requests/reject", "POST")].response_model.__name__ == "BatchActionResponse"
 

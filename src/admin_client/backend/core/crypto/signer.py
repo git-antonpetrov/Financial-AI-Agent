@@ -3,11 +3,14 @@
 """
 
 import os
+from pathlib import Path
 import time
+import datetime
 import uuid
 import json
 import base64
 import hashlib
+import re
 from typing import Optional, Any, Union
 
 from cryptography.hazmat.primitives.asymmetric import rsa, ec, padding
@@ -146,6 +149,60 @@ class ZeroTrustClientSigner:
             "X-Cert": self.get_certificate_pem(),
         }
 
+    def _resolve_trusted_root_ca_pem(self) -> Optional[str]:
+        """Разрешает PEM-строку доверенного Root CA из параметров, переменных окружения, диска или Windows Store."""
+        if self._ca_cert_pem and self._ca_cert_pem.strip():
+            return self._ca_cert_pem.strip()
+
+        if self.ca_cert_path and os.path.exists(self.ca_cert_path):
+            try:
+                with open(self.ca_cert_path, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                    if "BEGIN CERTIFICATE" in content:
+                        return content
+            except Exception:
+                pass
+
+        env_ca = os.getenv("CA_CERT_PATH", "").strip() or os.getenv("ROOT_CA_CERT_PATH", "").strip()
+        if env_ca and os.path.exists(env_ca):
+            try:
+                with open(env_ca, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                    if "BEGIN CERTIFICATE" in content:
+                        return content
+            except Exception:
+                pass
+
+        for cand in ["./certs/ca.crt", "/certs/ca.crt", "certs/ca.crt"]:
+            if os.path.exists(cand):
+                try:
+                    with open(cand, "r", encoding="utf-8") as f:
+                        content = f.read().strip()
+                        if "BEGIN CERTIFICATE" in content:
+                            return content
+                except Exception:
+                    pass
+
+        try:
+            repo_certs = Path(__file__).resolve().parents[5] / "certs" / "ca.crt"
+            if repo_certs.exists():
+                with open(repo_certs, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                    if "BEGIN CERTIFICATE" in content:
+                        return content
+        except Exception:
+            pass
+
+        try:
+            from .cert_validator import find_root_ca_in_windows_store
+            win_ca = find_root_ca_in_windows_store()
+            if win_ca:
+                return win_ca[0]
+        except Exception:
+            pass
+
+        return None
+
     def verify_server_receipt(
         self,
         receipt_data: dict[str, Any],
@@ -163,14 +220,51 @@ class ZeroTrustClientSigner:
         if not server_signature_b64 or not server_signature_b64.strip():
             return False
 
-        # Разрешение публичного ключа сервера
-        pub_key_source = trusted_server_cert_or_pubkey or self._ca_cert_pem
-        if not pub_key_source and self.ca_cert_path and os.path.exists(self.ca_cert_path):
+        pub_key_source = None
+        if trusted_server_cert_or_pubkey:
+            candidate = trusted_server_cert_or_pubkey.strip()
+            if not candidate.startswith("-----") and len(candidate) > 64:
+                try:
+                    decoded = base64.b64decode(candidate).decode("utf-8")
+                    if "-----BEGIN" in decoded:
+                        candidate = decoded
+                except Exception:
+                    pass
+            pub_key_source = candidate
+
+        # Если явный ключ/сертификат не передан, ищем сертификат или открытый ключ сервера на диске
+        if not pub_key_source:
+            server_candidates = [
+                os.getenv("SERVER_CERT_PATH", "").strip(),
+                os.getenv("JWT_PUBLIC_KEY_PATH", "").strip(),
+                "/certs/admin_server.crt",
+                "./certs/admin_server.crt",
+                "certs/admin_server.crt",
+                "/certs/admin_server.pub",
+                "./certs/admin_server.pub",
+                "certs/admin_server.pub",
+            ]
             try:
-                with open(self.ca_cert_path, "r", encoding="utf-8") as f:
-                    pub_key_source = f.read().strip()
+                repo_certs = Path(__file__).resolve().parents[5] / "certs"
+                server_candidates.append(str(repo_certs / "admin_server.crt"))
+                server_candidates.append(str(repo_certs / "admin_server.pub"))
             except Exception:
                 pass
+
+            for cand in server_candidates:
+                if cand and os.path.exists(cand):
+                    try:
+                        with open(cand, "r", encoding="utf-8") as f:
+                            content = f.read().strip()
+                            if "BEGIN CERTIFICATE" in content or "BEGIN PUBLIC KEY" in content or "BEGIN RSA PUBLIC KEY" in content:
+                                pub_key_source = content
+                                break
+                    except Exception:
+                        pass
+
+        # Если сертификат сервера все еще не найден, запасной вариант - доверенный Root CA
+        if not pub_key_source:
+            pub_key_source = self._resolve_trusted_root_ca_pem()
 
         if not pub_key_source:
             return False
@@ -183,8 +277,92 @@ class ZeroTrustClientSigner:
 
             pub_key = None
             if b"-----BEGIN CERTIFICATE-----" in pem_bytes:
-                cert = x509.load_pem_x509_certificate(pem_bytes)
-                pub_key = cert.public_key()
+                cert_blocks = re.findall(
+                    r"-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----",
+                    pub_key_source
+                )
+                if not cert_blocks:
+                    return False
+
+                parsed_certs = []
+                for block in cert_blocks:
+                    try:
+                        parsed_certs.append(x509.load_pem_x509_certificate(block.encode("utf-8")))
+                    except Exception:
+                        return False
+
+                leaf_cert = parsed_certs[0]
+
+                # Разрешаем доверенный Root CA
+                root_ca_pem = self._resolve_trusted_root_ca_pem()
+                if not root_ca_pem:
+                    return False
+
+                try:
+                    root_cert = x509.load_pem_x509_certificate(root_ca_pem.strip().encode("utf-8"))
+                except Exception:
+                    return False
+
+                now = datetime.datetime.now(datetime.timezone.utc)
+                if now < root_cert.not_valid_before_utc or now > root_cert.not_valid_after_utc:
+                    return False
+
+                for c in parsed_certs:
+                    if now < c.not_valid_before_utc or now > c.not_valid_after_utc:
+                        return False
+
+                # Проверка на нелегитимный самоподписанный сертификат
+                if leaf_cert.issuer == leaf_cert.subject and leaf_cert.subject != root_cert.subject:
+                    return False
+
+                def _verify_cert_sig(child, issuer_key):
+                    if isinstance(issuer_key, rsa.RSAPublicKey):
+                        issuer_key.verify(
+                            child.signature,
+                            child.tbs_certificate_bytes,
+                            padding.PKCS1v15(),
+                            child.signature_hash_algorithm
+                        )
+                        return True
+                    elif isinstance(issuer_key, ec.EllipticCurvePublicKey):
+                        issuer_key.verify(
+                            child.signature,
+                            child.tbs_certificate_bytes,
+                            ec.ECDSA(child.signature_hash_algorithm)
+                        )
+                        return True
+                    elif hasattr(issuer_key, "verify"):
+                        issuer_key.verify(
+                            child.signature,
+                            child.tbs_certificate_bytes,
+                            child.signature_hash_algorithm
+                        )
+                        return True
+                    return False
+
+                current = leaf_cert
+                intermediates = parsed_certs[1:]
+
+                try:
+                    while current.issuer != root_cert.subject:
+                        matching_issuer = next(
+                            (ic for ic in intermediates if ic.subject == current.issuer),
+                            None
+                        )
+                        if not matching_issuer:
+                            return False
+
+                        if not _verify_cert_sig(current, matching_issuer.public_key()):
+                            return False
+
+                        current = matching_issuer
+
+                    if not _verify_cert_sig(current, root_cert.public_key()):
+                        return False
+                except Exception:
+                    return False
+
+                pub_key = leaf_cert.public_key()
             elif b"-----BEGIN PUBLIC KEY-----" in pem_bytes or b"-----BEGIN RSA PUBLIC KEY-----" in pem_bytes:
                 pub_key = serialization.load_pem_public_key(pem_bytes)
 
@@ -238,3 +416,55 @@ class ZeroTrustClientSigner:
             return False
         except Exception:
             return False
+
+    def submit_zero_trust_document(
+        self,
+        url: str,
+        jwt_token: str,
+        content: str,
+        collection_name: str = "financial_kb",
+        metadata: Optional[dict[str, Any]] = None,
+        document_title: Optional[str] = None,
+        session: Optional[Any] = None
+    ) -> dict[str, Any]:
+        """
+        Отправляет документ в защищенный эндпоинт RAG (POST /api/v1/rag/documents) с цифровой подписью.
+        """
+        import requests
+        http_client = session or requests.Session()
+
+        meta = metadata or {}
+        doc_title = (
+            document_title
+            or meta.get("system_name")
+            or meta.get("short_name")
+            or meta.get("filename")
+            or "Regulatory Document"
+        )
+        payload = {
+            "document_title": str(doc_title),
+            "collection_name": collection_name,
+            "content": content,
+            "metadata": meta
+        }
+        body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        zt_headers = self.create_rag_request_headers(body_bytes)
+        headers = {
+            "Authorization": f"Bearer {jwt_token.replace('Bearer ', '').strip()}",
+            "Content-Type": "application/json",
+            **zt_headers
+        }
+        resp = http_client.post(url, data=body_bytes, headers=headers, timeout=(5, 120))
+        resp.raise_for_status()
+        resp_data = resp.json()
+
+        server_sig = resp_data.get("signature") or resp.headers.get("X-Admin-Signature", "")
+        receipt_verified = False
+        if server_sig:
+            server_cert = resp_data.get("server_cert") or resp.headers.get("X-Server-Cert")
+            receipt_verified = self.verify_server_receipt(
+                resp_data, server_sig, trusted_server_cert_or_pubkey=server_cert
+            )
+        resp_data["receipt_verified"] = receipt_verified
+        return resp_data
+
