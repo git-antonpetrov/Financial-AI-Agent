@@ -1,13 +1,13 @@
 import datetime
 import os
 from pathlib import Path
-from typing import Tuple, Optional
+from typing import Optional
 
 from cryptography import x509
-from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 
 class BankCertificateAuthority:
@@ -18,24 +18,22 @@ class BankCertificateAuthority:
 
     def __init__(
         self,
-        ca_cert: Optional[x509.Certificate] = None,
-        ca_private_key: Optional[rsa.RSAPrivateKey] = None,
-        bank_cert: Optional[x509.Certificate] = None,
-        bank_private_key: Optional[rsa.RSAPrivateKey] = None,
+        ca_cert: x509.Certificate | None = None,
+        ca_private_key: rsa.RSAPrivateKey | None = None,
+        bank_cert: x509.Certificate | None = None,
+        bank_private_key: rsa.RSAPrivateKey | None = None,
     ):
         self.ca_cert = ca_cert
         self.ca_private_key = ca_private_key
         self.bank_cert = bank_cert
         self.bank_private_key = bank_private_key
 
-
-
     def initialize_ca(
         self,
         key_size: int = 2048,
         common_name: str = "Financial AI Agent Root CA",
         validity_days: int = 3650,
-    ) -> Tuple[x509.Certificate, rsa.RSAPrivateKey]:
+    ) -> tuple[x509.Certificate, rsa.RSAPrivateKey]:
         """
         Генерирует новую пару ключей Root CA и самоподписанный X.509 сертификат.
         """
@@ -47,14 +45,16 @@ class BankCertificateAuthority:
         )
 
         # 2. Формирование субъекта и издателя
-        subject = issuer = x509.Name([
-            x509.NameAttribute(NameOID.COUNTRY_NAME, "RU"),
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Financial AI Agent Core"),
-            x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Root Security Authority"),
-            x509.NameAttribute(NameOID.COMMON_NAME, common_name),
-        ])
+        subject = issuer = x509.Name(
+            [
+                x509.NameAttribute(NameOID.COUNTRY_NAME, "RU"),
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Financial AI Agent Core"),
+                x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Root Security Authority"),
+                x509.NameAttribute(NameOID.COMMON_NAME, common_name),
+            ]
+        )
 
-        now = datetime.datetime.now(datetime.timezone.utc)
+        now = datetime.datetime.now(datetime.UTC)
         ca_cert = (
             x509.CertificateBuilder()
             .subject_name(subject)
@@ -97,7 +97,7 @@ class BankCertificateAuthority:
         key_size: int = 2048,
         common_name: str = "Financial AI Simulation Bank",
         validity_days: int = 365,
-    ) -> Tuple[x509.Certificate, rsa.RSAPrivateKey]:
+    ) -> tuple[x509.Certificate, rsa.RSAPrivateKey]:
         """
         Выпускает сертификат Банка, подписанный Root CA.
         """
@@ -110,14 +110,16 @@ class BankCertificateAuthority:
             backend=default_backend(),
         )
 
-        subject = x509.Name([
-            x509.NameAttribute(NameOID.COUNTRY_NAME, "RU"),
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Financial AI Agent Core"),
-            x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Simulation Bank Domain"),
-            x509.NameAttribute(NameOID.COMMON_NAME, common_name),
-        ])
+        subject = x509.Name(
+            [
+                x509.NameAttribute(NameOID.COUNTRY_NAME, "RU"),
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Financial AI Agent Core"),
+                x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Simulation Bank Domain"),
+                x509.NameAttribute(NameOID.COMMON_NAME, common_name),
+            ]
+        )
 
-        now = datetime.datetime.now(datetime.timezone.utc)
+        now = datetime.datetime.now(datetime.UTC)
         bank_cert = (
             x509.CertificateBuilder()
             .subject_name(subject)
@@ -145,10 +147,12 @@ class BankCertificateAuthority:
                 critical=True,
             )
             .add_extension(
-                x509.ExtendedKeyUsage([
-                    ExtendedKeyUsageOID.SERVER_AUTH,
-                    ExtendedKeyUsageOID.CLIENT_AUTH,
-                ]),
+                x509.ExtendedKeyUsage(
+                    [
+                        ExtendedKeyUsageOID.SERVER_AUTH,
+                        ExtendedKeyUsageOID.CLIENT_AUTH,
+                    ]
+                ),
                 critical=False,
             )
             .add_extension(
@@ -190,10 +194,14 @@ class BankCertificateAuthority:
     def get_bank_public_key_pem(self) -> str:
         if not self.bank_cert:
             raise RuntimeError("Сертификат банка отсутствует")
-        return self.bank_cert.public_key().public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo,
-        ).decode("utf-8")
+        return (
+            self.bank_cert.public_key()
+            .public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+            .decode("utf-8")
+        )
 
     @staticmethod
     def get_cert_fingerprint(cert: x509.Certificate) -> str:
@@ -217,7 +225,7 @@ class BankCertificateAuthority:
             ca = x509.load_pem_x509_certificate(ca_cert_pem.encode("utf-8"), default_backend())
 
             # 1. Проверка срока действия
-            now = datetime.datetime.now(datetime.timezone.utc)
+            now = datetime.datetime.now(datetime.UTC)
             if now < cert.not_valid_before_utc or now > cert.not_valid_after_utc:
                 return False
 
@@ -298,16 +306,15 @@ class BankCertificateAuthority:
         except Exception:
             return None
 
-
     @classmethod
     def load_from_central_pki(
         cls,
-        ca_cert_path: Optional[str] = None,
-        bank_cert_path: Optional[str] = None,
-        bank_key_path: Optional[str] = None,
+        ca_cert_path: str | None = None,
+        bank_cert_path: str | None = None,
+        bank_key_path: str | None = None,
     ) -> Optional["BankCertificateAuthority"]:
         """
-        Загружает доверенный сертификат Root CA (/certs/ca.crt), 
+        Загружает доверенный сертификат Root CA (/certs/ca.crt),
         сертификат банка (/certs/bank.crt) и приватный ключ банка (/certs/bank.key),
         выпущенные центральным Root CA.
         """
@@ -354,7 +361,7 @@ class BankCertificateAuthority:
             # Валидируем сертификат банка по доверенному Root CA
             if not cls.verify_certificate_against_ca(
                 bank_cert.public_bytes(serialization.Encoding.PEM).decode("utf-8"),
-                ca_cert.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+                ca_cert.public_bytes(serialization.Encoding.PEM).decode("utf-8"),
             ):
                 return None
 
@@ -369,7 +376,7 @@ class BankCertificateAuthority:
 
 
 # Глобальный Singleton-экземпляр Bank CA
-_BANK_CA_INSTANCE: Optional[BankCertificateAuthority] = None
+_BANK_CA_INSTANCE: BankCertificateAuthority | None = None
 
 
 def get_bank_ca() -> BankCertificateAuthority:
@@ -378,7 +385,7 @@ def get_bank_ca() -> BankCertificateAuthority:
     Приоритет:
     1. Централизованный Zero-Trust Root CA (/certs/ca.crt + bank.crt + bank.key);
     2. Локальная директория сертификатов BANK_CERTS_DIR (если явно задана).
-    
+
     В соответствии с моделью Zero-Trust, при отсутствии сертификатов на диске
     выбрасывается RuntimeError.
     """

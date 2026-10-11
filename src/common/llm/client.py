@@ -3,24 +3,30 @@
 и автоматической обработкой квот и сбоев (Transient Faults: HTTP 429, 503).
 """
 
-import os
-import time
-import random
 import asyncio
+import os
+import random
 import threading
-from typing import Any, Optional, Union
+import time
+from typing import Any
 
 import litellm
 
 try:
-    from src.common.logger import log_info, log_warning, log_error
+    from src.common.logger import log_error, log_info, log_warning
 except ImportError:
     try:
-        from common.logger import log_info, log_warning, log_error
+        from common.logger import log_error, log_info, log_warning
     except ImportError:
-        def log_info(p: str, m: str) -> None: print(f"[Info][{p}]: {m}", flush=True)
-        def log_warning(p: str, m: str) -> None: print(f"[Warning][{p}]: {m}", flush=True)
-        def log_error(p: str, m: str) -> None: print(f"[Error][{p}]: {m}", flush=True)
+
+        def log_info(p: str, m: str) -> None:
+            print(f"[Info][{p}]: {m}", flush=True)
+
+        def log_warning(p: str, m: str) -> None:
+            print(f"[Warning][{p}]: {m}", flush=True)
+
+        def log_error(p: str, m: str) -> None:
+            print(f"[Error][{p}]: {m}", flush=True)
 
 
 class LLMClient:
@@ -32,10 +38,10 @@ class LLMClient:
 
     def __init__(
         self,
-        vertex_project: Optional[str] = None,
-        vertex_location: Optional[str] = None,
-        vertex_base_url: Optional[str] = None,
-        max_retries: Optional[int] = None,
+        vertex_project: str | None = None,
+        vertex_location: str | None = None,
+        vertex_base_url: str | None = None,
+        max_retries: int | None = None,
         initial_backoff: float = 2.0,
         max_backoff: float = 60.0,
         backoff_factor: float = 2.0,
@@ -62,7 +68,7 @@ class LLMClient:
         self.backoff_factor = backoff_factor
         self.concurrency_limit = concurrency_limit
 
-        self._async_semaphore: Optional[asyncio.Semaphore] = None
+        self._async_semaphore: asyncio.Semaphore | None = None
         self._sync_semaphore = threading.Semaphore(self.concurrency_limit)
         self._lock = threading.Lock()
 
@@ -74,7 +80,7 @@ class LLMClient:
                     self._async_semaphore = asyncio.Semaphore(self.concurrency_limit)
         return self._async_semaphore
 
-    def get_vertex_api_base(self, model_name: str) -> Optional[str]:
+    def get_vertex_api_base(self, model_name: str) -> str | None:
         """
         Формирует базовый URL запроса к модели Vertex AI через прокси Cloudflare.
         """
@@ -120,7 +126,7 @@ class LLMClient:
         """
         Вычисляет интервал задержки с использованием экспоненциального бэкоффа и Full Jitter.
         """
-        raw_backoff = min(self.max_backoff, self.initial_backoff * (self.backoff_factor ** attempt))
+        raw_backoff = min(self.max_backoff, self.initial_backoff * (self.backoff_factor**attempt))
         # Full Jitter: равномерное распределение от 50% до 100% от расчетного времени
         jittered_delay = random.uniform(raw_backoff * 0.5, raw_backoff)
         return round(jittered_delay, 2)
@@ -161,11 +167,14 @@ class LLMClient:
                         log_warning(
                             "LLM Resilience",
                             f"Получена ошибка квоты/сервиса ({type(e).__name__}). "
-                            f"Попытка {attempt + 1}/{self.max_retries}. Ожидание {delay} сек..."
+                            f"Попытка {attempt + 1}/{self.max_retries}. Ожидание {delay} сек...",
                         )
                         await asyncio.sleep(delay)
                     else:
-                        log_error("LLM Resilience", f"Критическая ошибка вызова acompletion для {model}: {e}")
+                        log_error(
+                            "LLM Resilience",
+                            f"Критическая ошибка вызова acompletion для {model}: {e}",
+                        )
                         raise
 
     def completion(self, model: str, messages: list[dict[str, Any]], **kwargs: Any) -> Any:
@@ -185,14 +194,17 @@ class LLMClient:
                         log_warning(
                             "LLM Resilience",
                             f"Получена ошибка квоты/сервиса ({type(e).__name__}). "
-                            f"Попытка {attempt + 1}/{self.max_retries}. Ожидание {delay} сек..."
+                            f"Попытка {attempt + 1}/{self.max_retries}. Ожидание {delay} сек...",
                         )
                         time.sleep(delay)
                     else:
-                        log_error("LLM Resilience", f"Критическая ошибка вызова completion для {model}: {e}")
+                        log_error(
+                            "LLM Resilience",
+                            f"Критическая ошибка вызова completion для {model}: {e}",
+                        )
                         raise
 
-    async def aembedding(self, model: str, input: Union[str, list[str]], **kwargs: Any) -> Any:
+    async def aembedding(self, model: str, input: str | list[str], **kwargs: Any) -> Any:
         """
         Асинхронный вызов создания эмбеддингов с автоматическими повторами при 429/503.
         """
@@ -210,14 +222,17 @@ class LLMClient:
                         log_warning(
                             "LLM Resilience",
                             f"Получена ошибка квоты при aembedding. "
-                            f"Попытка {attempt + 1}/{self.max_retries}. Ожидание {delay} сек..."
+                            f"Попытка {attempt + 1}/{self.max_retries}. Ожидание {delay} сек...",
                         )
                         await asyncio.sleep(delay)
                     else:
-                        log_error("LLM Resilience", f"Критическая ошибка aembedding для {model}: {e}")
+                        log_error(
+                            "LLM Resilience",
+                            f"Критическая ошибка aembedding для {model}: {e}",
+                        )
                         raise
 
-    def embedding(self, model: str, input: Union[str, list[str]], **kwargs: Any) -> Any:
+    def embedding(self, model: str, input: str | list[str], **kwargs: Any) -> Any:
         """
         Синхронный вызов создания эмбеддингов с автоматическими повторами при 429/503.
         """
@@ -234,11 +249,14 @@ class LLMClient:
                         log_warning(
                             "LLM Resilience",
                             f"Получена ошибка квоты при embedding. "
-                            f"Попытка {attempt + 1}/{self.max_retries}. Ожидание {delay} сек..."
+                            f"Попытка {attempt + 1}/{self.max_retries}. Ожидание {delay} сек...",
                         )
                         time.sleep(delay)
                     else:
-                        log_error("LLM Resilience", f"Критическая ошибка embedding для {model}: {e}")
+                        log_error(
+                            "LLM Resilience",
+                            f"Критическая ошибка embedding для {model}: {e}",
+                        )
                         raise
 
     def get_embeddings_batch(
@@ -246,7 +264,7 @@ class LLMClient:
         model: str,
         texts: list[str],
         sleep_between_items: float = 0.0,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> list[list[float]]:
         """
         Последовательно генерирует эмбеддинги для списка текстов с защитой от ошибок размерности

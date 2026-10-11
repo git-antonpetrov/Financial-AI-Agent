@@ -5,10 +5,10 @@
 
 import hashlib
 import json
-from typing import Any, Union
+from typing import Any
 
 
-def compute_rag_canonical_digest(timestamp: Union[int, str], nonce: str, body_bytes: bytes) -> bytes:
+def compute_rag_canonical_digest(timestamp: int | str, nonce: str, body_bytes: bytes) -> bytes:
     """
     Вычисляет канонические байты для цифровой подписи запроса загрузки документа:
     Canonical_String = Timestamp + "\\n" + Nonce + "\\n" + SHA256(Body)
@@ -24,6 +24,11 @@ def compute_receipt_canonical_bytes(receipt_dict: dict[str, Any]) -> bytes:
     Исключает служебные поля ('signature', 'server_key_fingerprint', 'server_cert', 'receipt_verified')
     и сериализует с сортировкой ключей.
     """
-    excluded = {"signature", "server_key_fingerprint", "server_cert", "receipt_verified"}
+    excluded = {
+        "signature",
+        "server_key_fingerprint",
+        "server_cert",
+        "receipt_verified",
+    }
     clean_data = {k: v for k, v in receipt_dict.items() if k not in excluded}
     return json.dumps(clean_data, sort_keys=True, ensure_ascii=False).encode("utf-8")

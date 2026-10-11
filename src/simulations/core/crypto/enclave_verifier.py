@@ -3,14 +3,13 @@ import hashlib
 import os
 import threading
 import time
-from typing import Dict, Optional, Tuple, Union
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa
 
-from src.simulations.core.utils.console_logger import log_error, log_info, log_warning
+from src.simulations.core.utils.console_logger import log_warning
 
 
 class NonceStore:
@@ -22,10 +21,10 @@ class NonceStore:
     def __init__(self, redis_client=None, default_ttl: int = 300):
         self.default_ttl = default_ttl
         self.redis_client = redis_client
-        self._memory_cache: Dict[str, float] = {}
+        self._memory_cache: dict[str, float] = {}
         self._lock = threading.Lock()
 
-    def record_nonce_if_new(self, nonce: str, ttl: Optional[int] = None) -> bool:
+    def record_nonce_if_new(self, nonce: str, ttl: int | None = None) -> bool:
         """
         Пытается атомарно записать nonce.
         Возвращает True, если nonce уникален и успешно записан.
@@ -45,7 +44,10 @@ class NonceStore:
                 success = self.redis_client.set(key, "1", ex=actual_ttl, nx=True)
                 return bool(success)
             except Exception as e:
-                log_warning("NonceStore", f"Redis недоступен для проверки nonce ({e}), откат к памяти")
+                log_warning(
+                    "NonceStore",
+                    f"Redis недоступен для проверки nonce ({e}), откат к памяти",
+                )
 
         # 2. Потокобезопасная проверка в оперативной памяти
         now = time.time()
@@ -77,8 +79,8 @@ class EnclaveKeyManager:
 
     def __init__(
         self,
-        public_key_pem: Optional[str] = None,
-        private_key_pem: Optional[str] = None,
+        public_key_pem: str | None = None,
+        private_key_pem: str | None = None,
     ):
         self._public_key_pem = public_key_pem or os.getenv("ENCLAVE_PUBLIC_KEY_PEM")
         self._private_key_pem = private_key_pem or os.getenv("ENCLAVE_PRIVATE_KEY_PEM")
@@ -134,13 +136,13 @@ class EnclaveKeyManager:
     def get_public_key_pem(self) -> str:
         return self._public_key_pem
 
-    def get_dev_private_key(self) -> Optional[rsa.RSAPrivateKey]:
+    def get_dev_private_key(self) -> rsa.RSAPrivateKey | None:
         return self._dev_private_key
 
-    def get_private_key(self) -> Optional[rsa.RSAPrivateKey]:
+    def get_private_key(self) -> rsa.RSAPrivateKey | None:
         return self._dev_private_key
 
-    def get_dev_private_key_pem(self) -> Optional[str]:
+    def get_dev_private_key_pem(self) -> str | None:
         if self._dev_private_key:
             return self._dev_private_key.private_bytes(
                 encoding=serialization.Encoding.PEM,
@@ -156,7 +158,6 @@ class EnclaveKeyManager:
         )
 
 
-
 class EnclaveVerifier:
     """
     Криптографический верификатор запросов от Аппаратного Анклава (Блок 5 схемы arch.txt):
@@ -167,8 +168,8 @@ class EnclaveVerifier:
 
     def __init__(
         self,
-        key_manager: Optional[EnclaveKeyManager] = None,
-        nonce_store: Optional[NonceStore] = None,
+        key_manager: EnclaveKeyManager | None = None,
+        nonce_store: NonceStore | None = None,
         max_time_skew_seconds: int = 300,
     ):
         self.key_manager = key_manager or EnclaveKeyManager()
@@ -179,7 +180,7 @@ class EnclaveVerifier:
     def compute_payload_digest(
         method: str,
         path: str,
-        timestamp: Union[str, int, float],
+        timestamp: str | float,
         nonce: str,
         body_bytes: bytes,
     ) -> bytes:
@@ -195,11 +196,11 @@ class EnclaveVerifier:
         self,
         method: str,
         path: str,
-        timestamp_val: Union[str, int, float],
+        timestamp_val: str | float,
         nonce: str,
         body_bytes: bytes,
         signature_b64: str,
-    ) -> Tuple[bool, str]:
+    ) -> tuple[bool, str]:
         """
         Выполняет полную криптографическую валидацию входящего запроса от Анклава.
         """
@@ -212,13 +213,19 @@ class EnclaveVerifier:
         now = time.time()
         # Защита от запросов из далекого прошлого или далекого будущего
         if (now - ts_float) > self.max_time_skew_seconds:
-            return False, f"Запрос устарел (превышен допустимый интервал {self.max_time_skew_seconds} с)"
+            return (
+                False,
+                f"Запрос устарел (превышен допустимый интервал {self.max_time_skew_seconds} с)",
+            )
         if (ts_float - now) > 60:
             return False, "Временная метка запроса указывает на будущее время (> 60 с)"
 
         # 2. Проверка уникальности nonce (Replay Attack)
         if not self.nonce_store.record_nonce_if_new(nonce, ttl=self.max_time_skew_seconds):
-            return False, f"Обнаружена повторная атака (Replay Attack): nonce '{nonce}' уже был использован"
+            return (
+                False,
+                f"Обнаружена повторная атака (Replay Attack): nonce '{nonce}' уже был использован",
+            )
 
         # 3. Верификация цифровой подписи Анклава
         try:
@@ -272,7 +279,10 @@ class EnclaveVerifier:
                 return True, "Подпись анклава (Ed25519) валидна"
 
             else:
-                return False, f"Неподдерживаемый тип публичного ключа анклава: {type(public_key)}"
+                return (
+                    False,
+                    f"Неподдерживаемый тип публичного ключа анклава: {type(public_key)}",
+                )
 
         except InvalidSignature:
             return False, "Цифровая подпись Анклава недействительна (Invalid Signature)"
@@ -281,7 +291,7 @@ class EnclaveVerifier:
 
 
 # Синглтон верификатора
-_ENCLAVE_VERIFIER_INSTANCE: Optional[EnclaveVerifier] = None
+_ENCLAVE_VERIFIER_INSTANCE: EnclaveVerifier | None = None
 
 
 def get_enclave_verifier() -> EnclaveVerifier:

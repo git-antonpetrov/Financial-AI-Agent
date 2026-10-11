@@ -6,12 +6,11 @@
 """
 
 from enum import Enum
-from typing import Set, List, Optional
-
 
 
 class Role(str, Enum):
     """Роли пользователей в системе администрирования."""
+
     SUPERADMIN = "superadmin"
     OPERATOR = "operator"
     AUDITOR = "auditor"
@@ -19,6 +18,7 @@ class Role(str, Enum):
 
 class Permission(str, Enum):
     """Гранулярные разрешения на выполнение операций в системе."""
+
     # Управление документами
     DOCUMENTS_READ = "documents:read"
     DOCUMENTS_WRITE = "documents:write"
@@ -101,6 +101,7 @@ class CurrentUser(str):
     совместимости со старыми зависимостями (где ожидался str username).
     Содержит роль, набор разрешений и методы проверки прав.
     """
+
     role: Role
     permissions: set[Permission]
 
@@ -108,7 +109,7 @@ class CurrentUser(str):
         cls,
         username: str,
         role: Role | str = Role.SUPERADMIN,
-        permissions: Optional[set[Permission]] = None
+        permissions: set[Permission] | None = None,
     ):
         instance = str.__new__(cls, username)
         if isinstance(role, str):
@@ -149,5 +150,7 @@ class CurrentUser(str):
         return self.role.value == str(role).lower().strip()
 
     def __repr__(self) -> str:
-        return f"CurrentUser(username='{self.username}', role='{self.role.value}', permissions_count={len(self.permissions)})"
-
+        return (
+            f"CurrentUser(username='{self.username}', role='{self.role.value}', "
+            f"permissions_count={len(self.permissions)})"
+        )

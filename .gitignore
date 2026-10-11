@@ -211,7 +211,8 @@ venv/
 .venv/
 env/
 .idea/
-.vscode/
+.vscode/*
+!.vscode/settings.json
 
 # Frontend (Vite)
 node_modules

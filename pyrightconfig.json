@@ -1,0 +1,20 @@
+{
+  "include": [
+    "src",
+    "tests",
+    "scripts"
+  ],
+  "extraPaths": [
+    ".",
+    "src",
+    "src/admin_server/fastapi",
+    "src/admin_server",
+    "src/admin_client/backend",
+    "src/simulations",
+    "src/simulations/api",
+    "src/pki"
+  ],
+  "typeCheckingMode": "off",
+  "reportMissingImports": "none",
+  "reportMissingModuleSource": "none"
+}

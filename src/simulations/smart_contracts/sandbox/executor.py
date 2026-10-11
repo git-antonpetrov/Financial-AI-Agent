@@ -2,14 +2,13 @@ import ast
 import sys
 import time
 from decimal import Decimal
-from typing import Tuple, List, Dict, Any, Optional
+from typing import Any
 
 from src.simulations.smart_contracts.dsl.context import ContractContext
 
 
 class SandboxExecutionError(Exception):
     """Исключение, возникающее при нарушении правил безопасности или ошибке выполнения песочницы."""
-    pass
 
 
 class SecurityASTVisitor(ast.NodeVisitor):
@@ -17,10 +16,24 @@ class SecurityASTVisitor(ast.NodeVisitor):
     AST-валидатор для синтаксического анализа и выявления потенциально опасных конструкций
     в коде смарт-контракта до момента его компиляции и выполнения.
     """
+
     FORBIDDEN_CALLS = {
-        "eval", "exec", "open", "compile", "__import__",
-        "input", "breakpoint", "exit", "quit", "getattr", "setattr", "delattr", "globals", "locals",
-        "format", "format_map"
+        "eval",
+        "exec",
+        "open",
+        "compile",
+        "__import__",
+        "input",
+        "breakpoint",
+        "exit",
+        "quit",
+        "getattr",
+        "setattr",
+        "delattr",
+        "globals",
+        "locals",
+        "format",
+        "format_map",
     }
 
     def __init__(self):
@@ -33,7 +46,8 @@ class SecurityASTVisitor(ast.NodeVisitor):
                 raise SandboxExecutionError("Импорт модулей категорически запрещен в смарт-контрактах")
             if not isinstance(stmt, ast.FunctionDef):
                 raise SandboxExecutionError(
-                    f"На верхнем уровне смарт-контракта разрешены только определения функций (FunctionDef), обнаружен {type(stmt).__name__}"
+                    "На верхнем уровне смарт-контракта разрешены только определения функций "
+                    f"(FunctionDef), обнаружен {type(stmt).__name__}"
                 )
         self.generic_visit(node)
 
@@ -47,10 +61,11 @@ class SecurityASTVisitor(ast.NodeVisitor):
         raise SandboxExecutionError("Использование циклов (async for) категорически запрещено в смарт-контрактах")
 
     def visit_Call(self, node: ast.Call) -> None:
-        if isinstance(node.func, ast.Attribute) and node.func.attr in ("format", "format_map"):
-            raise SandboxExecutionError(
-                f"Вызов метода '{node.func.attr}' категорически запрещен в смарт-контрактах"
-            )
+        if isinstance(node.func, ast.Attribute) and node.func.attr in (
+            "format",
+            "format_map",
+        ):
+            raise SandboxExecutionError(f"Вызов метода '{node.func.attr}' категорически запрещен в смарт-контрактах")
         self.generic_visit(node)
 
     def visit_Import(self, node: ast.Import) -> None:
@@ -61,9 +76,7 @@ class SecurityASTVisitor(ast.NodeVisitor):
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         if node.attr.startswith("_"):
-            raise SandboxExecutionError(
-                f"Запрещен доступ к приватным и специальным атрибутам ('{node.attr}')"
-            )
+            raise SandboxExecutionError(f"Запрещен доступ к приватным и специальным атрибутам ('{node.attr}')")
         self.generic_visit(node)
 
     def visit_Name(self, node: ast.Name) -> None:
@@ -72,9 +85,7 @@ class SecurityASTVisitor(ast.NodeVisitor):
                 f"Запрещено использование идентификаторов, начинающихся с подчеркивания ('{node.id}')"
             )
         if node.id in self.FORBIDDEN_CALLS:
-            raise SandboxExecutionError(
-                f"Запрещено обращение к небезопасной функции или объекту '{node.id}'"
-            )
+            raise SandboxExecutionError(f"Запрещено обращение к небезопасной функции или объекту '{node.id}'")
         self.generic_visit(node)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
@@ -91,12 +102,12 @@ class SecurityASTVisitor(ast.NodeVisitor):
         raise SandboxExecutionError("Асинхронные функции (async def) запрещены в смарт-контрактах")
 
 
-
 class SmartContractSandbox:
     """
     Изолированная и защищенная песочница для выполнения DSL-кода смарт-контрактов цифрового рубля.
     """
-    SAFE_BUILTINS: Dict[str, Any] = {
+
+    SAFE_BUILTINS: dict[str, Any] = {
         "True": True,
         "False": False,
         "None": None,
@@ -141,17 +152,17 @@ class SmartContractSandbox:
         code: str,
         ctx: ContractContext,
         timeout_seconds: float = 3.0,
-        max_operations: int = 50000
-    ) -> Tuple[bool, bool, List[Dict[str, Any]], Optional[str]]:
+        max_operations: int = 50000,
+    ) -> tuple[bool, bool, list[dict[str, Any]], str | None]:
         """
         Исполняет проверенный код смарт-контракта в изолированном контексте с лимитом операций и времени.
-        
+
         Args:
             code (str): Исходный код смарт-контракта на Python.
             ctx (ContractContext): Контекст исполнения смарт-контракта.
             timeout_seconds (float): Лимит времени выполнения в секундах.
             max_operations (int): Максимальное число выполняемых шагов/инструкций.
-            
+
         Returns:
             Tuple[bool, bool, List[Dict[str, Any]], Optional[str]]:
                 - success: True, если контракт отработал без ошибок.
@@ -164,10 +175,8 @@ class SmartContractSandbox:
             cls.validate_code(code)
 
             # 2. Изолированная среда выполнения
-            restricted_globals: Dict[str, Any] = {
-                "__builtins__": cls.SAFE_BUILTINS
-            }
-            local_scope: Dict[str, Any] = {}
+            restricted_globals: dict[str, Any] = {"__builtins__": cls.SAFE_BUILTINS}
+            local_scope: dict[str, Any] = {}
 
             # 3. Мониторинг выполнения с лимитами ресурсов (инструкций и времени)
             # В соответствии с SEC-04 сторожевой таймер устанавливается ДО вызова exec()!
@@ -200,7 +209,6 @@ class SmartContractSandbox:
                 result = execute_func(ctx)
             finally:
                 sys.settrace(None)
-
 
             # Контракт завершен, если функция вернула True или был вызван ctx.complete()
             is_completed = bool(result) or ctx._is_completed

@@ -5,20 +5,20 @@
 и отказ от самоподписанных сертификатов.
 """
 
-import sys
-import os
 import datetime
+import os
+import sys
 import tempfile
-from typing import Optional, Any, Tuple
+from typing import Any
+
 from cryptography import x509
-from cryptography.x509.oid import NameOID
-from cryptography.hazmat.primitives.asymmetric import rsa, ec, padding
 from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
+from cryptography.x509.oid import NameOID
 
 
 class CertificateMissingError(RuntimeError):
     """Выбрасывается, когда обязательный клиентский или корневой сертификат не найден."""
-    pass
 
 
 class WindowsCertificateStoreError(CertificateMissingError):
@@ -27,17 +27,17 @@ class WindowsCertificateStoreError(CertificateMissingError):
     не обнаружен в системном хранилище сертификатов Windows (certmgr.msc).
     Предоставляет пользователю исчерпывающее руководство по установке сертификата.
     """
-    pass
 
 
 class CertificateValidationError(RuntimeError):
-    """Выбрасывается, когда сертификат не прошел криптографическую проверку (истек, самоподписан, не подписан Root CA)."""
-    pass
+    """
+    Выбрасывается, когда сертификат не прошел криптографическую проверку
+    (истек, самоподписан, не подписан Root CA).
+    """
 
 
 class KeyMissingError(RuntimeError):
     """Выбрасывается, когда обязательный закрытый ключ не найден на диске."""
-    pass
 
 
 def get_windows_cert_store_help_message(missing_component: str = "all") -> str:
@@ -50,43 +50,50 @@ def get_windows_cert_store_help_message(missing_component: str = "all") -> str:
         "================================================================================",
     ]
     if missing_component in ("root_ca", "all"):
-        lines.extend([
-            "[-] Сертификат не найден: доверенный корневой сертификат (Root CA 'ca.crt').",
-            "    Хранилище: 'Доверенные корневые центры сертификации' (Trusted Root Certification Authorities / ROOT).",
-            "    Инструкция по установке:",
-            "      1. Нажмите сочетание клавиш Win + R, введите 'certmgr.msc' и нажмите Enter.",
-            "      2. В левой панели раскройте: 'Доверенные корневые центры сертификации' -> 'Сертификаты'.",
-            "      3. Нажмите правой кнопкой мыши по папке 'Сертификаты' -> 'Все задачи' -> 'Импорт...'.",
-            "      4. Выберите файл корневого сертификата ca.crt и завершите работу мастера импорта.",
-            "",
-        ])
+        lines.extend(
+            [
+                "[-] Сертификат не найден: доверенный корневой сертификат (Root CA 'ca.crt').",
+                "    Хранилище: 'Доверенные корневые центры сертификации' "
+                "(Trusted Root Certification Authorities / ROOT).",
+                "    Инструкция по установке:",
+                "      1. Нажмите сочетание клавиш Win + R, введите 'certmgr.msc' и нажмите Enter.",
+                "      2. В левой панели раскройте: 'Доверенные корневые центры сертификации' -> 'Сертификаты'.",
+                "      3. Нажмите правой кнопкой мыши по папке 'Сертификаты' -> 'Все задачи' -> 'Импорт...'.",
+                "      4. Выберите файл корневого сертификата ca.crt и завершите работу мастера импорта.",
+                "",
+            ]
+        )
     if missing_component in ("client_cert", "all"):
-        lines.extend([
-            "[-] Сертификат не найден: клиентский сертификат администратора ('admin_client.crt').",
-            "    Хранилище: 'Личные' (Personal / MY).",
-            "    Инструкция по установке:",
-            "      1. Нажмите сочетание клавиш Win + R, введите 'certmgr.msc' и нажмите Enter.",
-            "      2. В левой панели раскройте: 'Личные' -> 'Сертификаты'.",
-            "      3. Нажмите правой кнопкой мыши по папке 'Сертификаты' -> 'Все задачи' -> 'Импорт...'.",
-            "      4. Выберите файл клиентского сертификата admin_client.crt (или контейнер .pfx).",
-            "",
-        ])
-    lines.extend([
-        "Альтернатива (для файлового развертывания):",
-        "  - Передайте путь к ca.crt через переменную окружения CA_CERT_PATH или аргумент ca_cert_path.",
-        "  - Передайте путь к admin_client.crt через переменную окружения ADMIN_CLIENT_CERT_PATH или аргумент cert_path.",
-        "================================================================================"
-    ])
+        lines.extend(
+            [
+                "[-] Сертификат не найден: клиентский сертификат администратора ('admin_client.crt').",
+                "    Хранилище: 'Личные' (Personal / MY).",
+                "    Инструкция по установке:",
+                "      1. Нажмите сочетание клавиш Win + R, введите 'certmgr.msc' и нажмите Enter.",
+                "      2. В левой панели раскройте: 'Личные' -> 'Сертификаты'.",
+                "      3. Нажмите правой кнопкой мыши по папке 'Сертификаты' -> 'Все задачи' -> 'Импорт...'.",
+                "      4. Выберите файл клиентского сертификата admin_client.crt (или контейнер .pfx).",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "Альтернатива (для файлового развертывания):",
+            "  - Передайте путь к ca.crt через переменную окружения CA_CERT_PATH или аргумент ca_cert_path.",
+            "  - Передайте путь к admin_client.crt через переменную ADMIN_CLIENT_CERT_PATH или аргумент cert_path.",
+            "================================================================================",
+        ]
+    )
     return "\n".join(lines)
 
 
 def find_cert_in_windows_store(
     store_name: str = "MY",
-    expected_public_key: Optional[Any] = None,
-    subject_cn: Optional[str] = None,
-    issuer_cn: Optional[str] = None,
-    is_ca: Optional[bool] = None,
-) -> Optional[Tuple[str, x509.Certificate]]:
+    expected_public_key: Any | None = None,
+    subject_cn: str | None = None,
+    issuer_cn: str | None = None,
+    is_ca: bool | None = None,
+) -> tuple[str, x509.Certificate] | None:
     """
     Выполняет поиск действующего X.509 сертификата в системных хранилищах Windows
     ('MY' - Личные, 'ROOT' - Доверенные корневые центры сертификации) через CryptoAPI (crypt32.dll).
@@ -104,11 +111,18 @@ def find_cert_in_windows_store(
             return None
 
         crypt32.CertOpenStore.argtypes = [
-            ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.LPCWSTR
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.LPCWSTR,
         ]
         crypt32.CertOpenStore.restype = ctypes.c_void_p
 
-        crypt32.CertEnumCertificatesInStore.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        crypt32.CertEnumCertificatesInStore.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
         crypt32.CertEnumCertificatesInStore.restype = ctypes.c_void_p
 
         crypt32.CertCloseStore.argtypes = [ctypes.c_void_p, wintypes.DWORD]
@@ -132,42 +146,36 @@ def find_cert_in_windows_store(
             ]
 
         # Нормализация ожидаемого публичного ключа в DER байты
-        exp_der: Optional[bytes] = None
+        exp_der: bytes | None = None
         if expected_public_key is not None:
             if isinstance(expected_public_key, (rsa.RSAPublicKey, ec.EllipticCurvePublicKey)):
                 exp_der = expected_public_key.public_bytes(
                     encoding=serialization.Encoding.DER,
-                    format=serialization.PublicFormat.SubjectPublicKeyInfo
+                    format=serialization.PublicFormat.SubjectPublicKeyInfo,
                 )
             elif isinstance(expected_public_key, str) and "-----BEGIN" in expected_public_key:
                 exp_key = serialization.load_pem_public_key(expected_public_key.encode("utf-8"))
                 exp_der = exp_key.public_bytes(
                     encoding=serialization.Encoding.DER,
-                    format=serialization.PublicFormat.SubjectPublicKeyInfo
+                    format=serialization.PublicFormat.SubjectPublicKeyInfo,
                 )
             elif isinstance(expected_public_key, bytes) and b"-----BEGIN" in expected_public_key:
                 exp_key = serialization.load_pem_public_key(expected_public_key)
                 exp_der = exp_key.public_bytes(
                     encoding=serialization.Encoding.DER,
-                    format=serialization.PublicFormat.SubjectPublicKeyInfo
+                    format=serialization.PublicFormat.SubjectPublicKeyInfo,
                 )
             elif isinstance(expected_public_key, bytes):
                 exp_der = expected_public_key
 
-        now = datetime.datetime.now(datetime.timezone.utc)
+        now = datetime.datetime.now(datetime.UTC)
         store_locations = [
             CERT_SYSTEM_STORE_CURRENT_USER | CERT_STORE_READONLY_FLAG,
             CERT_SYSTEM_STORE_LOCAL_MACHINE | CERT_STORE_READONLY_FLAG,
         ]
 
         for loc_flags in store_locations:
-            h_store = crypt32.CertOpenStore(
-                CERT_STORE_PROV_SYSTEM_W,
-                0,
-                None,
-                loc_flags,
-                store_name
-            )
+            h_store = crypt32.CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, None, loc_flags, store_name)
             if not h_store:
                 continue
 
@@ -204,7 +212,7 @@ def find_cert_in_windows_store(
                     if exp_der is not None:
                         cert_pub_der = cert_obj.public_key().public_bytes(
                             encoding=serialization.Encoding.DER,
-                            format=serialization.PublicFormat.SubjectPublicKeyInfo
+                            format=serialization.PublicFormat.SubjectPublicKeyInfo,
                         )
                         if cert_pub_der != exp_der:
                             continue
@@ -238,60 +246,47 @@ def find_cert_in_windows_store(
 
 
 def find_root_ca_in_windows_store(
-    expected_issuer_cn: Optional[str] = None
-) -> Optional[Tuple[str, x509.Certificate]]:
+    expected_issuer_cn: str | None = None,
+) -> tuple[str, x509.Certificate] | None:
     """
     Ищет доверенный корневой сертификат Root CA в системном хранилище Windows 'ROOT'.
     """
     target_cn = expected_issuer_cn or "Financial AI Agent Root CA"
-    result = find_cert_in_windows_store(
-        store_name="ROOT",
-        subject_cn=target_cn,
-        is_ca=True
-    )
+    result = find_cert_in_windows_store(store_name="ROOT", subject_cn=target_cn, is_ca=True)
     if result:
         return result
 
     if not expected_issuer_cn:
-        result = find_cert_in_windows_store(
-            store_name="ROOT",
-            subject_cn="Root CA",
-            is_ca=True
-        )
+        result = find_cert_in_windows_store(store_name="ROOT", subject_cn="Root CA", is_ca=True)
         if result:
             return result
     return None
 
 
 def find_client_cert_in_windows_store(
-    expected_public_key: Optional[Any] = None,
-    subject_cn: Optional[str] = None
-) -> Optional[Tuple[str, x509.Certificate]]:
+    expected_public_key: Any | None = None, subject_cn: str | None = None
+) -> tuple[str, x509.Certificate] | None:
     """
     Ищет клиентский сертификат администратора в системном хранилище Windows 'MY' (Личные).
     """
     if expected_public_key is not None:
-        result = find_cert_in_windows_store(
-            store_name="MY",
-            expected_public_key=expected_public_key,
-            is_ca=False
-        )
+        result = find_cert_in_windows_store(store_name="MY", expected_public_key=expected_public_key, is_ca=False)
         if result:
             return result
 
-    candidates = [subject_cn] if subject_cn else [
-        "superadmin-workstation",
-        "admin_client",
-        "Financial AI Agent Workstation",
-        "admin_operator"
-    ]
+    candidates = (
+        [subject_cn]
+        if subject_cn
+        else [
+            "superadmin-workstation",
+            "admin_client",
+            "Financial AI Agent Workstation",
+            "admin_operator",
+        ]
+    )
     for cand in candidates:
         if cand:
-            result = find_cert_in_windows_store(
-                store_name="MY",
-                subject_cn=cand,
-                is_ca=False
-            )
+            result = find_cert_in_windows_store(store_name="MY", subject_cn=cand, is_ca=False)
             if result:
                 return result
 
@@ -325,10 +320,10 @@ def export_windows_cert_to_cache(pem_data: str, filename: str) -> str:
 
 
 def find_certificate_file(
-    custom_path: Optional[str] = None,
+    custom_path: str | None = None,
     env_var: str = "ADMIN_CLIENT_CERT_PATH",
-    default_filenames: tuple = ("admin_client.crt",)
-) -> Optional[str]:
+    default_filenames: tuple = ("admin_client.crt",),
+) -> str | None:
     """
     Ищет файл сертификата по переданному пути, переменным окружения и стандартным путям системы.
     """
@@ -341,11 +336,13 @@ def find_certificate_file(
 
     candidates = []
     for fname in default_filenames:
-        candidates.extend([
-            f"./certs/{fname}",
-            f"/certs/{fname}",
-            f"certs/{fname}",
-        ])
+        candidates.extend(
+            [
+                f"./certs/{fname}",
+                f"/certs/{fname}",
+                f"certs/{fname}",
+            ]
+        )
         if sys.platform == "win32":
             appdata = os.getenv("APPDATA")
             if appdata:
@@ -363,13 +360,13 @@ def find_certificate_file(
 
 
 def resolve_and_validate_client_certificate(
-    cert_path: Optional[str] = None,
-    cert_pem: Optional[str] = None,
-    ca_cert_path: Optional[str] = None,
-    ca_cert_pem: Optional[str] = None,
-    expected_public_key: Optional[Any] = None,
-    require_ca: bool = True
-) -> Tuple[str, x509.Certificate]:
+    cert_path: str | None = None,
+    cert_pem: str | None = None,
+    ca_cert_path: str | None = None,
+    ca_cert_pem: str | None = None,
+    expected_public_key: Any | None = None,
+    require_ca: bool = True,
+) -> tuple[str, x509.Certificate]:
     """
     Разрешает и строго валидирует клиентский X.509 сертификат:
     1. Поиск клиентского сертификата: cert_pem -> cert_path / ADMIN_CLIENT_CERT_PATH ->
@@ -394,7 +391,7 @@ def resolve_and_validate_client_certificate(
         found_path = find_certificate_file(
             custom_path=cert_path,
             env_var="ADMIN_CLIENT_CERT_PATH",
-            default_filenames=("admin_client.crt",)
+            default_filenames=("admin_client.crt",),
         )
         if found_path:
             try:
@@ -418,7 +415,7 @@ def resolve_and_validate_client_certificate(
         raise CertificateValidationError(f"Ошибка парсинга X.509 сертификата: {e}")
 
     # 2. Проверка срока действия
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.UTC)
     if now < cert.not_valid_before_utc:
         raise CertificateValidationError(
             f"Срок действия клиентского сертификата еще не наступил (действителен с: {cert.not_valid_before_utc})"
@@ -444,7 +441,7 @@ def resolve_and_validate_client_certificate(
         found_ca = find_certificate_file(
             custom_path=ca_cert_path,
             env_var="CA_CERT_PATH",
-            default_filenames=("ca.crt",)
+            default_filenames=("ca.crt",),
         )
         if found_ca:
             try:
@@ -468,13 +465,13 @@ def resolve_and_validate_client_certificate(
                     cert.signature,
                     cert.tbs_certificate_bytes,
                     padding.PKCS1v15(),
-                    cert.signature_hash_algorithm
+                    cert.signature_hash_algorithm,
                 )
             elif hasattr(ca_pub, "verify"):
                 ca_pub.verify(
                     cert.signature,
                     cert.tbs_certificate_bytes,
-                    cert.signature_hash_algorithm
+                    cert.signature_hash_algorithm,
                 )
         except Exception as e:
             raise CertificateValidationError(
@@ -487,24 +484,24 @@ def resolve_and_validate_client_certificate(
     if expected_public_key is not None:
         cert_pub_der = cert.public_key().public_bytes(
             encoding=serialization.Encoding.DER,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
         )
         if isinstance(expected_public_key, (rsa.RSAPublicKey, ec.EllipticCurvePublicKey)):
             exp_pub_der = expected_public_key.public_bytes(
                 encoding=serialization.Encoding.DER,
-                format=serialization.PublicFormat.SubjectPublicKeyInfo
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
             )
         elif isinstance(expected_public_key, str) and "-----BEGIN" in expected_public_key:
             exp_key = serialization.load_pem_public_key(expected_public_key.encode("utf-8"))
             exp_pub_der = exp_key.public_bytes(
                 encoding=serialization.Encoding.DER,
-                format=serialization.PublicFormat.SubjectPublicKeyInfo
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
             )
         elif isinstance(expected_public_key, bytes) and b"-----BEGIN" in expected_public_key:
             exp_key = serialization.load_pem_public_key(expected_public_key)
             exp_pub_der = exp_key.public_bytes(
                 encoding=serialization.Encoding.DER,
-                format=serialization.PublicFormat.SubjectPublicKeyInfo
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
             )
         elif isinstance(expected_public_key, bytes):
             exp_pub_der = expected_public_key
@@ -513,7 +510,8 @@ def resolve_and_validate_client_certificate(
 
         if exp_pub_der is not None and cert_pub_der != exp_pub_der:
             raise CertificateValidationError(
-                "Публичный ключ клиентского сертификата не совпадает с публичным ключом рабочего закрытого/аппаратного ключа"
+                "Публичный ключ клиентского сертификата не совпадает "
+                "с публичным ключом рабочего закрытого/аппаратного ключа"
             )
 
     return pem_data, cert
@@ -522,9 +520,9 @@ def resolve_and_validate_client_certificate(
 def create_test_ca_and_client_cert(
     cn: str = "superadmin-workstation",
     role: str = "admin_operator",
-    client_private_key: Optional[rsa.RSAPrivateKey] = None,
-    validity_days: int = 365
-) -> Tuple[str, str, rsa.RSAPrivateKey]:
+    client_private_key: rsa.RSAPrivateKey | None = None,
+    validity_days: int = 365,
+) -> tuple[str, str, rsa.RSAPrivateKey]:
     """
     Вспомогательная функция для генерации легитимного Root CA и подписанного им клиентского сертификата.
     Используется в тестировании для создания честной доверенной цепочки без самоподписанных клиентских сертификатов.
@@ -533,12 +531,14 @@ def create_test_ca_and_client_cert(
         Tuple[str, str, rsa.RSAPrivateKey]: (ca_cert_pem, client_cert_pem, client_private_key)
     """
     ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    ca_name = x509.Name([
-        x509.NameAttribute(NameOID.COUNTRY_NAME, "RU"),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Financial AI Agent Root Authority"),
-        x509.NameAttribute(NameOID.COMMON_NAME, "Financial AI Agent Root CA"),
-    ])
-    now = datetime.datetime.now(datetime.timezone.utc)
+    ca_name = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COUNTRY_NAME, "RU"),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Financial AI Agent Root Authority"),
+            x509.NameAttribute(NameOID.COMMON_NAME, "Financial AI Agent Root CA"),
+        ]
+    )
+    now = datetime.datetime.now(datetime.UTC)
     ca_cert = (
         x509.CertificateBuilder()
         .subject_name(ca_name)
@@ -552,12 +552,14 @@ def create_test_ca_and_client_cert(
     )
 
     cli_key = client_private_key or rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    cli_name = x509.Name([
-        x509.NameAttribute(NameOID.COUNTRY_NAME, "RU"),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Financial AI Agent Workstation"),
-        x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, role),
-        x509.NameAttribute(NameOID.COMMON_NAME, cn),
-    ])
+    cli_name = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COUNTRY_NAME, "RU"),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Financial AI Agent Workstation"),
+            x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, role),
+            x509.NameAttribute(NameOID.COMMON_NAME, cn),
+        ]
+    )
     cli_cert = (
         x509.CertificateBuilder()
         .subject_name(cli_name)

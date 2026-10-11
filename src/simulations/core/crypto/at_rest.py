@@ -4,19 +4,20 @@
 номеров счетов, карт и балансов в СУБД (SEC-03).
 """
 
-import os
 import base64
 import hashlib
 import hmac
+import os
 from decimal import Decimal
-from typing import Any, Optional, Union
-from sqlalchemy.types import TypeDecorator, Text
+from typing import Any
+
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from sqlalchemy.types import Text, TypeDecorator
 
 MAGIC_ENCRYPTION_V1 = b"ENC1"
 
 
-def resolve_encryption_key(key: Optional[Union[bytes, str]] = None) -> bytes:
+def resolve_encryption_key(key: bytes | str | None = None) -> bytes:
     """
     Разрешает и нормализует 256-битный (32 байта) ключ шифрования.
     Приоритет:
@@ -66,9 +67,9 @@ def resolve_encryption_key(key: Optional[Union[bytes, str]] = None) -> bytes:
 
 
 def encrypt_data_at_rest(
-    data: Union[bytes, str],
-    key: Optional[Union[bytes, str]] = None,
-    associated_data: Optional[bytes] = None,
+    data: bytes | str,
+    key: bytes | str | None = None,
+    associated_data: bytes | None = None,
     deterministic: bool = False,
 ) -> bytes:
     """
@@ -95,8 +96,8 @@ def encrypt_data_at_rest(
 
 def decrypt_data_at_rest(
     encrypted_payload: bytes,
-    key: Optional[Union[bytes, str]] = None,
-    associated_data: Optional[bytes] = None,
+    key: bytes | str | None = None,
+    associated_data: bytes | None = None,
 ) -> bytes:
     """
     Расшифровывает данные с проверкой аутентичности и целостности (AEAD AES-256-GCM).
@@ -126,8 +127,8 @@ def decrypt_data_at_rest(
 
 def encrypt_text_at_rest(
     text: str,
-    key: Optional[Union[bytes, str]] = None,
-    associated_data: Optional[bytes] = None,
+    key: bytes | str | None = None,
+    associated_data: bytes | None = None,
     deterministic: bool = False,
 ) -> str:
     """Шифрует строковые данные и возвращает безопасную Base64url-строку."""
@@ -142,8 +143,8 @@ def encrypt_text_at_rest(
 
 def decrypt_text_at_rest(
     encrypted_b64: str,
-    key: Optional[Union[bytes, str]] = None,
-    associated_data: Optional[bytes] = None,
+    key: bytes | str | None = None,
+    associated_data: bytes | None = None,
 ) -> str:
     """Расшифровывает Base64url-строку и возвращает исходный UTF-8 текст."""
     if not isinstance(encrypted_b64, str):
@@ -161,6 +162,7 @@ class EncryptedText(TypeDecorator):
     SQLAlchemy тип для прозрачного шифрования строковых данных (номера счетов, карт, кошельков)
     в PostgreSQL при хранении (Data at Rest) с использованием AES-256-GCM.
     """
+
     impl = Text
     cache_ok = True
 
@@ -168,12 +170,12 @@ class EncryptedText(TypeDecorator):
         super().__init__(*args, **kwargs)
         self.deterministic = deterministic
 
-    def process_bind_param(self, value: Any, dialect: Any) -> Optional[str]:
+    def process_bind_param(self, value: Any, dialect: Any) -> str | None:
         if value is None:
             return None
         return encrypt_text_at_rest(str(value), deterministic=self.deterministic)
 
-    def process_result_value(self, value: Any, dialect: Any) -> Optional[str]:
+    def process_result_value(self, value: Any, dialect: Any) -> str | None:
         if value is None:
             return None
         val_str = str(value)
@@ -190,6 +192,7 @@ class EncryptedDecimal(TypeDecorator):
     в PostgreSQL при хранении (Data at Rest) с использованием AES-256-GCM.
     При чтении восстанавливает точный объект Decimal.
     """
+
     impl = Text
     cache_ok = True
 
@@ -197,13 +200,13 @@ class EncryptedDecimal(TypeDecorator):
         super().__init__(*args, **kwargs)
         self.deterministic = deterministic
 
-    def process_bind_param(self, value: Any, dialect: Any) -> Optional[str]:
+    def process_bind_param(self, value: Any, dialect: Any) -> str | None:
         if value is None:
             return None
         dec_val = Decimal(str(value)).quantize(Decimal("0.01"))
         return encrypt_text_at_rest(str(dec_val), deterministic=self.deterministic)
 
-    def process_result_value(self, value: Any, dialect: Any) -> Optional[Decimal]:
+    def process_result_value(self, value: Any, dialect: Any) -> Decimal | None:
         if value is None:
             return None
         val_str = str(value)

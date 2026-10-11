@@ -11,8 +11,8 @@ from .console_logger import (
 )
 
 __all__ = [
+    "log_error",
     "log_info",
     "log_success",
     "log_warning",
-    "log_error",
 ]

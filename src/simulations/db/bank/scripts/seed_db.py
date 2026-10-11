@@ -1,39 +1,53 @@
-import os
 import asyncio
+import os
 import random
-from datetime import datetime, timedelta, date
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from urllib.parse import urlparse
+
 # pyrefly: ignore [missing-import]
 import asyncpg
 from dotenv import load_dotenv
+
 load_dotenv()
 
-from src.simulations.db.bank.db.client import init_db, get_async_session_maker
-from src.simulations.db.bank.db.models import Account, Card, Transaction, Tariff, AutoPayment
+from src.simulations.db.bank.db.client import get_async_session_maker, init_db
+from src.simulations.db.bank.db.models import (
+    Account,
+    AutoPayment,
+    Card,
+    Tariff,
+    Transaction,
+)
 
 AsyncSessionLocal = get_async_session_maker()
 
+
 def random_date_past_months(months=3):
-    start_date = datetime.now() - timedelta(days=months*30)
+    start_date = datetime.now() - timedelta(days=months * 30)
     end_date = datetime.now()
     delta = end_date - start_date
     random_days = random.randrange(delta.days)
-    random_seconds = random.randrange(24*60*60)
+    random_seconds = random.randrange(24 * 60 * 60)
     return start_date + timedelta(days=random_days, seconds=random_seconds)
+
 
 from src.simulations.core.utils.db_utils import validate_db_name
 
+
 async def create_database_if_not_exists():
-    url = os.getenv("BANK_DATABASE_URL", "postgresql+asyncpg://agent_user:agent_password@localhost:15432/bank_db")
+    url = os.getenv(
+        "BANK_DATABASE_URL",
+        "postgresql+asyncpg://agent_user:agent_password@localhost:15432/bank_db",
+    )
     parsed = urlparse(url.replace("postgresql+asyncpg://", "postgresql://"))
     raw_db_name = parsed.path.lstrip("/")
     db_name = validate_db_name(raw_db_name)
-    
+
     # URL для подключения к системной базе postgres
     sys_url = url.replace(f"/{raw_db_name}", "/postgres")
     sys_url_asyncpg = sys_url.replace("postgresql+asyncpg://", "postgres://")
-    
+
     try:
         print(f"Подключаемся к {sys_url_asyncpg} для создания БД {db_name}...")
         conn = await asyncpg.connect(sys_url_asyncpg)
@@ -45,39 +59,75 @@ async def create_database_if_not_exists():
     except Exception as e:
         print(f"⚠️ Ошибка при создании БД (возможно она уже есть или нет прав): {e}")
 
+
 async def seed_data():
     print("Создаем таблицы...")
     await init_db()
-    
+
     async with AsyncSessionLocal() as session:
         # Проверяем, есть ли уже данные (чтобы не дублировать)
         # Если хотим пересоздавать — можно добавить Base.metadata.drop_all(engine) в init_db
-        
+
         # 1. Создаем тарифы
         print("Создаем тарифы...")
         tariffs_data = [
-            Tariff(name="Базовый", service_cost=100, non_sbp_limit=20000, sbp_limit=30000000, cash_withdrawal_limit=100000, cash_withdrawal_fee=100, transfer_over_limit_fee_percent=2.0, deposit_fee=0),
-            Tariff(name="Зарплатный", service_cost=0, non_sbp_limit=20000, sbp_limit=30000000, cash_withdrawal_limit=100000, cash_withdrawal_fee=100, transfer_over_limit_fee_percent=2.0, deposit_fee=0),
-            Tariff(name="Льготный", service_cost=0, non_sbp_limit=0, sbp_limit=30000000, cash_withdrawal_limit=15000, cash_withdrawal_fee=100, transfer_over_limit_fee_percent=2.0, deposit_fee=0),
+            Tariff(
+                name="Базовый",
+                service_cost=100,
+                non_sbp_limit=20000,
+                sbp_limit=30000000,
+                cash_withdrawal_limit=100000,
+                cash_withdrawal_fee=100,
+                transfer_over_limit_fee_percent=2.0,
+                deposit_fee=0,
+            ),
+            Tariff(
+                name="Зарплатный",
+                service_cost=0,
+                non_sbp_limit=20000,
+                sbp_limit=30000000,
+                cash_withdrawal_limit=100000,
+                cash_withdrawal_fee=100,
+                transfer_over_limit_fee_percent=2.0,
+                deposit_fee=0,
+            ),
+            Tariff(
+                name="Льготный",
+                service_cost=0,
+                non_sbp_limit=0,
+                sbp_limit=30000000,
+                cash_withdrawal_limit=15000,
+                cash_withdrawal_fee=100,
+                transfer_over_limit_fee_percent=2.0,
+                deposit_fee=0,
+            ),
         ]
         session.add_all(tariffs_data)
         await session.commit()
-        
+
         # 2. Создаем клиентов
         print("Используем фиксированные UUID для клиентов...")
         client_ids = [
-            "11111111-1111-1111-1111-111111111111", # Иванов Иван Иванович
-            "22222222-2222-2222-2222-222222222222", # Петров Петр Петрович
-            "33333333-3333-3333-3333-333333333333"  # Васильков Василий Васильевич
+            "11111111-1111-1111-1111-111111111111",  # Иванов Иван Иванович
+            "22222222-2222-2222-2222-222222222222",  # Петров Петр Петрович
+            "33333333-3333-3333-3333-333333333333",  # Васильков Василий Васильевич
         ]
-        
+
         # 3. Создаем счета, карты и транзакции для каждого
         print("Создаем счета, карты и транзакции...")
-        
-        operation_types_expense = ['transfer_sbp', 'transfer_non_sbp', 'purchase']
-        operation_types_income = ['transfer_sbp', 'salary', 'cash_deposit', 'top_up']
-        merchants = ["Кофемания", "Пятерочка", "Яндекс.Такси", "Аптека", "АЗС Лукойл", "ВкусВилл", "Ресторан"]
-        
+
+        operation_types_expense = ["transfer_sbp", "transfer_non_sbp", "purchase"]
+        operation_types_income = ["transfer_sbp", "salary", "cash_deposit", "top_up"]
+        merchants = [
+            "Кофемания",
+            "Пятерочка",
+            "Яндекс.Такси",
+            "Аптека",
+            "АЗС Лукойл",
+            "ВкусВилл",
+            "Ресторан",
+        ]
+
         for client_id in client_ids:
             # Даем каждому клиенту 1-2 счета
             num_accounts = random.randint(1, 2)
@@ -88,11 +138,11 @@ async def seed_data():
                     account_number=str(random.randint(40817810000000000000, 40817810099999999999)),
                     balance=Decimal(str(round(random.uniform(10000, 1500000), 2))),
                     currency="RUB",
-                    tariff_id=tariff.id
+                    tariff_id=tariff.id,
                 )
                 session.add(account)
-                await session.flush() # Получаем account.id
-                
+                await session.flush()  # Получаем account.id
+
                 # Автоплатежи (50% шанс)
                 if random.random() > 0.5:
                     ap = AutoPayment(
@@ -100,26 +150,26 @@ async def seed_data():
                         amount=Decimal(str(round(random.uniform(500, 5000), 2))),
                         recipient=random.choice(merchants),
                         schedule="monthly",
-                        next_payment_date=date.today() + timedelta(days=random.randint(1, 10))
+                        next_payment_date=date.today() + timedelta(days=random.randint(1, 10)),
                     )
                     session.add(ap)
-                
+
                 # Карты для счета
                 num_cards = random.randint(1, 3)
                 for _ in range(num_cards):
                     card = Card(
                         account_id=account.id,
                         card_number=str(random.randint(2202000000000000, 2202999999999999)),
-                        status=random.choices(["active", "blocked", "frozen"], weights=[0.8, 0.1, 0.1])[0]
+                        status=random.choices(["active", "blocked", "frozen"], weights=[0.8, 0.1, 0.1])[0],
                     )
                     session.add(card)
-                
+
                 # 30-50 транзакций
                 num_tx = random.randint(30, 50)
                 for _ in range(num_tx):
                     is_income = random.choice([True, False])
                     tx_date_time = random_date_past_months(3)
-                    
+
                     if is_income:
                         category = "income"
                         op_type = random.choice(operation_types_income)
@@ -130,11 +180,11 @@ async def seed_data():
                         op_type = random.choice(operation_types_expense)
                         amount = round(random.uniform(100, 15000), 2)
                         desc = f"Оплата: {random.choice(merchants)}" if op_type == "purchase" else f"Перевод: {op_type}"
-                    
+
                     commission = 0.00
                     if category == "expense" and op_type == "transfer_non_sbp" and random.random() > 0.5:
-                        commission = round(amount * 0.02, 2) # 2% комиссия
-                        
+                        commission = round(amount * 0.02, 2)  # 2% комиссия
+
                     tx = Transaction(
                         account_id=account.id,
                         category=category,
@@ -142,18 +192,23 @@ async def seed_data():
                         amount=Decimal(str(round(amount, 2))),
                         commission=Decimal(str(round(commission, 2))),
                         description=desc,
-                        status=random.choices(["completed", "failed", "pending"], weights=[0.9, 0.05, 0.05])[0],
+                        status=random.choices(
+                            ["completed", "failed", "pending"],
+                            weights=[0.9, 0.05, 0.05],
+                        )[0],
                         date=tx_date_time.date(),
-                        time=tx_date_time.time()
+                        time=tx_date_time.time(),
                     )
                     session.add(tx)
-                    
+
         await session.commit()
         print("✅ Сидирование успешно завершено! Данные сгенерированы.")
+
 
 async def main():
     await create_database_if_not_exists()
     await seed_data()
+
 
 if __name__ == "__main__":
     asyncio.run(main())

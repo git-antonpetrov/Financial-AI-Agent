@@ -6,25 +6,25 @@
 """
 
 import os
-import sys
 import threading
-from typing import Optional, Dict, Any, List
+from typing import Any
+
 import requests
 
 try:
     from src.admin_client.backend.core.crypto.cert_validator import (
-        find_root_ca_in_windows_store,
-        find_client_cert_in_windows_store,
         export_windows_cert_to_cache,
         find_certificate_file,
+        find_client_cert_in_windows_store,
+        find_root_ca_in_windows_store,
     )
 except ImportError:
     try:
         from core.crypto.cert_validator import (
-            find_root_ca_in_windows_store,
-            find_client_cert_in_windows_store,
             export_windows_cert_to_cache,
             find_certificate_file,
+            find_client_cert_in_windows_store,
+            find_root_ca_in_windows_store,
         )
     except ImportError:
         find_root_ca_in_windows_store = None
@@ -35,17 +35,14 @@ except ImportError:
 
 class RemoteClientError(Exception):
     """Базовое исключение для ошибок связи с удаленным сервером."""
-    pass
 
 
 class AuthenticationError(RemoteClientError):
     """Исключение при ошибке аутентификации (неверный пароль, 2FA код или сессия)."""
-    pass
 
 
 class SessionExpiredError(RemoteClientError):
     """Исключение, когда сессия администратора окончательно истекла и требуется повторный вход."""
-    pass
 
 
 class RemoteAdminClient:
@@ -57,32 +54,32 @@ class RemoteAdminClient:
 
     def __init__(
         self,
-        server_url: Optional[str] = None,
-        ca_cert_path: Optional[str] = None,
-        client_cert_path: Optional[str] = None,
-        client_key_path: Optional[str] = None,
+        server_url: str | None = None,
+        ca_cert_path: str | None = None,
+        client_cert_path: str | None = None,
+        client_key_path: str | None = None,
     ):
         self.server_url = server_url.rstrip("/") if server_url else ""
-        self.access_token: Optional[str] = None
-        self.refresh_token: Optional[str] = None
-        self.username: Optional[str] = None
-        self.role: Optional[str] = None
+        self.access_token: str | None = None
+        self.refresh_token: str | None = None
+        self.username: str | None = None
+        self.role: str | None = None
 
         self.ca_cert_path = ca_cert_path
         self.client_cert_path = client_cert_path
         self.client_key_path = client_key_path
 
         self._lock = threading.Lock()
-        self._contentai_cache: Optional[Dict[str, Any]] = None
+        self._contentai_cache: dict[str, Any] | None = None
 
         self.session = requests.Session()
         self.configure_mtls(ca_cert_path, client_cert_path, client_key_path)
 
     def configure_mtls(
         self,
-        ca_cert_path: Optional[str] = None,
-        client_cert_path: Optional[str] = None,
-        client_key_path: Optional[str] = None,
+        ca_cert_path: str | None = None,
+        client_cert_path: str | None = None,
+        client_key_path: str | None = None,
     ) -> None:
         """
         Настраивает взаимную аутентификацию TLS (mTLS) на сессии requests.
@@ -95,12 +92,16 @@ class RemoteAdminClient:
                 found_ca = find_certificate_file(
                     custom_path=resolved_ca,
                     env_var="CA_CERT_PATH",
-                    default_filenames=("ca.crt",)
+                    default_filenames=("ca.crt",),
                 )
                 if found_ca:
                     resolved_ca = found_ca
 
-        if (not resolved_ca or not os.path.exists(resolved_ca)) and find_root_ca_in_windows_store and export_windows_cert_to_cache:
+        if (
+            (not resolved_ca or not os.path.exists(resolved_ca))
+            and find_root_ca_in_windows_store
+            and export_windows_cert_to_cache
+        ):
             win_ca = find_root_ca_in_windows_store()
             if win_ca:
                 resolved_ca = export_windows_cert_to_cache(win_ca[0], "windows_remote_root_ca.crt")
@@ -116,12 +117,16 @@ class RemoteAdminClient:
                 found_cert = find_certificate_file(
                     custom_path=resolved_cert,
                     env_var="ADMIN_CLIENT_CERT_PATH",
-                    default_filenames=("admin_client.crt",)
+                    default_filenames=("admin_client.crt",),
                 )
                 if found_cert:
                     resolved_cert = found_cert
 
-        if (not resolved_cert or not os.path.exists(resolved_cert)) and find_client_cert_in_windows_store and export_windows_cert_to_cache:
+        if (
+            (not resolved_cert or not os.path.exists(resolved_cert))
+            and find_client_cert_in_windows_store
+            and export_windows_cert_to_cache
+        ):
             win_client = find_client_cert_in_windows_store()
             if win_client:
                 resolved_cert = export_windows_cert_to_cache(win_client[0], "windows_remote_admin_client.crt")
@@ -136,7 +141,7 @@ class RemoteAdminClient:
                 found_key = find_certificate_file(
                     custom_path=resolved_key,
                     env_var="ADMIN_CLIENT_KEY_PATH",
-                    default_filenames=("admin_client.key",)
+                    default_filenames=("admin_client.key",),
                 )
                 if found_key:
                     resolved_key = found_key
@@ -160,7 +165,7 @@ class RemoteAdminClient:
         with self._lock:
             return bool(self.access_token)
 
-    def get_session_info(self) -> Dict[str, Any]:
+    def get_session_info(self) -> dict[str, Any]:
         """Возвращает текущую информацию о сессии для клиентского UI."""
         with self._lock:
             return {
@@ -177,8 +182,8 @@ class RemoteAdminClient:
         server_url: str,
         username: str = "admin",
         password: str = "",
-        otp_code: str = ""
-    ) -> Dict[str, Any]:
+        otp_code: str = "",
+    ) -> dict[str, Any]:
         """
         Выполняет вход администратора с валидацией пароля и 2FA TOTP.
         Сохраняет токены сессии в памяти процесса.
@@ -203,12 +208,7 @@ class RemoteAdminClient:
             headers["X-OTP-Code"] = otp_code.strip()
 
         try:
-            resp = self.session.post(
-                endpoint,
-                data=form_data,
-                headers=headers,
-                timeout=15.0
-            )
+            resp = self.session.post(endpoint, data=form_data, headers=headers, timeout=15.0)
         except requests.exceptions.SSLError as e:
             raise AuthenticationError(f"Ошибка TLS/mTLS рукопожатия с сервером: {e}")
         except requests.exceptions.RequestException as e:
@@ -226,7 +226,7 @@ class RemoteAdminClient:
                 "status": "ok",
                 "username": self.username,
                 "role": self.role,
-                "server_url": self.server_url
+                "server_url": self.server_url,
             }
 
         # Обработка статусных ошибок
@@ -264,7 +264,7 @@ class RemoteAdminClient:
                 endpoint,
                 json={"refresh_token": cur_refresh},
                 headers={"Content-Type": "application/json"},
-                timeout=10.0
+                timeout=10.0,
             )
             if resp.status_code == 200:
                 data = resp.json()
@@ -298,31 +298,25 @@ class RemoteAdminClient:
                     f"{url}/api/auth/logout",
                     headers={"Authorization": f"Bearer {token}"},
                     json={"refresh_token": r_token},
-                    timeout=5.0
+                    timeout=5.0,
                 )
             except Exception:
                 pass
 
-    def pair_2fa(self, username: str, password: str) -> Dict[str, Any]:
+    def pair_2fa(self, username: str, password: str) -> dict[str, Any]:
         """Запрашивает первичные параметры привязки 2FA (QR-код и Secret)."""
         if not self.server_url:
             raise AuthenticationError("Не указан адрес сервера")
         resp = self.session.post(
             f"{self.server_url}/api/auth/2fa/pair",
             json={"username": username, "password": password},
-            timeout=10.0
+            timeout=10.0,
         )
         if not resp.ok:
             raise AuthenticationError(f"Ошибка генерации 2FA: {resp.text}")
         return resp.json()
 
-    def request(
-        self,
-        method: str,
-        path: str,
-        auto_refresh: bool = True,
-        **kwargs
-    ) -> requests.Response:
+    def request(self, method: str, path: str, auto_refresh: bool = True, **kwargs) -> requests.Response:
         """
         Выполняет авторизованный запрос к удаленному серверу по mTLS
         с прозрачным обновлением токена доступа при ошибке 401.
@@ -359,65 +353,57 @@ class RemoteAdminClient:
 
     # --- МЕТОДЫ УПРАВЛЕНИЯ АГЕНТАМИ ---
 
-    def get_agents(self) -> List[Dict[str, Any]]:
+    def get_agents(self) -> list[dict[str, Any]]:
         """Возвращает список всех зарегистрированных агентов системы."""
         resp = self.request("GET", "/api/agents")
         resp.raise_for_status()
         return resp.json()
 
-    def suspend_agent(self, agent_name: str) -> Dict[str, Any]:
+    def suspend_agent(self, agent_name: str) -> dict[str, Any]:
         """Приостанавливает операции указанного агента."""
         resp = self.request("POST", f"/api/agents/{agent_name}/suspend")
         resp.raise_for_status()
         return resp.json()
 
-    def reactivate_agent(self, agent_name: str) -> Dict[str, Any]:
+    def reactivate_agent(self, agent_name: str) -> dict[str, Any]:
         """Возобновляет работу приостановленного агента."""
         resp = self.request("POST", f"/api/agents/{agent_name}/reactivate")
         resp.raise_for_status()
         return resp.json()
 
-    def revoke_agent(self, agent_name: str, kid: Optional[str] = None, reason: str = "Compromised") -> Dict[str, Any]:
+    def revoke_agent(self, agent_name: str, kid: str | None = None, reason: str = "Compromised") -> dict[str, Any]:
         """Отзывает криптографический ключ агента (Instant Revocation)."""
         resp = self.request(
             "POST",
             f"/api/agents/{agent_name}/revoke",
-            json={"agent_name": agent_name, "kid": kid, "reason": reason}
+            json={"agent_name": agent_name, "kid": kid, "reason": reason},
         )
         resp.raise_for_status()
         return resp.json()
 
     # --- МЕТОДЫ УПРАВЛЕНИЯ ЗАЯВКАМИ НА ДОКУМЕНТЫ ---
 
-    def get_agent_requests(self) -> List[Dict[str, Any]]:
+    def get_agent_requests(self) -> list[dict[str, Any]]:
         """Возвращает список заявок на нормативные документы от агентов."""
         resp = self.request("GET", "/api/agent-requests")
         resp.raise_for_status()
         return resp.json()
 
-    def approve_agent_requests(self, request_ids: List[int]) -> Dict[str, Any]:
+    def approve_agent_requests(self, request_ids: list[int]) -> dict[str, Any]:
         """Одобряет выбранные заявки агентов на документы."""
-        resp = self.request(
-            "POST",
-            "/api/agent-requests/approve",
-            json={"request_ids": request_ids}
-        )
+        resp = self.request("POST", "/api/agent-requests/approve", json={"request_ids": request_ids})
         resp.raise_for_status()
         return resp.json()
 
-    def reject_agent_requests(self, request_ids: List[int]) -> Dict[str, Any]:
+    def reject_agent_requests(self, request_ids: list[int]) -> dict[str, Any]:
         """Отклоняет выбранные заявки агентов."""
-        resp = self.request(
-            "POST",
-            "/api/agent-requests/reject",
-            json={"request_ids": request_ids}
-        )
+        resp = self.request("POST", "/api/agent-requests/reject", json={"request_ids": request_ids})
         resp.raise_for_status()
         return resp.json()
 
     # --- МЕТОДЫ КОНФИГУРАЦИИ RAG ---
 
-    def get_contentai_config(self) -> Dict[str, Any]:
+    def get_contentai_config(self) -> dict[str, Any]:
         """
         Безопасно запрашивает учетные данные сервиса Content AI (OCR) с сервера.
         Кэширует конфигурацию в памяти бэкенда, не передавая ее во фронтенд.
@@ -434,18 +420,22 @@ class RemoteAdminClient:
 
     # --- МЕТОДЫ УПРАВЛЕНИЯ КЛЮЧАМИ АГЕНТОВ ---
 
-    def get_agent_keys(self, agent_name: str) -> List[Dict[str, Any]]:
+    def get_agent_keys(self, agent_name: str) -> list[dict[str, Any]]:
         """Возвращает историю и текущее состояние публичных ключей агента."""
         resp = self.request("GET", f"/api/agents/{agent_name}/keys")
         resp.raise_for_status()
         return resp.json()
 
-    def rotate_agent_key(self, agent_name: str, new_public_key: str, ttl_days: int = 90) -> Dict[str, Any]:
+    def rotate_agent_key(self, agent_name: str, new_public_key: str, ttl_days: int = 90) -> dict[str, Any]:
         """Выполняет принудительную ротацию публичного ключа агента."""
         resp = self.request(
             "POST",
             f"/api/agents/{agent_name}/rotate",
-            json={"agent_name": agent_name, "new_public_key": new_public_key, "ttl_days": ttl_days}
+            json={
+                "agent_name": agent_name,
+                "new_public_key": new_public_key,
+                "ttl_days": ttl_days,
+            },
         )
         resp.raise_for_status()
         return resp.json()
@@ -456,12 +446,12 @@ class RemoteAdminClient:
         self,
         limit: int = 50,
         offset: int = 0,
-        actor: Optional[str] = None,
-        action: Optional[str] = None,
-        status: Optional[str] = None
-    ) -> Dict[str, Any]:
+        actor: str | None = None,
+        action: str | None = None,
+        status: str | None = None,
+    ) -> dict[str, Any]:
         """Возвращает страницу записей неизменяемого журнала аудита."""
-        params: Dict[str, Any] = {"limit": limit, "offset": offset}
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
         if actor:
             params["actor"] = actor
         if action:
@@ -472,13 +462,13 @@ class RemoteAdminClient:
         resp.raise_for_status()
         return resp.json()
 
-    def verify_audit_log(self) -> Dict[str, Any]:
+    def verify_audit_log(self) -> dict[str, Any]:
         """Криптографически проверяет целостность всей цепочки хешей журнала аудита (Audit Trail Hash-Chain)."""
         resp = self.request("GET", "/api/audit/verify")
         resp.raise_for_status()
         return resp.json()
 
-    def get_audit_summary(self) -> Dict[str, Any]:
+    def get_audit_summary(self) -> dict[str, Any]:
         """Возвращает сводную статистику по журналу аудита и статусу целостности."""
         resp = self.request("GET", "/api/audit/summary")
         resp.raise_for_status()
@@ -486,12 +476,12 @@ class RemoteAdminClient:
 
     # --- СТАТУС ВЗАИМНОГО TLS (mTLS) ---
 
-    def get_mtls_status(self) -> Dict[str, Any]:
+    def get_mtls_status(self) -> dict[str, Any]:
         """Возвращает информацию о текущем статусе mTLS сессии и настроенных сертификатах."""
         return {
             "server_url": self.server_url,
             "mtls_configured": bool(self.session.cert),
-            "ca_configured": bool(self.session.verify and self.session.verify != True),
+            "ca_configured": bool(self.session.verify and self.session.verify is not True),
             "ca_cert_path": self.ca_cert_path,
             "client_cert_path": self.client_cert_path,
             "client_key_path": self.client_key_path,

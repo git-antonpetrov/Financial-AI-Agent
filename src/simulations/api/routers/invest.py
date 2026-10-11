@@ -1,25 +1,34 @@
-from decimal import Decimal
-from typing import Optional, List
-from datetime import datetime
-from dateutil.relativedelta import relativedelta
 import random
-from fastapi import APIRouter, HTTPException, Depends, Request, Response
-from sqlalchemy.future import select
-from pydantic import BaseModel, Field
+from datetime import datetime
+from decimal import Decimal
 
-from src.simulations.db.invest.db.client import get_async_session_maker as get_invest_session
-from src.simulations.db.bank.db.client import get_async_session_maker as get_bank_session
-from src.simulations.db.invest.db.models import InvestmentStrategy, SavingsAccount, Deposit, BrokerAccount
-from src.simulations.db.bank.db.models import Account, Transaction
-from src.simulations.core.utils.console_logger import log_info, log_error, log_success
+from dateutil.relativedelta import relativedelta
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from pydantic import BaseModel, Field
+from sqlalchemy.future import select
+
 from src.simulations.api.core.auth import verify_invest_token
-from src.simulations.core.crypto import get_receipt_signer
 from src.simulations.api.schemas.responses import (
-    InvestmentStrategyResponse,
-    SavingsAccountResponse,
-    DepositResponse,
     BrokerAccountResponse,
+    DepositResponse,
+    InvestmentStrategyResponse,
     PortfolioResponse,
+    SavingsAccountResponse,
+)
+from src.simulations.core.crypto import get_receipt_signer
+from src.simulations.core.utils.console_logger import log_error, log_info, log_success
+from src.simulations.db.bank.db.client import (
+    get_async_session_maker as get_bank_session,
+)
+from src.simulations.db.bank.db.models import Account, Transaction
+from src.simulations.db.invest.db.client import (
+    get_async_session_maker as get_invest_session,
+)
+from src.simulations.db.invest.db.models import (
+    BrokerAccount,
+    Deposit,
+    InvestmentStrategy,
+    SavingsAccount,
 )
 
 router = APIRouter(dependencies=[Depends(verify_invest_token)])
@@ -29,16 +38,13 @@ def invest_db():
     """Фабрика для получения сессии инвестиционной БД."""
     return get_invest_session()()
 
+
 def bank_db():
     """Фабрика для получения сессии банковской БД."""
     return get_bank_session()()
 
-async def generate_unique_invest_account_number(
-    db,
-    model_cls: type,
-    prefix: str,
-    max_attempts: int = 10
-) -> str:
+
+async def generate_unique_invest_account_number(db, model_cls: type, prefix: str, max_attempts: int = 10) -> str:
     """Генерирует уникальный 20-значный номер счета с проверкой коллизий в базе данных."""
     for _ in range(max_attempts):
         candidate = f"{prefix}{random.randint(1000000000000000, 9999999999999999)}"
@@ -47,53 +53,70 @@ async def generate_unique_invest_account_number(
             return candidate
     raise HTTPException(
         status_code=500,
-        detail=f"Не удалось сгенерировать уникальный номер счета {model_cls.__name__}"
+        detail=f"Не удалось сгенерировать уникальный номер счета {model_cls.__name__}",
     )
+
 
 # --- Схемы данных (Pydantic) ---
 
+
 class OpenProductRequest(BaseModel):
     """Схема запроса для открытия инвестиционного продукта (вклад, копилка, брокерский счет)."""
+
     client_id: str
     from_bank_account_id: str
     initial_amount: Decimal = Field(..., gt=Decimal("0.00"), description="Начальная сумма (строго больше нуля)")
-    term_months: Optional[int] = Field(None, gt=0, description="Срок вклада в месяцах (строго больше нуля)")
+    term_months: int | None = Field(None, gt=0, description="Срок вклада в месяцах (строго больше нуля)")
+
 
 class StrategySubscription(BaseModel):
     """Схема для управления подпиской на инвестиционную стратегию."""
-    strategy_id: Optional[str] = None
+
+    strategy_id: str | None = None
+
 
 class CloseProductRequest(BaseModel):
     """Схема для закрытия продукта."""
+
     to_bank_account_id: str
+
 
 # --- Вспомогательные функции компенсации (Saga pattern) ---
 
-async def _compensate_bank_transfer(bank_account_id: str, amount: Decimal, reason: str, op_type: str = "transfer_in_compensation"):
+
+async def _compensate_bank_transfer(
+    bank_account_id: str,
+    amount: Decimal,
+    reason: str,
+    op_type: str = "transfer_in_compensation",
+):
     """
     Компенсационная транзакция: возвращает списанные средства на банковский счет в случае сбоя целевой системы.
     """
     try:
         async with bank_db() as bdb:
-            acc = await bdb.scalar(
-                select(Account)
-                .where(Account.id == bank_account_id)
-                .with_for_update()
-            )
+            acc = await bdb.scalar(select(Account).where(Account.id == bank_account_id).with_for_update())
             if acc:
                 acc.balance = Decimal(str(acc.balance)) + amount
                 tx = Transaction(
                     account_id=acc.id,
-                    category='income',
+                    category="income",
                     operation_type=op_type,
                     amount=amount,
-                    description=f"Компенсация: {reason}"
+                    description=f"Компенсация: {reason}",
                 )
                 bdb.add(tx)
                 await bdb.commit()
-                log_info("InvestAPI", f"Успешная компенсация {amount} на счет {bank_account_id} ({reason})")
+                log_info(
+                    "InvestAPI",
+                    f"Успешная компенсация {amount} на счет {bank_account_id} ({reason})",
+                )
     except Exception as comp_err:
-        log_error("InvestAPI", f"КРИТИЧЕСКИЙ СБОЙ КОМПЕНСАЦИИ на счете {bank_account_id}: {comp_err}")
+        log_error(
+            "InvestAPI",
+            f"КРИТИЧЕСКИЙ СБОЙ КОМПЕНСАЦИИ на счете {bank_account_id}: {comp_err}",
+        )
+
 
 async def _compensate_close_deposit(deposit_id: str, amount: Decimal):
     """
@@ -101,18 +124,21 @@ async def _compensate_close_deposit(deposit_id: str, amount: Decimal):
     """
     try:
         async with invest_db() as idb:
-            dep = await idb.scalar(
-                select(Deposit)
-                .where(Deposit.id == deposit_id)
-                .with_for_update()
-            )
+            dep = await idb.scalar(select(Deposit).where(Deposit.id == deposit_id).with_for_update())
             if dep:
                 dep.status = "active"
                 dep.balance = amount
                 await idb.commit()
-                log_info("InvestAPI", f"Успешная компенсация: восстановлен статус и баланс вклада {deposit_id}")
+                log_info(
+                    "InvestAPI",
+                    f"Успешная компенсация: восстановлен статус и баланс вклада {deposit_id}",
+                )
     except Exception as comp_err:
-        log_error("InvestAPI", f"КРИТИЧЕСКИЙ СБОЙ ВОССТАНОВЛЕНИЯ вклада {deposit_id}: {comp_err}")
+        log_error(
+            "InvestAPI",
+            f"КРИТИЧЕСКИЙ СБОЙ ВОССТАНОВЛЕНИЯ вклада {deposit_id}: {comp_err}",
+        )
+
 
 async def _compensate_close_savings(savings_id: str, amount: Decimal):
     """
@@ -120,29 +146,34 @@ async def _compensate_close_savings(savings_id: str, amount: Decimal):
     """
     try:
         async with invest_db() as idb:
-            sav = await idb.scalar(
-                select(SavingsAccount)
-                .where(SavingsAccount.id == savings_id)
-                .with_for_update()
-            )
+            sav = await idb.scalar(select(SavingsAccount).where(SavingsAccount.id == savings_id).with_for_update())
             if sav:
                 sav.status = "active"
                 sav.balance = amount
                 await idb.commit()
-                log_info("InvestAPI", f"Успешная компенсация: восстановлен статус и баланс копилки {savings_id}")
+                log_info(
+                    "InvestAPI",
+                    f"Успешная компенсация: восстановлен статус и баланс копилки {savings_id}",
+                )
     except Exception as comp_err:
-        log_error("InvestAPI", f"КРИТИЧЕСКИЙ СБОЙ ВОССТАНОВЛЕНИЯ копилки {savings_id}: {comp_err}")
+        log_error(
+            "InvestAPI",
+            f"КРИТИЧЕСКИЙ СБОЙ ВОССТАНОВЛЕНИЯ копилки {savings_id}: {comp_err}",
+        )
+
 
 # --- Эндпоинты ---
 
-@router.get("/strategies", response_model=List[InvestmentStrategyResponse])
-async def get_strategies() -> List[InvestmentStrategyResponse]:
+
+@router.get("/strategies", response_model=list[InvestmentStrategyResponse])
+async def get_strategies() -> list[InvestmentStrategyResponse]:
     """
     Получить список всех доступных инвестиционных стратегий.
     """
     async with invest_db() as db:
         result = await db.execute(select(InvestmentStrategy))
         return [InvestmentStrategyResponse.model_validate(s) for s in result.scalars().all()]
+
 
 # Базовые параметры тарифной сетки финансовых продуктов
 PRODUCT_CONDITIONS = {
@@ -155,17 +186,17 @@ PRODUCT_CONDITIONS = {
     "savings_account_rate": Decimal("10.00"),
 }
 
+
 def get_product_terms() -> dict:
     """Возвращает актуальные тарифные условия банка по депозитам и накопительным счетам."""
     return {
         "key_rate": PRODUCT_CONDITIONS["key_rate"],
-        "deposit_rates": {
-            k: v for k, v in PRODUCT_CONDITIONS["deposit_rates"].items()
-        },
+        "deposit_rates": {k: v for k, v in PRODUCT_CONDITIONS["deposit_rates"].items()},
         "savings_account_rate": PRODUCT_CONDITIONS["savings_account_rate"],
     }
 
-def calculate_deposit_rate(term_months: Optional[int]) -> Decimal:
+
+def calculate_deposit_rate(term_months: int | None) -> Decimal:
     """Рассчитывает процентную ставку по вкладу в зависимости от выбранного срока."""
     if term_months == 6 and "6_months" in PRODUCT_CONDITIONS["deposit_rates"]:
         return PRODUCT_CONDITIONS["deposit_rates"]["6_months"]
@@ -173,9 +204,11 @@ def calculate_deposit_rate(term_months: Optional[int]) -> Decimal:
         return PRODUCT_CONDITIONS["deposit_rates"]["12_months"]
     return PRODUCT_CONDITIONS["default_deposit_rate"]
 
+
 def calculate_savings_rate() -> Decimal:
     """Возвращает актуальную процентную ставку для накопительного счета."""
     return PRODUCT_CONDITIONS["savings_account_rate"]
+
 
 @router.get("/products/terms")
 async def get_terms():
@@ -184,22 +217,26 @@ async def get_terms():
     """
     return get_product_terms()
 
+
 @router.get("/portfolio/{client_id}", response_model=PortfolioResponse)
 async def get_portfolio(client_id: str) -> PortfolioResponse:
     """
     Получить сводный инвестиционный портфель клиента (копилки, вклады, брокерские счета).
     """
     async with invest_db() as db:
-        savings = (await db.execute(select(SavingsAccount).where(SavingsAccount.client_id == client_id))).scalars().all()
+        savings = (
+            (await db.execute(select(SavingsAccount).where(SavingsAccount.client_id == client_id))).scalars().all()
+        )
         deposits = (await db.execute(select(Deposit).where(Deposit.client_id == client_id))).scalars().all()
         brokers = (await db.execute(select(BrokerAccount).where(BrokerAccount.client_id == client_id))).scalars().all()
-        
+
         log_info("InvestAPI", f"Собран портфель для клиента {client_id}")
         return PortfolioResponse(
             savings_accounts=[SavingsAccountResponse.model_validate(s) for s in savings],
             deposits=[DepositResponse.model_validate(d) for d in deposits],
-            broker_accounts=[BrokerAccountResponse.model_validate(b) for b in brokers]
+            broker_accounts=[BrokerAccountResponse.model_validate(b) for b in brokers],
         )
+
 
 @router.post("/deposits/open", response_model=DepositResponse)
 async def open_deposit(
@@ -208,35 +245,35 @@ async def open_deposit(
     response: Response = None,
 ) -> DepositResponse:
     """
-    Открыть новый вклад. 
+    Открыть новый вклад.
     Кросс-доменная операция: списывает средства со счета в банке и создает актив в инвестициях.
     Реализует Saga-паттерн с автоматической компенсацией при сбое на шаге создания актива.
     """
     if not req.term_months:
         log_error("InvestAPI", "Попытка открыть вклад без указания срока (term_months)")
         raise HTTPException(400, "Для вклада необходимо указать срок (term_months)")
-    
+
     # 1. Списываем средства со счета в банке
     async with bank_db() as bdb:
-        acc = await bdb.scalar(
-            select(Account)
-            .where(Account.id == req.from_bank_account_id)
-            .with_for_update()
-        )
-        if not acc: raise HTTPException(404, "Банковский счет не найден")
-        
+        acc = await bdb.scalar(select(Account).where(Account.id == req.from_bank_account_id).with_for_update())
+        if not acc:
+            raise HTTPException(404, "Банковский счет не найден")
+
         acc_balance = Decimal(str(acc.balance))
         if acc_balance < req.initial_amount:
-            log_error("InvestAPI", f"Недостаточно средств на банковском счете {req.from_bank_account_id} для открытия вклада")
+            log_error(
+                "InvestAPI",
+                f"Недостаточно средств на банковском счете {req.from_bank_account_id} для открытия вклада",
+            )
             raise HTTPException(400, "Недостаточно средств на банковском счете")
-        
+
         acc.balance = acc_balance - req.initial_amount
         tx = Transaction(
             account_id=acc.id,
-            category='expense',
-            operation_type='transfer_out_invest',
+            category="expense",
+            operation_type="transfer_out_invest",
             amount=req.initial_amount,
-            description="Открытие вклада"
+            description="Открытие вклада",
         )
         bdb.add(tx)
         await bdb.commit()
@@ -245,7 +282,7 @@ async def open_deposit(
     try:
         async with invest_db() as idb:
             interest_rate = calculate_deposit_rate(req.term_months)
-            monthly_rate = interest_rate / Decimal("100") / Decimal("12")
+            monthly_rate = interest_rate / Decimal(100) / Decimal(12)
             first_payment = (req.initial_amount * monthly_rate).quantize(Decimal("0.01"))
             next_pay_date = datetime.now() + relativedelta(months=1)
             account_number = await generate_unique_invest_account_number(idb, Deposit, "4230")
@@ -257,12 +294,15 @@ async def open_deposit(
                 interest_rate=interest_rate,
                 term_months=req.term_months,
                 next_payment_date=next_pay_date,
-                next_payment_amount=first_payment
+                next_payment_amount=first_payment,
             )
             idb.add(dep)
             await idb.commit()
             await idb.refresh(dep)
-            log_success("InvestAPI", f"Вклад {dep.account_number} успешно открыт для клиента {req.client_id}")
+            log_success(
+                "InvestAPI",
+                f"Вклад {dep.account_number} успешно открыт для клиента {req.client_id}",
+            )
 
             request_nonce = None
             if request is not None:
@@ -283,18 +323,24 @@ async def open_deposit(
                 response.headers["X-Receipt-ID"] = receipt["receipt"]["receipt_id"]
             return DepositResponse.model_validate(dep)
 
-
     except Exception as e:
-        log_error("InvestAPI", f"Ошибка при открытии вклада: {e}. Запуск компенсационной транзакции...")
+        log_error(
+            "InvestAPI",
+            f"Ошибка при открытии вклада: {e}. Запуск компенсационной транзакции...",
+        )
         await _compensate_bank_transfer(
             bank_account_id=req.from_bank_account_id,
             amount=req.initial_amount,
             reason="Сбой создания вклада",
-            op_type="compensation_invest_deposit"
+            op_type="compensation_invest_deposit",
         )
         if isinstance(e, HTTPException):
             raise e
-        raise HTTPException(500, f"Ошибка создания вклада. Средства компенсированы на банковский счет: {e}")
+        raise HTTPException(
+            500,
+            f"Ошибка создания вклада. Средства компенсированы на банковский счет: {e}",
+        )
+
 
 @router.post("/savings/open", response_model=SavingsAccountResponse)
 async def open_savings(
@@ -309,24 +355,21 @@ async def open_savings(
     """
     # 1. Списание из банка
     async with bank_db() as bdb:
-        acc = await bdb.scalar(
-            select(Account)
-            .where(Account.id == req.from_bank_account_id)
-            .with_for_update()
-        )
-        if not acc: raise HTTPException(404, "Банковский счет не найден")
-        
+        acc = await bdb.scalar(select(Account).where(Account.id == req.from_bank_account_id).with_for_update())
+        if not acc:
+            raise HTTPException(404, "Банковский счет не найден")
+
         acc_balance = Decimal(str(acc.balance))
         if acc_balance < req.initial_amount:
             raise HTTPException(400, "Недостаточно средств на банковском счете")
-        
+
         acc.balance = acc_balance - req.initial_amount
         tx = Transaction(
             account_id=acc.id,
-            category='expense',
-            operation_type='transfer_out_invest',
+            category="expense",
+            operation_type="transfer_out_invest",
             amount=req.initial_amount,
-            description="Открытие накопительного счета"
+            description="Открытие накопительного счета",
         )
         bdb.add(tx)
         await bdb.commit()
@@ -335,7 +378,7 @@ async def open_savings(
     try:
         async with invest_db() as idb:
             interest_rate = calculate_savings_rate()
-            monthly_rate = interest_rate / Decimal("100") / Decimal("12")
+            monthly_rate = interest_rate / Decimal(100) / Decimal(12)
             first_payment = (req.initial_amount * monthly_rate).quantize(Decimal("0.01"))
             next_pay_date = datetime.now() + relativedelta(months=1)
             account_number = await generate_unique_invest_account_number(idb, SavingsAccount, "4081")
@@ -346,7 +389,7 @@ async def open_savings(
                 balance=req.initial_amount,
                 interest_rate=interest_rate,
                 next_payment_date=next_pay_date,
-                next_payment_amount=first_payment
+                next_payment_amount=first_payment,
             )
             idb.add(sav)
             await idb.commit()
@@ -371,16 +414,23 @@ async def open_savings(
                 response.headers["X-Receipt-ID"] = receipt["receipt"]["receipt_id"]
             return SavingsAccountResponse.model_validate(sav)
     except Exception as e:
-        log_error("InvestAPI", f"Ошибка при открытии накопительного счета: {e}. Запуск компенсационной транзакции...")
+        log_error(
+            "InvestAPI",
+            f"Ошибка при открытии накопительного счета: {e}. Запуск компенсационной транзакции...",
+        )
         await _compensate_bank_transfer(
             bank_account_id=req.from_bank_account_id,
             amount=req.initial_amount,
             reason="Сбой создания накопительного счета",
-            op_type="compensation_invest_savings"
+            op_type="compensation_invest_savings",
         )
         if isinstance(e, HTTPException):
             raise e
-        raise HTTPException(500, f"Ошибка создания накопительного счета. Средства компенсированы на банковский счет: {e}")
+        raise HTTPException(
+            500,
+            f"Ошибка создания накопительного счета. Средства компенсированы на банковский счет: {e}",
+        )
+
 
 @router.post("/broker-accounts/open", response_model=BrokerAccountResponse)
 async def open_broker_account(
@@ -395,24 +445,21 @@ async def open_broker_account(
     """
     # 1. Списание из банка
     async with bank_db() as bdb:
-        acc = await bdb.scalar(
-            select(Account)
-            .where(Account.id == req.from_bank_account_id)
-            .with_for_update()
-        )
-        if not acc: raise HTTPException(404, "Банковский счет не найден")
-        
+        acc = await bdb.scalar(select(Account).where(Account.id == req.from_bank_account_id).with_for_update())
+        if not acc:
+            raise HTTPException(404, "Банковский счет не найден")
+
         acc_balance = Decimal(str(acc.balance))
         if acc_balance < req.initial_amount:
             raise HTTPException(400, "Недостаточно средств на банковском счете")
-        
+
         acc.balance = acc_balance - req.initial_amount
         tx = Transaction(
             account_id=acc.id,
-            category='expense',
-            operation_type='transfer_out_broker',
+            category="expense",
+            operation_type="transfer_out_broker",
             amount=req.initial_amount,
-            description="Пополнение брокерского счета"
+            description="Пополнение брокерского счета",
         )
         bdb.add(tx)
         await bdb.commit()
@@ -427,7 +474,7 @@ async def open_broker_account(
                 client_id=req.client_id,
                 account_number=account_number,
                 balance=req.initial_amount,
-                next_commission_date=next_comm_date
+                next_commission_date=next_comm_date,
             )
             idb.add(broker)
             await idb.commit()
@@ -452,17 +499,22 @@ async def open_broker_account(
                 response.headers["X-Receipt-ID"] = receipt["receipt"]["receipt_id"]
             return BrokerAccountResponse.model_validate(broker)
     except Exception as e:
-        log_error("InvestAPI", f"Ошибка при открытии брокерского счета: {e}. Запуск компенсационной транзакции...")
+        log_error(
+            "InvestAPI",
+            f"Ошибка при открытии брокерского счета: {e}. Запуск компенсационной транзакции...",
+        )
         await _compensate_bank_transfer(
             bank_account_id=req.from_bank_account_id,
             amount=req.initial_amount,
             reason="Сбой создания брокерского счета",
-            op_type="compensation_invest_broker"
+            op_type="compensation_invest_broker",
         )
         if isinstance(e, HTTPException):
             raise e
-        raise HTTPException(500, f"Ошибка создания брокерского счета. Средства компенсированы на банковский счет: {e}")
-
+        raise HTTPException(
+            500,
+            f"Ошибка создания брокерского счета. Средства компенсированы на банковский счет: {e}",
+        )
 
 
 @router.post("/deposits/{deposit_id}/close")
@@ -479,16 +531,14 @@ async def close_deposit(
     Подписывает сформированный чек-ответ приватным ключом Банка (Блок 5 схемы arch.txt).
     """
     amount_to_return = Decimal("0.00")
-    
+
     async with invest_db() as idb:
-        dep = await idb.scalar(
-            select(Deposit)
-            .where(Deposit.id == deposit_id)
-            .with_for_update()
-        )
-        if not dep: raise HTTPException(404, "Вклад не найден")
-        if dep.status == "closed": raise HTTPException(400, "Вклад уже закрыт")
-        
+        dep = await idb.scalar(select(Deposit).where(Deposit.id == deposit_id).with_for_update())
+        if not dep:
+            raise HTTPException(404, "Вклад не найден")
+        if dep.status == "closed":
+            raise HTTPException(400, "Вклад уже закрыт")
+
         amount_to_return = Decimal(str(dep.balance))
         dep.status = "closed"
         dep.balance = Decimal("0.00")
@@ -496,31 +546,34 @@ async def close_deposit(
 
     try:
         async with bank_db() as bdb:
-            acc = await bdb.scalar(
-                select(Account)
-                .where(Account.id == req.to_bank_account_id)
-                .with_for_update()
-            )
-            if not acc: raise HTTPException(404, "Банковский счет не найден")
-            
+            acc = await bdb.scalar(select(Account).where(Account.id == req.to_bank_account_id).with_for_update())
+            if not acc:
+                raise HTTPException(404, "Банковский счет не найден")
+
             acc.balance = Decimal(str(acc.balance)) + amount_to_return
             tx = Transaction(
                 account_id=acc.id,
-                category='income',
-                operation_type='transfer_in_invest',
+                category="income",
+                operation_type="transfer_in_invest",
                 amount=amount_to_return,
-                description="Закрытие вклада"
+                description="Закрытие вклада",
             )
             bdb.add(tx)
             await bdb.commit()
     except Exception as e:
-        log_error("InvestAPI", f"Ошибка зачисления при закрытии вклада {deposit_id}: {e}. Компенсация статуса вклада...")
+        log_error(
+            "InvestAPI",
+            f"Ошибка зачисления при закрытии вклада {deposit_id}: {e}. Компенсация статуса вклада...",
+        )
         await _compensate_close_deposit(deposit_id, amount_to_return)
         if isinstance(e, HTTPException):
             raise e
         raise HTTPException(500, f"Ошибка зачисления средств в банк. Вклад восстановлен: {e}")
-    
-    log_info("InvestAPI", f"Вклад {deposit_id} закрыт. На счет возвращено: {amount_to_return}")
+
+    log_info(
+        "InvestAPI",
+        f"Вклад {deposit_id} закрыт. На счет возвращено: {amount_to_return}",
+    )
     request_nonce = None
     if request is not None:
         request_nonce = getattr(request.state, "enclave_nonce", None) or request.headers.get("X-Nonce")
@@ -541,6 +594,7 @@ async def close_deposit(
         "signed_receipt": receipt,
     }
 
+
 @router.post("/savings/{savings_id}/close")
 async def close_savings(
     savings_id: str,
@@ -555,16 +609,14 @@ async def close_savings(
     Подписывает сформированный чек-ответ приватным ключом Банка (Блок 5 схемы arch.txt).
     """
     amount_to_return = Decimal("0.00")
-    
+
     async with invest_db() as idb:
-        sav = await idb.scalar(
-            select(SavingsAccount)
-            .where(SavingsAccount.id == savings_id)
-            .with_for_update()
-        )
-        if not sav: raise HTTPException(404, "Накопительный счет не найден")
-        if sav.status == "closed": raise HTTPException(400, "Счет уже закрыт")
-        
+        sav = await idb.scalar(select(SavingsAccount).where(SavingsAccount.id == savings_id).with_for_update())
+        if not sav:
+            raise HTTPException(404, "Накопительный счет не найден")
+        if sav.status == "closed":
+            raise HTTPException(400, "Счет уже закрыт")
+
         amount_to_return = Decimal(str(sav.balance))
         sav.status = "closed"
         sav.balance = Decimal("0.00")
@@ -572,31 +624,34 @@ async def close_savings(
 
     try:
         async with bank_db() as bdb:
-            acc = await bdb.scalar(
-                select(Account)
-                .where(Account.id == req.to_bank_account_id)
-                .with_for_update()
-            )
-            if not acc: raise HTTPException(404, "Банковский счет не найден")
-            
+            acc = await bdb.scalar(select(Account).where(Account.id == req.to_bank_account_id).with_for_update())
+            if not acc:
+                raise HTTPException(404, "Банковский счет не найден")
+
             acc.balance = Decimal(str(acc.balance)) + amount_to_return
             tx = Transaction(
                 account_id=acc.id,
-                category='income',
-                operation_type='transfer_in_invest',
+                category="income",
+                operation_type="transfer_in_invest",
                 amount=amount_to_return,
-                description="Закрытие накопительного счета"
+                description="Закрытие накопительного счета",
             )
             bdb.add(tx)
             await bdb.commit()
     except Exception as e:
-        log_error("InvestAPI", f"Ошибка зачисления при закрытии копилки {savings_id}: {e}. Компенсация статуса накопительного счета...")
+        log_error(
+            "InvestAPI",
+            f"Ошибка зачисления при закрытии копилки {savings_id}: {e}. Компенсация статуса накопительного счета...",
+        )
         await _compensate_close_savings(savings_id, amount_to_return)
         if isinstance(e, HTTPException):
             raise e
         raise HTTPException(500, f"Ошибка зачисления средств в банк. Копилка восстановлена: {e}")
-    
-    log_info("InvestAPI", f"Копилка {savings_id} закрыта. На счет возвращено: {amount_to_return}")
+
+    log_info(
+        "InvestAPI",
+        f"Копилка {savings_id} закрыта. На счет возвращено: {amount_to_return}",
+    )
     request_nonce = None
     if request is not None:
         request_nonce = getattr(request.state, "enclave_nonce", None) or request.headers.get("X-Nonce")
@@ -618,7 +673,6 @@ async def close_savings(
     }
 
 
-
 @router.post("/broker-accounts/{account_id}/strategy/subscribe")
 async def subscribe_strategy(account_id: str, req: StrategySubscription):
     """
@@ -627,14 +681,19 @@ async def subscribe_strategy(account_id: str, req: StrategySubscription):
     """
     async with invest_db() as idb:
         acc = await idb.scalar(select(BrokerAccount).where(BrokerAccount.id == account_id))
-        if not acc: raise HTTPException(404, "Брокерский счет не найден")
-        
+        if not acc:
+            raise HTTPException(404, "Брокерский счет не найден")
+
         acc.strategy_id = req.strategy_id
         if not acc.next_commission_date:
             acc.next_commission_date = datetime.now() + relativedelta(months=1)
         await idb.commit()
-        log_info("InvestAPI", f"Брокерский счет {account_id} подписан на стратегию {req.strategy_id}")
+        log_info(
+            "InvestAPI",
+            f"Брокерский счет {account_id} подписан на стратегию {req.strategy_id}",
+        )
         return {"status": "success"}
+
 
 @router.post("/broker-accounts/{account_id}/strategy/unsubscribe")
 async def unsubscribe_strategy(account_id: str):
@@ -643,8 +702,9 @@ async def unsubscribe_strategy(account_id: str):
     """
     async with invest_db() as idb:
         acc = await idb.scalar(select(BrokerAccount).where(BrokerAccount.id == account_id))
-        if not acc: raise HTTPException(404, "Брокерский счет не найден")
-        
+        if not acc:
+            raise HTTPException(404, "Брокерский счет не найден")
+
         acc.strategy_id = None
         await idb.commit()
         log_info("InvestAPI", f"Брокерский счет {account_id} отписан от стратегии")

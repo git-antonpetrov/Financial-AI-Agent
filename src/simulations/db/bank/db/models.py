@@ -1,19 +1,34 @@
 import uuid
-from datetime import date, datetime, timezone, timedelta
-from sqlalchemy import Column, String, Numeric, Boolean, Date, Time, DateTime, ForeignKey
-from sqlalchemy.orm import relationship
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+
+from sqlalchemy import (
+    Boolean,
+    Column,
+    Date,
+    DateTime,
+    ForeignKey,
+    Numeric,
+    String,
+    Time,
+)
+from sqlalchemy.orm import relationship
+
+from src.simulations.core.crypto.at_rest import EncryptedDecimal, EncryptedText
 from src.simulations.db.bank.db.database import Base
-from src.simulations.core.crypto.at_rest import EncryptedText, EncryptedDecimal
+
 
 def generate_uuid():
     return str(uuid.uuid4())
 
+
 def get_moscow_now():
     return (datetime.now(timezone.utc) + timedelta(hours=3)).replace(tzinfo=None)
 
+
 def get_moscow_date():
     return (datetime.now(timezone.utc) + timedelta(hours=3)).date()
+
 
 def get_moscow_time():
     return (datetime.now(timezone.utc) + timedelta(hours=3)).time()
@@ -22,7 +37,7 @@ def get_moscow_time():
 class Tariff(Base):
     __tablename__ = "tariffs"
     id = Column(String, primary_key=True, default=generate_uuid)
-    name = Column(String, unique=True, nullable=False) # 'Базовый', 'Зарплатный', 'Льготный'
+    name = Column(String, unique=True, nullable=False)  # 'Базовый', 'Зарплатный', 'Льготный'
     service_cost = Column(Numeric(12, 2), default=0)
     non_sbp_limit = Column(Numeric(12, 2), default=0)
     sbp_limit = Column(Numeric(12, 2), default=30000000)
@@ -67,14 +82,16 @@ class Transaction(Base):
     id = Column(String, primary_key=True, default=generate_uuid)
     account_id = Column(String, ForeignKey("accounts.id"), nullable=False, index=True)
     category = Column(String, nullable=False)  # Категория операции: 'income', 'expense'
-    operation_type = Column(String, nullable=False)  # Тип: 'transfer_sbp', 'transfer_non_sbp', 'purchase', 'top_up', 'salary' и др.
+    operation_type = Column(
+        String, nullable=False
+    )  # Тип: 'transfer_sbp', 'transfer_non_sbp', 'purchase', 'top_up', 'salary' и др.
     amount = Column(EncryptedDecimal, nullable=False)
     commission = Column(EncryptedDecimal, default=Decimal("0.00"))
     description = Column(String)
     status = Column(String, default="completed")  # Статус: 'completed', 'failed', 'pending'
     date = Column(Date, default=get_moscow_date, index=True)
     time = Column(Time, default=get_moscow_time)
-    
+
     account = relationship("Account", back_populates="transactions")
 
 
@@ -89,7 +106,3 @@ class AutoPayment(Base):
     is_active = Column(Boolean, default=True, index=True)
 
     account = relationship("Account", back_populates="auto_payments")
-
-
-
-

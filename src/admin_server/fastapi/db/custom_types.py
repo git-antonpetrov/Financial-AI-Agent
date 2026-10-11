@@ -5,19 +5,21 @@
 
 import base64
 from typing import Any
-from sqlalchemy.types import TypeDecorator, Text
+
+from sqlalchemy.types import Text, TypeDecorator
 
 
 class EncryptedText(TypeDecorator):
     """
     SQLAlchemy тип для прозрачного шифрования текстовых данных при записи в БД (Data at Rest)
     и расшифровки при чтении с использованием алгоритма AES-256-GCM.
-    
+
     Обеспечивает обратную совместимость: если значение в БД сохранено в открытом виде (до внедрения шифрования),
     оно возвращается без изменений (safe fallback / seamless migration).
     Для зашифрованных значений (префикс ENC1 или Base64 с сигнатурой ENC1) при ошибке расшифровки
     выбрасывается исключение ValueError во избежание утечки шифротекста или молчаливого повреждения данных.
     """
+
     impl = Text
     cache_ok = True
 

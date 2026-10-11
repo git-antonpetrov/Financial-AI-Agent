@@ -1,14 +1,12 @@
 import base64
 import os
 import time
-from typing import Optional, Tuple, Union
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
-from src.simulations.core.utils.console_logger import log_error, log_warning
 from src.simulations.core.crypto.enclave_verifier import NonceStore
 
 
@@ -22,8 +20,8 @@ class OracleKeyManager:
 
     def __init__(
         self,
-        public_key_pem: Optional[str] = None,
-        private_key_pem: Optional[str] = None,
+        public_key_pem: str | None = None,
+        private_key_pem: str | None = None,
     ):
         self._public_key_pem = public_key_pem or os.getenv("ORACLE_PUBLIC_KEY_PEM")
         self._private_key_pem = private_key_pem or os.getenv("ORACLE_PRIVATE_KEY_PEM")
@@ -80,10 +78,10 @@ class OracleKeyManager:
     def get_public_key_pem(self) -> str:
         return self._public_key_pem
 
-    def get_dev_private_key(self) -> Optional[rsa.RSAPrivateKey]:
+    def get_dev_private_key(self) -> rsa.RSAPrivateKey | None:
         return self._dev_private_key
 
-    def get_private_key(self) -> Optional[rsa.RSAPrivateKey]:
+    def get_private_key(self) -> rsa.RSAPrivateKey | None:
         return self._dev_private_key
 
     def load_public_key(self) -> rsa.RSAPublicKey:
@@ -101,8 +99,8 @@ class OracleVerifier:
 
     def __init__(
         self,
-        key_manager: Optional[OracleKeyManager] = None,
-        nonce_store: Optional[NonceStore] = None,
+        key_manager: OracleKeyManager | None = None,
+        nonce_store: NonceStore | None = None,
         max_drift_seconds: int = 300,
     ):
         self.key_manager = key_manager or OracleKeyManager()
@@ -113,25 +111,28 @@ class OracleVerifier:
     def get_canonical_payload(
         contract_id: str,
         status: str,
-        oracle_name: Optional[str],
-        nonce: Optional[str] = None,
-        timestamp: Optional[Union[float, int, str]] = None,
+        oracle_name: str | None,
+        nonce: str | None = None,
+        timestamp: float | str | None = None,
     ) -> bytes:
         name = oracle_name or "default_oracle"
         if nonce is not None or timestamp is not None:
             ts_str = str(int(float(timestamp))) if timestamp is not None else ""
             nonce_str = str(nonce) if nonce is not None else ""
-            return f"oracle_update:contract={contract_id}:status={status}:oracle={name}:ts={ts_str}:nonce={nonce_str}".encode("utf-8")
-        return f"oracle_update:contract={contract_id}:status={status}:oracle={name}".encode("utf-8")
+            payload = (
+                f"oracle_update:contract={contract_id}:status={status}:oracle={name}:ts={ts_str}:nonce={nonce_str}"
+            )
+            return payload.encode()
+        return f"oracle_update:contract={contract_id}:status={status}:oracle={name}".encode()
 
     def sign_condition(
         self,
         contract_id: str,
         status: str,
-        oracle_name: Optional[str] = None,
-        private_key: Optional[rsa.RSAPrivateKey] = None,
-        nonce: Optional[str] = None,
-        timestamp: Optional[Union[float, int, str]] = None,
+        oracle_name: str | None = None,
+        private_key: rsa.RSAPrivateKey | None = None,
+        nonce: str | None = None,
+        timestamp: float | str | None = None,
     ) -> str:
         """
         Создает цифровую подпись оракула (для тестирования или сервиса оракула).
@@ -155,11 +156,11 @@ class OracleVerifier:
         self,
         contract_id: str,
         status: str,
-        oracle_name: Optional[str],
+        oracle_name: str | None,
         signature_b64: str,
-        nonce: Optional[str] = None,
-        timestamp: Optional[Union[float, int, str]] = None,
-    ) -> Tuple[bool, str]:
+        nonce: str | None = None,
+        timestamp: float | str | None = None,
+    ) -> tuple[bool, str]:
         """
         Проверяет подпись оракула под данными обновления контракта с защитой от Replay-атак (SEC-14).
         """
@@ -173,14 +174,20 @@ class OracleVerifier:
                 now = time.time()
                 drift = abs(now - ts_val)
                 if drift > self.max_drift_seconds:
-                    return False, f"Метка времени оракула устарела (дрейф {drift:.1f}с > {self.max_drift_seconds}с)"
+                    return (
+                        False,
+                        f"Метка времени оракула устарела (дрейф {drift:.1f}с > {self.max_drift_seconds}с)",
+                    )
             except (ValueError, TypeError):
                 return False, "Некорректный формат метки времени timestamp"
 
         # SEC-14: Проверка одноразового nonce для предотвращения Replay-атак
         if nonce is not None:
             if not self.nonce_store.record_nonce_if_new(nonce):
-                return False, f"Обнаружена Replay-атака: данный nonce оракула '{nonce}' уже был использован"
+                return (
+                    False,
+                    f"Обнаружена Replay-атака: данный nonce оракула '{nonce}' уже был использован",
+                )
 
         try:
             sig_bytes = base64.b64decode(signature_b64.strip().encode("ascii"))
@@ -223,9 +230,8 @@ class OracleVerifier:
             return False, f"Ошибка проверки подписи оракула: {e}"
 
 
-
 # Синглтон оракула
-_ORACLE_VERIFIER_INSTANCE: Optional[OracleVerifier] = None
+_ORACLE_VERIFIER_INSTANCE: OracleVerifier | None = None
 
 
 def get_oracle_verifier() -> OracleVerifier:

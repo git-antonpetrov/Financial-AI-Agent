@@ -5,12 +5,10 @@
 """
 
 import datetime
-import hashlib
 import os
 import shutil
-import sys
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
@@ -41,7 +39,7 @@ def bootstrap_pki(
     export_dir: Path | str,
     passphrase: str | None = None,
     force: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Выполняет полный цикл инициализации Root CA и выпуска сертификатов для всех сервисов.
     """
@@ -195,9 +193,10 @@ def bootstrap_pki(
             try:
                 existing_cert = x509.load_pem_x509_certificate(cert_file.read_bytes())
                 # Проверяем, не истекает ли в ближайшие 30 дней
-                now = datetime.datetime.now(datetime.timezone.utc)
+                now = datetime.datetime.now(datetime.UTC)
                 if existing_cert.not_valid_after_utc > now + datetime.timedelta(days=30):
-                    print(f"  [✓] {spec['name']:<14} Сертификат валиден (до {existing_cert.not_valid_after_utc.strftime('%Y-%m-%d')})")
+                    expire_str = existing_cert.not_valid_after_utc.strftime("%Y-%m-%d")
+                    print(f"  [✓] {spec['name']:<14} Сертификат валиден (до {expire_str})")
                     manifest["services"][spec["name"]] = {
                         "cert": str(cert_file),
                         "serial": existing_cert.serial_number,
@@ -281,8 +280,14 @@ def bootstrap_pki(
     dedicated_mounts = {
         "CA_PUBLIC_DIR": (ca_public_dir, ["ca.crt"]),
         "BANK_CERTS_DIR": (bank_dir, ["ca.crt", "bank.crt", "bank.key"]),
-        "ADMIN_CERTS_DIR": (admin_dir, ["ca.crt", "admin_server.crt", "admin_server.key"]),
-        "ADMIN_CLIENT_CERTS_DIR": (admin_client_dir, ["ca.crt", "admin_client.crt", "admin_client.key"]),
+        "ADMIN_CERTS_DIR": (
+            admin_dir,
+            ["ca.crt", "admin_server.crt", "admin_server.key"],
+        ),
+        "ADMIN_CLIENT_CERTS_DIR": (
+            admin_client_dir,
+            ["ca.crt", "admin_client.crt", "admin_client.key"],
+        ),
     }
     for env_var, (src_d, file_list) in dedicated_mounts.items():
         dst_path_str = os.getenv(env_var)
@@ -293,7 +298,10 @@ def bootstrap_pki(
                 shutil.copyfile(src_d / fname, dst_p / fname)
 
     # Изоляция ключа супер-администратора от общего раздела certs_data в Docker
-    isolate_admin_client = os.getenv("ISOLATE_ADMIN_CLIENT_KEY", "false").lower() in ("true", "1")
+    isolate_admin_client = os.getenv("ISOLATE_ADMIN_CLIENT_KEY", "false").lower() in (
+        "true",
+        "1",
+    )
     if isolate_admin_client:
         for f_to_remove in ["admin_client.key", "client.key"]:
             target_f = export_path / f_to_remove
@@ -301,7 +309,10 @@ def bootstrap_pki(
                 target_f.unlink()
         if admin_client_dir.exists():
             shutil.rmtree(admin_client_dir, ignore_errors=True)
-        print("[+] SEC-02: Закрытый ключ admin_client.key и каталог admin_client_certs успешно изолированы от общего тома certs_data.")
+        print(
+            "[+] SEC-02: Закрытый ключ admin_client.key и каталог admin_client_certs "
+            "успешно изолированы от общего тома certs_data."
+        )
 
     print("\n[✓] Инициализация PKI успешно завершена. Все сервисы обеспечены доверенными сертификатами.")
     print("=================================================================\n")
@@ -314,4 +325,3 @@ if __name__ == "__main__":
 
     force_flag = os.getenv("FORCE_REGENERATE", "false").lower() in ("true", "1")
     bootstrap_pki(default_data, default_export, force=force_flag)
-

@@ -2,13 +2,12 @@ import datetime
 import ipaddress
 import os
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 from cryptography import x509
-from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from .ca_engine import RootCAEngine
 
@@ -16,7 +15,7 @@ from .ca_engine import RootCAEngine
 class CertificateIssuer:
     """
     Эмитент X.509 сертификатов, подписанных доверенным Root CA.
-    
+
     Управляет генерацией пар ключей сервисов и выпуском сертификатов для:
     - Банковского шлюза (server + client auth, SAN dns/ip)
     - Сервера Администратора (server + client auth)
@@ -31,14 +30,14 @@ class CertificateIssuer:
         self,
         common_name: str,
         role: str = "infrastructure",
-        san_dns_names: Optional[List[str]] = None,
-        san_ip_addresses: Optional[List[str]] = None,
+        san_dns_names: list[str] | None = None,
+        san_ip_addresses: list[str] | None = None,
         validity_days: int = 365,
         key_size: int = 2048,
         is_server: bool = True,
         is_client: bool = False,
         is_ca: bool = False,
-    ) -> Tuple[x509.Certificate, rsa.RSAPrivateKey]:
+    ) -> tuple[x509.Certificate, rsa.RSAPrivateKey]:
         """
         Генерирует пару ключей сервиса и выпускает X.509 сертификат, подписанный Root CA.
         """
@@ -54,14 +53,16 @@ class CertificateIssuer:
         )
 
         # 2. Формирование Subject
-        subject = x509.Name([
-            x509.NameAttribute(NameOID.COUNTRY_NAME, "RU"),
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Financial AI Agent Platform"),
-            x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, role),
-            x509.NameAttribute(NameOID.COMMON_NAME, common_name),
-        ])
+        subject = x509.Name(
+            [
+                x509.NameAttribute(NameOID.COUNTRY_NAME, "RU"),
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Financial AI Agent Platform"),
+                x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, role),
+                x509.NameAttribute(NameOID.COMMON_NAME, common_name),
+            ]
+        )
 
-        now = datetime.datetime.now(datetime.timezone.utc)
+        now = datetime.datetime.now(datetime.UTC)
 
         # 3. Базовый билдер сертификата
         builder = (
@@ -127,7 +128,7 @@ class CertificateIssuer:
             )
 
         # 6. Альтернативные имена субъекта (SAN)
-        san_general_names: List[x509.GeneralName] = []
+        san_general_names: list[x509.GeneralName] = []
         if san_dns_names:
             for dns in san_dns_names:
                 if dns and dns.strip():
@@ -163,7 +164,7 @@ class CertificateIssuer:
         key: rsa.RSAPrivateKey,
         cert_path: Path | str,
         key_path: Path | str,
-        key_passphrase: Optional[str] = None,
+        key_passphrase: str | None = None,
     ) -> None:
         """
         Сохраняет сертификат и приватный ключ в PEM формате.

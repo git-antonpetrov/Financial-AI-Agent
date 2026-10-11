@@ -1,9 +1,9 @@
-from .passphrase_vault import resolve_root_ca_passphrase
 from .ca_engine import RootCAEngine
 from .cert_issuer import CertificateIssuer
+from .passphrase_vault import resolve_root_ca_passphrase
 
 __all__ = [
-    "resolve_root_ca_passphrase",
-    "RootCAEngine",
     "CertificateIssuer",
+    "RootCAEngine",
+    "resolve_root_ca_passphrase",
 ]

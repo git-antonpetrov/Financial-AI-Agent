@@ -1,6 +1,6 @@
 """Инициализирует подмодуль работы с базой данных сервера администрирования."""
 
-from .custom_types import EncryptedText
 from . import audit
+from .custom_types import EncryptedText
 
 __all__ = ["EncryptedText", "audit"]

@@ -2,18 +2,19 @@
 Модели SQLAlchemy для хранения документов, заявок агентов и зарегистрированных агентов.
 """
 
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
-from .database import Base
-from .custom_types import EncryptedText
 
+from .custom_types import EncryptedText
+from .database import Base
 
 
 class Document(Base):
     """Представляет документ в хранилище, отслеживает его статус обработки и метаданные."""
+
     __tablename__ = "documents"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     filename = Column(String, nullable=False)
     file_hash = Column(String, index=True, nullable=False)
@@ -28,8 +29,9 @@ class Document(Base):
 
 class AgentRequest(Base):
     """Хранит запрос агента на добавление нормативного документа с обоснованием на двух языках."""
+
     __tablename__ = "agent_requests"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     agent_name = Column(String, index=True, nullable=False)
     document_name_ru = Column(String, nullable=False)
@@ -42,21 +44,28 @@ class AgentRequest(Base):
 
 class Agent(Base):
     """Содержит зарегистрированного агента системы и статус его жизненного цикла."""
+
     __tablename__ = "agents"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, index=True, nullable=False)
     status = Column(String, default="active", nullable=False)  # "active", "suspended", "revoked"
     public_key = Column(String, nullable=True)  # Текущий активный открытый ключ (PEM)
     registered_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    keys = relationship("AgentKey", back_populates="agent", cascade="all, delete-orphan", order_by="desc(AgentKey.created_at)")
+    keys = relationship(
+        "AgentKey",
+        back_populates="agent",
+        cascade="all, delete-orphan",
+        order_by="desc(AgentKey.created_at)",
+    )
 
 
 class AgentKey(Base):
     """Модель версионирования, ротации и отзыва открытых ключей агентов."""
+
     __tablename__ = "agent_keys"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     agent_id = Column(Integer, ForeignKey("agents.id", ondelete="CASCADE"), nullable=False, index=True)
     kid = Column(String, unique=True, index=True, nullable=False)  # Идентификатор ключа (Key ID / Fingerprint)
@@ -67,7 +76,7 @@ class AgentKey(Base):
     revoked_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     expires_at = Column(DateTime(timezone=True), nullable=False)  # Срок действия ключа (TTL)
-    
+
     agent = relationship("Agent", back_populates="keys")
 
 
@@ -76,6 +85,7 @@ class AuditLog(Base):
     Неизменяемый криптографически связанный журнал аудита (Tamper-evident Hash-chained Audit Log).
     Каждая запись содержит SHA-256 хэш предыдущей записи (prev_hash), образуя целостную цепочку.
     """
+
     __tablename__ = "audit_logs"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -95,10 +105,10 @@ class SystemSetting(Base):
     Хранит системные настройки и секреты безопасности, прозрачно
     зашифрованные при хранении в базе данных с помощью AES-256-GCM.
     """
+
     __tablename__ = "system_settings"
 
     key = Column(String, primary_key=True, index=True)
     value = Column(EncryptedText, nullable=False)
     description = Column(String, nullable=True)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-

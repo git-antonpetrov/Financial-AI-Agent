@@ -1,21 +1,22 @@
 from datetime import date
 from decimal import Decimal
-from typing import List, Dict, Any, Union
+from typing import Any
 
 
 class ContractContext:
     """
-    Контекст безопасного исполнения смарт-контракта цифрового рубля. 
+    Контекст безопасного исполнения смарт-контракта цифрового рубля.
     Предоставляет DSL-интерфейс для взаимодействия логики контракта с заблокированными средствами.
     Не имеет прямого доступа к базе данных.
     """
+
     def __init__(
         self,
         contract_id: str,
         creator_id: str,
         receiver_id: str,
-        amount: Union[float, Decimal],
-        condition_status: str
+        amount: float | Decimal,
+        condition_status: str,
     ):
         self.contract_id = str(contract_id)
         self.creator_id = str(creator_id)
@@ -23,9 +24,9 @@ class ContractContext:
         self.amount = Decimal(str(amount))
         self.condition_status = str(condition_status)
         self.current_date = date.today()
-        
+
         # Внутреннее состояние песочницы для регистрации запросов на перевод
-        self._requested_transfers: List[Dict[str, Any]] = []
+        self._requested_transfers: list[dict[str, Any]] = []
         self._is_completed: bool = False
 
     FORBIDDEN_ATTRS = {
@@ -56,11 +57,11 @@ class ContractContext:
         """Возвращает статус внешнего условия контракта ('pending', 'fulfilled', 'failed')."""
         return self.condition_status
 
-    def transfer(self, from_wallet: str, to_wallet: str, amount: Union[float, Decimal, int, str]) -> None:
+    def transfer(self, from_wallet: str, to_wallet: str, amount: float | Decimal | str) -> None:
         """
         Запрашивает перевод средств в рамках смарт-контракта.
         Перевод физически исполняется воркером только после успешного завершения логики контракта.
-        
+
         Правила безопасности:
         1. Списание средств возможно только из заблокированного депозита создателя контракта (creator_id).
         2. Получателем может выступать только участник контракта (receiver_id или возврат creator_id).
@@ -85,20 +86,24 @@ class ContractContext:
         if from_wallet == to_wallet:
             raise ValueError("Счет списания и счет зачисления не могут совпадать")
 
-        current_total = sum((Decimal(str(t["amount"])) for t in self._requested_transfers), Decimal("0.00"))
+        current_total = sum(
+            (Decimal(str(t["amount"])) for t in self._requested_transfers),
+            Decimal("0.00"),
+        )
         if current_total + num_amount > self.amount:
             raise ValueError(
                 f"Суммарный объем переводов ({current_total + num_amount:.2f}) "
                 f"превышает лимит средств смарт-контракта ({self.amount:.2f})"
             )
 
-        self._requested_transfers.append({
-            "from": from_wallet,
-            "to": to_wallet,
-            "amount": num_amount.quantize(Decimal("0.01"))
-        })
+        self._requested_transfers.append(
+            {
+                "from": from_wallet,
+                "to": to_wallet,
+                "amount": num_amount.quantize(Decimal("0.01")),
+            }
+        )
 
     def complete(self) -> None:
         """Помечает контракт как завершенный (готов к расчету)."""
         self._is_completed = True
-

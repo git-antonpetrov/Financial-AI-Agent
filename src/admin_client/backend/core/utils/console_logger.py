@@ -6,21 +6,22 @@
 
 try:
     from src.common.logger import (
+        log_error,
         log_info,
         log_success,
         log_warning,
-        log_error,
     )
 except ImportError:
     try:
         from common.logger import (
+            log_error,
             log_info,
             log_success,
             log_warning,
-            log_error,
         )
     except ImportError:
         import sys
+
         import colorama
 
         colorama.init(strip=not sys.stdout.isatty())
@@ -52,9 +53,10 @@ except ImportError:
         def log_error(process_name: str, message: str) -> None:
             _log("\033[91m", "Error", process_name, message)
 
+
 __all__ = [
+    "log_error",
     "log_info",
     "log_success",
     "log_warning",
-    "log_error",
 ]

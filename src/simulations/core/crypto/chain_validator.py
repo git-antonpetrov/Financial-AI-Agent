@@ -10,16 +10,15 @@ import hashlib
 import os
 import time
 from pathlib import Path
-from typing import Optional, Tuple, Union
 
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding, rsa, ec
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 
-from src.simulations.core.utils.console_logger import log_error, log_info, log_warning
 from src.simulations.core.crypto.bank_ca import get_bank_ca
+from src.simulations.core.utils.console_logger import log_warning
 
 
 class X509ChainValidator:
@@ -30,19 +29,16 @@ class X509ChainValidator:
 
     def __init__(
         self,
-        root_ca_cert: Optional[Union[x509.Certificate, str, Path]] = None,
-        crl_pem: Optional[str] = None,
+        root_ca_cert: x509.Certificate | str | Path | None = None,
+        crl_pem: str | None = None,
         max_drift_seconds: int = 300,
-        ca_cert_path: Optional[Union[str, Path]] = None,
+        ca_cert_path: str | Path | None = None,
     ):
         self.max_drift_seconds = max_drift_seconds
         self.crl_pem = crl_pem
         self.root_ca_cert = self._resolve_root_ca(root_ca_cert or ca_cert_path)
 
-    def _resolve_root_ca(
-        self,
-        cert_or_pem: Optional[Union[x509.Certificate, str, Path]]
-    ) -> Optional[x509.Certificate]:
+    def _resolve_root_ca(self, cert_or_pem: x509.Certificate | str | Path | None) -> x509.Certificate | None:
         """Разрешает сертификат Root CA из переданного аргумента, файлов или синглтона банка."""
         if isinstance(cert_or_pem, x509.Certificate):
             return cert_or_pem
@@ -86,7 +82,7 @@ class X509ChainValidator:
 
         return None
 
-    def parse_certificate(self, cert_input: Union[x509.Certificate, str, bytes, Path]) -> Optional[x509.Certificate]:
+    def parse_certificate(self, cert_input: x509.Certificate | str | bytes | Path) -> x509.Certificate | None:
         """Парсит X.509 сертификат из объекта, пути к файлу, PEM-строки или байт."""
         if isinstance(cert_input, x509.Certificate):
             return cert_input
@@ -133,23 +129,27 @@ class X509ChainValidator:
         return None
 
     def validate_certificate_lifetime(
-        self,
-        cert: x509.Certificate,
-        at_time: Optional[datetime.datetime] = None
-    ) -> Tuple[bool, str]:
+        self, cert: x509.Certificate, at_time: datetime.datetime | None = None
+    ) -> tuple[bool, str]:
         """Проверяет срок действия сертификата (NotBefore <= check_time <= NotAfter)."""
-        check_time = at_time or datetime.datetime.now(datetime.timezone.utc)
+        check_time = at_time or datetime.datetime.now(datetime.UTC)
         if check_time < cert.not_valid_before_utc:
-            return False, f"Сертификат еще не вступил в силу (NotBefore: {cert.not_valid_before_utc})"
+            return (
+                False,
+                f"Сертификат еще не вступил в силу (NotBefore: {cert.not_valid_before_utc})",
+            )
         if check_time > cert.not_valid_after_utc:
-            return False, f"Срок действия сертификата истек (NotAfter: {cert.not_valid_after_utc})"
+            return (
+                False,
+                f"Срок действия сертификата истек (NotAfter: {cert.not_valid_after_utc})",
+            )
         return True, "Сертификат действителен по времени"
 
     def validate_certificate_chain(
         self,
-        leaf_cert_input: Union[x509.Certificate, str, bytes],
-        issuer_ca_input: Optional[Union[x509.Certificate, str, bytes]] = None,
-    ) -> Tuple[bool, str]:
+        leaf_cert_input: x509.Certificate | str | bytes,
+        issuer_ca_input: x509.Certificate | str | bytes | None = None,
+    ) -> tuple[bool, str]:
         """
         Проверяет подлинность сертификата leaf_cert по отношению к доверенному Root CA:
         1. Проверяет срок действия leaf_cert;
@@ -193,11 +193,17 @@ class X509ChainValidator:
                     leaf_cert.tbs_certificate_bytes,
                     ec.ECDSA(leaf_cert.signature_hash_algorithm),
                 )
-                return True, "Цепочка сертификатов (ECDSA) успешно верифицирована Root CA"
+                return (
+                    True,
+                    "Цепочка сертификатов (ECDSA) успешно верифицирована Root CA",
+                )
             else:
                 return False, f"Неподдерживаемый тип ключа Root CA: {type(ca_pub_key)}"
         except InvalidSignature:
-            return False, "Недействительная цифровая подпись сертификата (подписан другим ключом)"
+            return (
+                False,
+                "Недействительная цифровая подпись сертификата (подписан другим ключом)",
+            )
         except Exception as e:
             return False, f"Ошибка проверки подписи сертификата: {e}"
 
@@ -205,10 +211,10 @@ class X509ChainValidator:
         self,
         payload_bytes: bytes,
         signature_b64: str,
-        leaf_cert_input: Union[x509.Certificate, str, bytes],
+        leaf_cert_input: x509.Certificate | str | bytes,
         algorithm: str = "RSA-PSS",
         verify_chain: bool = True,
-    ) -> Tuple[bool, str]:
+    ) -> tuple[bool, str]:
         """
         Верифицирует цифровую подпись данных с валидацией сертификата:
         1. Валидирует цепочку leaf_cert против Root CA (если verify_chain=True);
@@ -234,7 +240,10 @@ class X509ChainValidator:
                     pub_key.verify(
                         raw_sig,
                         payload_bytes,
-                        padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
+                        padding.PSS(
+                            mgf=padding.MGF1(hashes.SHA256()),
+                            salt_length=padding.PSS.MAX_LENGTH,
+                        ),
                         hashes.SHA256(),
                     )
                     return True, "Цифровая подпись RSA-PSS успешно верифицирована"
@@ -246,7 +255,10 @@ class X509ChainValidator:
                     pub_key.verify(
                         raw_sig,
                         payload_bytes,
-                        padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
+                        padding.PSS(
+                            mgf=padding.MGF1(hashes.SHA256()),
+                            salt_length=padding.PSS.DIGEST_LENGTH,
+                        ),
                         hashes.SHA256(),
                     )
                     return True, "Цифровая подпись RSA-PSS успешно верифицирована"
@@ -273,17 +285,20 @@ class X509ChainValidator:
 
             return False, f"Неподдерживаемый алгоритм открытого ключа: {type(pub_key)}"
         except InvalidSignature:
-            return False, "Недействительная цифровая подпись полезной нагрузки (InvalidSignature)"
+            return (
+                False,
+                "Недействительная цифровая подпись полезной нагрузки (InvalidSignature)",
+            )
         except Exception as e:
             return False, f"Сбой проверки подписи: {e}"
 
     def compute_canonical_digest(
         self,
-        timestamp: Union[int, float, str],
+        timestamp: float | str,
         nonce: str,
         body_bytes: bytes,
-        method: Optional[str] = None,
-        path: Optional[str] = None,
+        method: str | None = None,
+        path: str | None = None,
     ) -> bytes:
         """
         Формирует каноническую строку для цифровой подписи запроса.
@@ -299,14 +314,14 @@ class X509ChainValidator:
 
     def verify_request(
         self,
-        timestamp_val: Union[int, float, str],
+        timestamp_val: float | str,
         nonce: str,
         body_bytes: bytes,
         signature_b64: str,
         leaf_cert_pem: str,
-        method: Optional[str] = None,
-        path: Optional[str] = None,
-    ) -> Tuple[bool, str]:
+        method: str | None = None,
+        path: str | None = None,
+    ) -> tuple[bool, str]:
         """
         Комплексная валидация защищенного запроса:
         - Проверка окна дрейфа времени (Timestamp);
@@ -320,7 +335,10 @@ class X509ChainValidator:
 
         drift = abs(now - req_ts)
         if drift > self.max_drift_seconds:
-            return False, f"Метка времени запроса устарела (дрейф {drift:.1f}с > {self.max_drift_seconds}с)"
+            return (
+                False,
+                f"Метка времени запроса устарела (дрейф {drift:.1f}с > {self.max_drift_seconds}с)",
+            )
 
         canonical_data = self.compute_canonical_digest(
             timestamp=req_ts,
@@ -338,10 +356,12 @@ class X509ChainValidator:
         )
 
 
-_CHAIN_VALIDATOR_INSTANCE: Optional[X509ChainValidator] = None
+_CHAIN_VALIDATOR_INSTANCE: X509ChainValidator | None = None
 
 
-def get_chain_validator(root_ca_cert: Optional[Union[x509.Certificate, str]] = None) -> X509ChainValidator:
+def get_chain_validator(
+    root_ca_cert: x509.Certificate | str | None = None,
+) -> X509ChainValidator:
     """Возвращает глобальный экземпляр X509ChainValidator."""
     global _CHAIN_VALIDATOR_INSTANCE
     if _CHAIN_VALIDATOR_INSTANCE is not None and root_ca_cert is None:

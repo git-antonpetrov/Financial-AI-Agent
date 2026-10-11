@@ -1,33 +1,27 @@
 """
 Программный криптографический мост (Software Signing Bridge).
 Используется для работы с файловыми ключами в изолированных стендах и тестировании.
-Строго требует наличия легитимного сертификата, подписанного Root CA. Генерация самоподписанных сертификатов исключена.
+Строго требует наличия легитимного сертификата, подписанного Root CA.
+Генерация самоподписанных сертификатов исключена.
 """
 
-import os
-import sys
 import base64
 import hashlib
-from typing import Optional
-from cryptography.hazmat.primitives.asymmetric import rsa, padding
+
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography import x509
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 try:
     from .cert_validator import (
-        resolve_and_validate_client_certificate,
-        find_certificate_file,
-        CertificateMissingError,
-        CertificateValidationError,
         KeyMissingError,
+        find_certificate_file,
+        resolve_and_validate_client_certificate,
     )
 except ImportError:
     from cert_validator import (
-        resolve_and_validate_client_certificate,
-        find_certificate_file,
-        CertificateMissingError,
-        CertificateValidationError,
         KeyMissingError,
+        find_certificate_file,
+        resolve_and_validate_client_certificate,
     )
 
 
@@ -40,13 +34,13 @@ class SoftwareSigningBridge:
 
     def __init__(
         self,
-        cert_path: Optional[str] = None,
-        key_path: Optional[str] = None,
-        key_pem: Optional[str] = None,
-        cert_pem: Optional[str] = None,
-        ca_cert_path: Optional[str] = None,
-        ca_cert_pem: Optional[str] = None,
-        key_password: Optional[str] = None,
+        cert_path: str | None = None,
+        key_path: str | None = None,
+        key_pem: str | None = None,
+        cert_pem: str | None = None,
+        ca_cert_path: str | None = None,
+        ca_cert_pem: str | None = None,
+        key_password: str | None = None,
     ):
         self.cert_path = cert_path
         self.key_path = key_path
@@ -62,14 +56,11 @@ class SoftwareSigningBridge:
             cert_pem=cert_pem,
             ca_cert_path=ca_cert_path,
             ca_cert_pem=ca_cert_pem,
-            expected_public_key=self._private_key.public_key()
+            expected_public_key=self._private_key.public_key(),
         )
 
     def _resolve_private_key(
-        self,
-        key_path: Optional[str],
-        key_pem: Optional[str],
-        password: Optional[str]
+        self, key_path: str | None, key_pem: str | None, password: str | None
     ) -> rsa.RSAPrivateKey:
         """Загружает закрытый ключ из строки PEM или файла. При отсутствии выбрасывает KeyMissingError."""
         pwd = password.encode("utf-8") if password else None
@@ -87,7 +78,7 @@ class SoftwareSigningBridge:
         found_key_file = find_certificate_file(
             custom_path=key_path,
             env_var="ADMIN_CLIENT_KEY_PATH",
-            default_filenames=("admin_client.key",)
+            default_filenames=("admin_client.key",),
         )
         if not found_key_file:
             raise KeyMissingError(
@@ -108,16 +99,20 @@ class SoftwareSigningBridge:
 
     def get_public_key_pem(self) -> str:
         """Возвращает открытый ключ в формате PEM."""
-        return self._private_key.public_key().public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        ).decode("utf-8")
+        return (
+            self._private_key.public_key()
+            .public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+            .decode("utf-8")
+        )
 
     def get_key_fingerprint(self) -> str:
         """Вычисляет SHA-256 отпечаток открытого ключа."""
         der = self._private_key.public_key().public_bytes(
             encoding=serialization.Encoding.DER,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
         )
         return f"sha256:{hashlib.sha256(der).hexdigest()}"
 
@@ -134,18 +129,14 @@ class SoftwareSigningBridge:
             scheme: 'PSS' (по умолчанию) или 'PKCS1'.
         """
         if scheme == "PKCS1":
-            raw_sig = self._private_key.sign(
-                canonical_bytes,
-                padding.PKCS1v15(),
-                hashes.SHA256()
-            )
+            raw_sig = self._private_key.sign(canonical_bytes, padding.PKCS1v15(), hashes.SHA256())
         else:
             raw_sig = self._private_key.sign(
                 canonical_bytes,
                 padding.PSS(
                     mgf=padding.MGF1(hashes.SHA256()),
-                    salt_length=padding.PSS.MAX_LENGTH
+                    salt_length=padding.PSS.MAX_LENGTH,
                 ),
-                hashes.SHA256()
+                hashes.SHA256(),
             )
         return base64.b64encode(raw_sig).decode("ascii")

@@ -1,18 +1,30 @@
+import asyncio
+import ipaddress
 import os
+import re
+import secrets
+import socket
 import sys
 import tempfile
-import re
-import asyncio
-import uuid
 import time
-import socket
-import ipaddress
-from concurrent.futures import ThreadPoolExecutor
 import urllib.parse
-import secrets
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+
 import requests
+
 # pyrefly: ignore [missing-import]
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Response, status
+from fastapi import (
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
+
 # pyrefly: ignore [missing-import]
 try:
     from sse_starlette.sse import EventSourceResponse
@@ -22,59 +34,62 @@ except ImportError:
     except ImportError:
         from starlette.responses import StreamingResponse as EventSourceResponse
 # pyrefly: ignore [missing-import]
-from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional, List, Dict, Any
-from pydantic import BaseModel
 from contextlib import asynccontextmanager
+
+from fastapi.middleware.cors import CORSMiddleware
 from pipeline import DocumentPipeline
+from pydantic import BaseModel
 
 try:
     from src.admin_client.backend.core.crypto import (
-        HardwareSigningBridge,
-        ZeroTrustClientSigner,
-        find_root_ca_in_windows_store,
-        find_client_cert_in_windows_store,
-        get_windows_cert_store_help_message,
-        WindowsCertificateStoreError,
         CertificateMissingError,
         CertificateValidationError,
+        HardwareSigningBridge,
+        WindowsCertificateStoreError,
+        ZeroTrustClientSigner,
+        find_client_cert_in_windows_store,
+        find_root_ca_in_windows_store,
+        get_windows_cert_store_help_message,
     )
 except ImportError:
     try:
         from core.crypto import (
-            HardwareSigningBridge,
-            ZeroTrustClientSigner,
-            find_root_ca_in_windows_store,
-            find_client_cert_in_windows_store,
-            get_windows_cert_store_help_message,
-            WindowsCertificateStoreError,
             CertificateMissingError,
             CertificateValidationError,
+            HardwareSigningBridge,
+            WindowsCertificateStoreError,
+            ZeroTrustClientSigner,
+            find_client_cert_in_windows_store,
+            find_root_ca_in_windows_store,
+            get_windows_cert_store_help_message,
         )
     except ImportError:
         HardwareSigningBridge = None
         ZeroTrustClientSigner = None
         find_root_ca_in_windows_store = None
         find_client_cert_in_windows_store = None
-        get_windows_cert_store_help_message = lambda x: "Сертификаты Zero-Trust не найдены"
+
+        def get_windows_cert_store_help_message(x):
+            return "Сертификаты Zero-Trust не найдены"
+
         WindowsCertificateStoreError = RuntimeError
         CertificateMissingError = RuntimeError
         CertificateValidationError = RuntimeError
 
 try:
     from src.admin_client.backend.core.remote_client import (
-        RemoteAdminClient,
         AuthenticationError,
-        SessionExpiredError,
+        RemoteAdminClient,
         RemoteClientError,
+        SessionExpiredError,
     )
 except ImportError:
     try:
         from core.remote_client import (
-            RemoteAdminClient,
             AuthenticationError,
-            SessionExpiredError,
+            RemoteAdminClient,
             RemoteClientError,
+            SessionExpiredError,
         )
     except ImportError:
         RemoteAdminClient = None
@@ -84,6 +99,7 @@ except ImportError:
 
 # Инициализация синглтона удаленного доверенного клиента (BFF)
 remote_client = RemoteAdminClient() if RemoteAdminClient else None
+
 
 def get_remote_client() -> RemoteAdminClient:
     """Возвращает инициализированный доверенный клиент или вызывает ошибку сервера."""
@@ -100,23 +116,23 @@ class LoginRequest(BaseModel):
 
 
 class Pair2FARequest(BaseModel):
-    server_url: Optional[str] = None
+    server_url: str | None = None
     username: str = "admin"
     password: str
 
 
 class AgentRevokeRequest(BaseModel):
-    kid: Optional[str] = None
+    kid: str | None = None
     reason: str = "Compromised"
 
 
 class AgentRotateKeyRequest(BaseModel):
     new_public_key: str
-    ttl_days: Optional[int] = 90
+    ttl_days: int | None = 90
 
 
 class AgentBatchRequest(BaseModel):
-    request_ids: List[int]
+    request_ids: list[int]
 
 
 def handle_remote_error(e: Exception):
@@ -137,6 +153,7 @@ def handle_remote_error(e: Exception):
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
     raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
+
 # Очереди в памяти для SSE-ответов и время их создания
 job_queues = {}
 job_statuses = {}
@@ -150,8 +167,12 @@ SIDECAR_IPC_SECRET = os.getenv("SIDECAR_IPC_SECRET", "").strip()
 
 # Защита от автономного запуска скомпилированного бинарника в обход родительского процесса
 if getattr(sys, "frozen", False) and not SIDECAR_IPC_SECRET:
-    sys.stderr.write("FATAL: Standalone execution of frozen sidecar is prohibited. Must be spawned by Tauri with SIDECAR_IPC_SECRET.\n")
+    sys.stderr.write(
+        "FATAL: Standalone execution of frozen sidecar is prohibited. "
+        "Must be spawned by Tauri with SIDECAR_IPC_SECRET.\n"
+    )
     sys.exit(1)
+
 
 async def cleanup_stale_jobs():
     """Выполняет периодическую фоновую очистку устаревших задач для предотвращения утечки памяти."""
@@ -160,8 +181,7 @@ async def cleanup_stale_jobs():
             await asyncio.sleep(300)  # Проверяем каждые 5 минут
             current_time = time.time()
             stale_jobs = [
-                job_id for job_id, created_at in list(job_creation_times.items()) 
-                if current_time - created_at > 3600
+                job_id for job_id, created_at in list(job_creation_times.items()) if current_time - created_at > 3600
             ]  # Удаляем старше 1 часа
             for job_id in stale_jobs:
                 job_queues.pop(job_id, None)
@@ -172,6 +192,7 @@ async def cleanup_stale_jobs():
         except Exception:
             pass
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Управляет жизненным циклом приложения FastAPI, запуская и корректно останавливая фоновые задачи."""
@@ -180,6 +201,7 @@ async def lifespan(app: FastAPI):
     yield
     cleanup_task.cancel()
     pipeline_executor.shutdown(wait=False)
+
 
 app = FastAPI(title="Local Admin Client Backend", lifespan=lifespan)
 
@@ -200,6 +222,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.middleware("http")
 async def ipc_security_guard(request: Request, call_next):
     """Выполняет комплексную защиту локального sidecar:
@@ -214,15 +237,24 @@ async def ipc_security_guard(request: Request, call_next):
 
     if origin:
         if origin not in ALLOWED_ORIGINS:
-            return Response(content="Forbidden: Invalid origin", status_code=status.HTTP_403_FORBIDDEN)
+            return Response(
+                content="Forbidden: Invalid origin",
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
     elif sec_fetch_site == "cross-site":
-        return Response(content="Forbidden: Cross-site request rejected", status_code=status.HTTP_403_FORBIDDEN)
+        return Response(
+            content="Forbidden: Cross-site request rejected",
+            status_code=status.HTTP_403_FORBIDDEN,
+        )
 
     # Проверка IPC токена рукопожатия от доверенного родительского процесса
     if SIDECAR_IPC_SECRET:
         token = request.headers.get("x-local-secret") or request.query_params.get("secret")
         if not token or not secrets.compare_digest(token.strip(), SIDECAR_IPC_SECRET):
-            return Response(content="Forbidden: Invalid or missing IPC secret", status_code=status.HTTP_403_FORBIDDEN)
+            return Response(
+                content="Forbidden: Invalid or missing IPC secret",
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
 
     return await call_next(request)
 
@@ -245,6 +277,7 @@ try:
 except Exception:
     pass
 
+
 def run_pipeline(
     job_id: str,
     file_path: str,
@@ -258,18 +291,15 @@ def run_pipeline(
     ca_cert_path: str = "",
     client_cert_path: str = "",
     client_key_path: str = "",
-    use_zero_trust: bool = True
+    use_zero_trust: bool = True,
 ):
     """Запускает процесс обработки файла в отдельном рабочем потоке и передает события прогресса в очередь."""
+
     def progress_callback(filename, status, message):
-        event = {
-            "status": status,
-            "message": message,
-            "filename": filename
-        }
+        event = {"status": status, "message": message, "filename": filename}
         if job_id in job_queues:
             loop.call_soon_threadsafe(job_queues[job_id].put_nowait, event)
-    
+
     try:
         pipeline = DocumentPipeline(
             server_url=server_url,
@@ -280,25 +310,24 @@ def run_pipeline(
             ca_cert_path=ca_cert_path or None,
             client_cert_path=client_cert_path or None,
             client_key_path=client_key_path or None,
-            use_zero_trust=use_zero_trust
+            use_zero_trust=use_zero_trust,
         )
         pipeline.set_progress_callback(progress_callback)
-        
+
         result = pipeline.process_file(file_path, agent_name)
-        
+
         # Отправка финального события об успехе
         if job_id in job_queues:
-            loop.call_soon_threadsafe(job_queues[job_id].put_nowait, {
-                "status": "done",
-                "message": "Pipeline finished.",
-                "result": result
-            })
+            loop.call_soon_threadsafe(
+                job_queues[job_id].put_nowait,
+                {"status": "done", "message": "Pipeline finished.", "result": result},
+            )
     except Exception as e:
         if job_id in job_queues:
-            loop.call_soon_threadsafe(job_queues[job_id].put_nowait, {
-                "status": "error",
-                "message": f"Pipeline failed: {str(e)}"
-            })
+            loop.call_soon_threadsafe(
+                job_queues[job_id].put_nowait,
+                {"status": "error", "message": f"Pipeline failed: {e!s}"},
+            )
     finally:
         job_statuses[job_id] = "finished"
         try:
@@ -307,10 +336,11 @@ def run_pipeline(
         except Exception:
             pass
 
+
 def validate_server_url(server_url: str) -> None:
     """
     Проверяет URL сервера на корректность формата и блокирует потенциальные SSRF-атаки.
-    
+
     Разрешает стандартные схемы http/https, публичные домены и IP-адреса, а также
     локальные адреса разработки (localhost, 127.0.0.1, ::1). Отклоняет обращения к
     приватным подсетям, link-local, loopback (не localhost) и мультикаст адресам.
@@ -371,6 +401,7 @@ def validate_server_url(server_url: str) -> None:
             detail=f"Invalid server_url: unable to resolve hostname {hostname}",
         )
 
+
 @app.post("/api/local/auth/login")
 async def local_auth_login(req: LoginRequest):
     """Выполняет аутентификацию администратора на удаленном сервере по mTLS."""
@@ -426,7 +457,10 @@ async def local_get_agents():
     """Возвращает актуальный список всех агентов системы."""
     client = get_remote_client()
     if not client.is_authenticated():
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin session not authenticated")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Admin session not authenticated",
+        )
     try:
         return client.get_agents()
     except Exception as e:
@@ -438,7 +472,10 @@ async def local_suspend_agent(agent_name: str):
     """Приостанавливает операции указанного агента."""
     client = get_remote_client()
     if not client.is_authenticated():
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin session not authenticated")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Admin session not authenticated",
+        )
     try:
         return client.suspend_agent(agent_name)
     except Exception as e:
@@ -450,7 +487,10 @@ async def local_reactivate_agent(agent_name: str):
     """Возобновляет функционирование приостановленного агента."""
     client = get_remote_client()
     if not client.is_authenticated():
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin session not authenticated")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Admin session not authenticated",
+        )
     try:
         return client.reactivate_agent(agent_name)
     except Exception as e:
@@ -462,7 +502,10 @@ async def local_revoke_agent(agent_name: str, req: AgentRevokeRequest = AgentRev
     """Выполняет немедленный отзыв криптографического ключа агента (Instant Revocation)."""
     client = get_remote_client()
     if not client.is_authenticated():
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin session not authenticated")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Admin session not authenticated",
+        )
     try:
         return client.revoke_agent(agent_name, kid=req.kid, reason=req.reason)
     except Exception as e:
@@ -474,7 +517,10 @@ async def local_get_agent_keys(agent_name: str):
     """Возвращает историю открытых ключей агента."""
     client = get_remote_client()
     if not client.is_authenticated():
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin session not authenticated")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Admin session not authenticated",
+        )
     try:
         return client.get_agent_keys(agent_name)
     except Exception as e:
@@ -486,7 +532,10 @@ async def local_rotate_agent_key(agent_name: str, req: AgentRotateKeyRequest):
     """Выполняет ротацию открытого ключа агента."""
     client = get_remote_client()
     if not client.is_authenticated():
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin session not authenticated")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Admin session not authenticated",
+        )
     try:
         return client.rotate_agent_key(agent_name, req.new_public_key, req.ttl_days or 90)
     except Exception as e:
@@ -497,14 +546,17 @@ async def local_rotate_agent_key(agent_name: str, req: AgentRotateKeyRequest):
 async def local_get_audit_logs(
     limit: int = 50,
     offset: int = 0,
-    actor: Optional[str] = None,
-    action: Optional[str] = None,
-    status: Optional[str] = None
+    actor: str | None = None,
+    action: str | None = None,
+    status: str | None = None,
 ):
     """Возвращает список событий неизменяемого журнала аудита."""
     client = get_remote_client()
     if not client.is_authenticated():
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin session not authenticated")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Admin session not authenticated",
+        )
     try:
         return client.get_audit_logs(limit=limit, offset=offset, actor=actor, action=action, status=status)
     except Exception as e:
@@ -516,7 +568,10 @@ async def local_verify_audit_log():
     """Проверяет криптографическую целостность хеш-цепочки журнала аудита."""
     client = get_remote_client()
     if not client.is_authenticated():
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin session not authenticated")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Admin session not authenticated",
+        )
     try:
         return client.verify_audit_log()
     except Exception as e:
@@ -528,7 +583,10 @@ async def local_get_audit_summary():
     """Возвращает сводную статистику по журналу аудита."""
     client = get_remote_client()
     if not client.is_authenticated():
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin session not authenticated")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Admin session not authenticated",
+        )
     try:
         return client.get_audit_summary()
     except Exception as e:
@@ -547,7 +605,10 @@ async def local_get_agent_requests():
     """Возвращает список запросов на регламентные документы от агентов."""
     client = get_remote_client()
     if not client.is_authenticated():
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin session not authenticated")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Admin session not authenticated",
+        )
     try:
         return client.get_agent_requests()
     except Exception as e:
@@ -559,7 +620,10 @@ async def local_approve_agent_requests(req: AgentBatchRequest):
     """Одобряет выбранные заявки агентов на доступ к документам."""
     client = get_remote_client()
     if not client.is_authenticated():
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin session not authenticated")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Admin session not authenticated",
+        )
     try:
         return client.approve_agent_requests(req.request_ids)
     except Exception as e:
@@ -571,7 +635,10 @@ async def local_reject_agent_requests(req: AgentBatchRequest):
     """Отклоняет выбранные заявки агентов."""
     client = get_remote_client()
     if not client.is_authenticated():
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin session not authenticated")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Admin session not authenticated",
+        )
     try:
         return client.reject_agent_requests(req.request_ids)
     except Exception as e:
@@ -581,8 +648,8 @@ async def local_reject_agent_requests(req: AgentBatchRequest):
 @app.post("/api/local/process")
 async def process_document(
     agent_name: str = Form(...),
-    server_url: Optional[str] = Form(None),
-    admin_token: Optional[str] = Form(None),
+    server_url: str | None = Form(None),
+    admin_token: str | None = Form(None),
     contentai_username: str = Form(""),
     contentai_password: str = Form(""),
     contentai_api_uri: str = Form(""),
@@ -590,7 +657,7 @@ async def process_document(
     client_cert_path: str = Form(""),
     client_key_path: str = Form(""),
     use_zero_trust: bool = Form(True),
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
 ):
     """Принимает файл и параметры запуска, валидирует входные данные и ставит задачу обработки в очередь."""
     # Валидация агента, чтобы не тратить ресурсы впустую
@@ -605,7 +672,10 @@ async def process_document(
         admin_token = remote_client.access_token
 
     if not server_url:
-        raise HTTPException(status_code=400, detail="server_url is required or session must be authenticated")
+        raise HTTPException(
+            status_code=400,
+            detail="server_url is required or session must be authenticated",
+        )
 
     # Валидация server_url с защитой от SSRF
     validate_server_url(server_url)
@@ -653,20 +723,20 @@ async def process_document(
                 detail={
                     "error": "WINDOWS_CERT_STORE_CERTIFICATE_MISSING",
                     "missing_component": missing,
-                    "message": error_instruction
-                }
+                    "message": error_instruction,
+                },
             )
 
     job_id = str(uuid.uuid4())
     job_queues[job_id] = asyncio.Queue()
     job_statuses[job_id] = "running"
     job_creation_times[job_id] = time.time()
-    
+
     # Ограничение размера в 100 МБ через чтение частями
     MAX_SIZE = 100 * 1024 * 1024
     bytes_read = 0
     raw_name = os.path.basename(file.filename or "uploaded_file")
-    safe_filename = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', raw_name).strip('._') or "file"
+    safe_filename = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", raw_name).strip("._") or "file"
     file_path = os.path.join(TEMP_DIR, f"{job_id}_{safe_filename}")
     try:
         with open(file_path, "wb") as buffer:
@@ -682,7 +752,7 @@ async def process_document(
         if os.path.exists(file_path):
             os.remove(file_path)
         raise e
-        
+
     # Запуск задачи через ограниченный пул потоков
     loop = asyncio.get_running_loop()
     pipeline_executor.submit(
@@ -699,14 +769,18 @@ async def process_document(
         ca_cert_path,
         client_cert_path,
         client_key_path,
-        use_zero_trust
+        use_zero_trust,
     )
-    
+
     return {"job_id": job_id, "filename": file.filename}
+
 
 @app.get("/api/local/security/status")
 async def get_security_status():
-    """Возвращает статус аппаратной безопасности (TPM 2.0 / Windows Hello) и системного хранилища сертификатов Windows."""
+    """
+    Возвращает статус аппаратной безопасности (TPM 2.0 / Windows Hello)
+    и системного хранилища сертификатов Windows.
+    """
     tpm_available = False
     if HardwareSigningBridge:
         tpm_available = HardwareSigningBridge.is_tpm_available()
@@ -758,26 +832,27 @@ async def get_security_status():
             "client_cert_found": win_client_found,
             "root_ca_found": win_root_found,
             "status": store_status,
-            "instruction": store_instruction
+            "instruction": store_instruction,
         },
-        "signer_error": signer_error
+        "signer_error": signer_error,
     }
+
 
 @app.get("/api/local/progress/{job_id}", response_class=EventSourceResponse)
 async def get_progress(job_id: str):
     """Предоставляет SSE-поток событий о ходе обработки документа для клиентского интерфейса."""
     if job_id not in job_queues:
         raise HTTPException(status_code=404, detail="Job not found")
-        
+
     queue = job_queues[job_id]
-    
+
     is_completed = False
     try:
         while True:
             # Ожидание события
             event = await queue.get()
             yield event
-            
+
             if event.get("status") in ["done", "error", "skipped"]:
                 is_completed = True
                 break
@@ -788,12 +863,19 @@ async def get_progress(job_id: str):
             job_statuses.pop(job_id, None)
             job_creation_times.pop(job_id, None)
 
+
 if __name__ == "__main__":
-    import uvicorn
     import argparse
 
+    import uvicorn
+
     parser = argparse.ArgumentParser(description="Financial MAS Admin Client Sidecar")
-    parser.add_argument("--port", type=int, default=int(os.getenv("SIDECAR_PORT", "8005")), help="Port to listen on")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.getenv("SIDECAR_PORT", "8005")),
+        help="Port to listen on",
+    )
     parser.add_argument("--host", type=str, default="127.0.0.1", help="Host interface to bind to")
     args, _ = parser.parse_known_args()
 

@@ -1,16 +1,21 @@
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
+
 from sqlalchemy.future import select
 
 from src.simulations.db.digital_ruble.db.client import get_async_session_maker
+
 AsyncSessionLocal = get_async_session_maker()
 
-from src.simulations.db.digital_ruble.db.models import SmartContract, Wallet, RubleTransaction
+from src.simulations.core.crypto import get_digital_platform_signer
+from src.simulations.core.utils.console_logger import log_error, log_info
+from src.simulations.db.digital_ruble.db.models import (
+    RubleTransaction,
+    SmartContract,
+    Wallet,
+)
 from src.simulations.smart_contracts.dsl.context import ContractContext
 from src.simulations.smart_contracts.sandbox.executor import SmartContractSandbox
-from src.simulations.core.utils.console_logger import log_info, log_error, log_success
-from src.simulations.core.crypto import get_digital_platform_signer
-
 
 
 def get_moscow_now() -> datetime:
@@ -26,9 +31,7 @@ async def process_single_contract(session, contract: SmartContract) -> str:
     contract_amount = Decimal(str(contract.amount))
 
     # Блокируем строки кошельков участников от параллельных изменений
-    creator_res = await session.execute(
-        select(Wallet).where(Wallet.id == contract.creator_wallet_id).with_for_update()
-    )
+    creator_res = await session.execute(select(Wallet).where(Wallet.id == contract.creator_wallet_id).with_for_update())
     creator = creator_res.scalars().first()
 
     receiver_res = await session.execute(
@@ -47,13 +50,12 @@ async def process_single_contract(session, contract: SmartContract) -> str:
         creator_id=contract.creator_wallet_id,
         receiver_id=contract.receiver_wallet_id,
         amount=contract_amount,
-        condition_status=contract.condition_status
+        condition_status=contract.condition_status,
     )
 
     # Исполняем код контракта в защищенной песочнице
     success, is_completed, transfers, error_msg = SmartContractSandbox.execute_contract(
-        code=contract.contract_code or "",
-        ctx=ctx
+        code=contract.contract_code or "", ctx=ctx
     )
 
     creator_frozen = Decimal(str(creator.frozen_balance))
@@ -94,7 +96,7 @@ async def process_single_contract(session, contract: SmartContract) -> str:
             transferred_total += amount_to_send
 
             # Записываем операцию в историю транзакций с реальной криптографической подписью платформы
-            sig_ts = int(datetime.now(timezone.utc).timestamp())
+            sig_ts = int(datetime.now(UTC).timestamp())
             signature = get_digital_platform_signer().sign_transaction(
                 sender_id=creator.id,
                 receiver_id=to_wallet.id,
@@ -109,10 +111,9 @@ async def process_single_contract(session, contract: SmartContract) -> str:
                 status="completed",
                 smart_contract_id=contract.id,
                 signature=signature,
-                timestamp=get_moscow_now()
+                timestamp=get_moscow_now(),
             )
             session.add(new_tx)
-
 
         # Снимаем из frozen_balance фактический объем переводов
         escrow_release = min(creator_frozen, contract_amount)
@@ -144,9 +145,7 @@ async def process_smart_contracts(session):
     """
     log_info("Ruble EOD", "Поиск активных смарт-контрактов для исполнения...")
 
-    result = await session.execute(
-        select(SmartContract).where(SmartContract.status == "active")
-    )
+    result = await session.execute(select(SmartContract).where(SmartContract.status == "active"))
     contracts = result.scalars().all()
 
     processed = 0
@@ -167,14 +166,17 @@ async def process_smart_contracts(session):
                     pending += 1
         except Exception as e:
             failed += 1
-            log_error("Ruble EOD", f"Критический сбой при обработке контракта {contract.id}: {e}")
+            log_error(
+                "Ruble EOD",
+                f"Критический сбой при обработке контракта {contract.id}: {e}",
+            )
             contract.status = "failed"
             contract.error_message = f"Внутренний сбой обработчика: {e}"
 
     await session.commit()
     log_info(
         "Ruble EOD",
-        f"Обработано контрактов: {processed}. Исполнено: {executed}. В ожидании: {pending}. Ошибок: {failed}."
+        f"Обработано контрактов: {processed}. Исполнено: {executed}. В ожидании: {pending}. Ошибок: {failed}.",
     )
 
 

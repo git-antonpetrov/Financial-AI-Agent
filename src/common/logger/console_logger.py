@@ -4,6 +4,7 @@
 """
 
 import sys
+
 import colorama
 
 # Инициализация colorama. strip=not isatty() предотвращает некорректное удаление ANSI-кодов

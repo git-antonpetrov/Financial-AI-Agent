@@ -1,6 +1,6 @@
-from datetime import date, time, datetime
+import datetime as dt
 from decimal import Decimal
-from typing import Optional, List
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -9,6 +9,7 @@ class BaseResponseModel(BaseModel):
     Базовая схема ответа API с поддержкой сериализации из атрибутов ORM (from_attributes=True)
     и обратной совместимостью со словароподобным доступом (__getitem__, __contains__).
     """
+
     model_config = ConfigDict(from_attributes=True)
 
     def __getitem__(self, item: str):
@@ -22,165 +23,169 @@ class BaseResponseModel(BaseModel):
 # СХЕМЫ БАНКОВСКИХ ОТВЕТОВ
 # ============================================================================
 
+
 class TariffResponse(BaseResponseModel):
-    id: Optional[str] = None
-    name: Optional[str] = None
-    service_cost: Optional[Decimal] = Field(default=Decimal("0.00"))
-    non_sbp_limit: Optional[Decimal] = Field(default=Decimal("0.00"))
-    sbp_limit: Optional[Decimal] = Field(default=Decimal("30000000.00"))
-    cash_withdrawal_limit: Optional[Decimal] = Field(default=Decimal("0.00"))
-    cash_withdrawal_fee: Optional[Decimal] = Field(default=Decimal("100.00"))
-    transfer_over_limit_fee_percent: Optional[Decimal] = Field(default=Decimal("2.00"))
-    deposit_fee: Optional[Decimal] = Field(default=Decimal("0.00"))
+    id: str | None = None
+    name: str | None = None
+    service_cost: Decimal | None = Field(default=Decimal("0.00"))
+    non_sbp_limit: Decimal | None = Field(default=Decimal("0.00"))
+    sbp_limit: Decimal | None = Field(default=Decimal("30000000.00"))
+    cash_withdrawal_limit: Decimal | None = Field(default=Decimal("0.00"))
+    cash_withdrawal_fee: Decimal | None = Field(default=Decimal("100.00"))
+    transfer_over_limit_fee_percent: Decimal | None = Field(default=Decimal("2.00"))
+    deposit_fee: Decimal | None = Field(default=Decimal("0.00"))
 
 
 class AccountResponse(BaseResponseModel):
-    id: Optional[str] = None
-    client_id: Optional[str] = None
-    account_number: Optional[str] = None
-    balance: Optional[Decimal] = Field(default=Decimal("0.00"))
-    currency: Optional[str] = "RUB"
-    tariff_id: Optional[str] = None
-    status: Optional[str] = "active"
-    created_at: Optional[datetime] = None
+    id: str | None = None
+    client_id: str | None = None
+    account_number: str | None = None
+    balance: Decimal | None = Field(default=Decimal("0.00"))
+    currency: str | None = "RUB"
+    tariff_id: str | None = None
+    status: str | None = "active"
+    created_at: dt.datetime | None = None
 
 
 class CardResponse(BaseResponseModel):
-    id: Optional[str] = None
-    account_id: Optional[str] = None
-    card_number: Optional[str] = None
-    status: Optional[str] = "active"
-    created_at: Optional[datetime] = None
+    id: str | None = None
+    account_id: str | None = None
+    card_number: str | None = None
+    status: str | None = "active"
+    created_at: dt.datetime | None = None
 
 
 class TransactionResponse(BaseResponseModel):
-    id: Optional[str] = None
-    account_id: Optional[str] = None
-    category: Optional[str] = None
-    operation_type: Optional[str] = None
-    amount: Optional[Decimal] = Field(default=Decimal("0.00"))
-    commission: Optional[Decimal] = Field(default=Decimal("0.00"))
-    description: Optional[str] = None
-    status: Optional[str] = "completed"
-    date: Optional[date] = None
-    time: Optional[time] = None
+    id: str | None = None
+    account_id: str | None = None
+    category: str | None = None
+    operation_type: str | None = None
+    amount: Decimal | None = Field(default=Decimal("0.00"))
+    commission: Decimal | None = Field(default=Decimal("0.00"))
+    description: str | None = None
+    status: str | None = "completed"
+    date: dt.date | None = None
+    time: dt.time | None = None
 
 
 class AutoPaymentResponse(BaseResponseModel):
-    id: Optional[str] = None
-    account_id: Optional[str] = None
-    amount: Optional[Decimal] = Field(default=Decimal("0.00"))
-    recipient: Optional[str] = None
-    schedule: Optional[str] = None
-    next_payment_date: Optional[date] = None
-    is_active: Optional[bool] = True
+    id: str | None = None
+    account_id: str | None = None
+    amount: Decimal | None = Field(default=Decimal("0.00"))
+    recipient: str | None = None
+    schedule: str | None = None
+    next_payment_date: dt.date | None = None
+    is_active: bool | None = True
 
 
 # ============================================================================
 # СХЕМЫ ИНВЕСТИЦИОННЫХ ОТВЕТОВ
 # ============================================================================
 
+
 class InvestmentStrategyResponse(BaseResponseModel):
-    id: Optional[str] = None
-    name: Optional[str] = None
-    expected_yield: Optional[Decimal] = Field(default=Decimal("0.00"))
-    risk_level: Optional[str] = None
-    instruments: Optional[str] = None
-    commission_fee: Optional[Decimal] = Field(default=Decimal("0.00"))
+    id: str | None = None
+    name: str | None = None
+    expected_yield: Decimal | None = Field(default=Decimal("0.00"))
+    risk_level: str | None = None
+    instruments: str | None = None
+    commission_fee: Decimal | None = Field(default=Decimal("0.00"))
 
 
 class SavingsAccountResponse(BaseResponseModel):
-    id: Optional[str] = None
-    client_id: Optional[str] = None
-    account_number: Optional[str] = None
-    balance: Optional[Decimal] = Field(default=Decimal("0.00"))
-    interest_rate: Optional[Decimal] = Field(default=Decimal("0.00"))
-    status: Optional[str] = "active"
-    next_payment_date: Optional[datetime] = None
-    next_payment_amount: Optional[Decimal] = Field(default=Decimal("0.00"))
-    opened_at: Optional[datetime] = None
+    id: str | None = None
+    client_id: str | None = None
+    account_number: str | None = None
+    balance: Decimal | None = Field(default=Decimal("0.00"))
+    interest_rate: Decimal | None = Field(default=Decimal("0.00"))
+    status: str | None = "active"
+    next_payment_date: dt.datetime | None = None
+    next_payment_amount: Decimal | None = Field(default=Decimal("0.00"))
+    opened_at: dt.datetime | None = None
 
 
 class DepositResponse(BaseResponseModel):
-    id: Optional[str] = None
-    client_id: Optional[str] = None
-    account_number: Optional[str] = None
-    balance: Optional[Decimal] = Field(default=Decimal("0.00"))
-    interest_rate: Optional[Decimal] = Field(default=Decimal("0.00"))
-    term_months: Optional[int] = 12
-    status: Optional[str] = "active"
-    next_payment_date: Optional[datetime] = None
-    next_payment_amount: Optional[Decimal] = Field(default=Decimal("0.00"))
-    opened_at: Optional[datetime] = None
+    id: str | None = None
+    client_id: str | None = None
+    account_number: str | None = None
+    balance: Decimal | None = Field(default=Decimal("0.00"))
+    interest_rate: Decimal | None = Field(default=Decimal("0.00"))
+    term_months: int | None = 12
+    status: str | None = "active"
+    next_payment_date: dt.datetime | None = None
+    next_payment_amount: Decimal | None = Field(default=Decimal("0.00"))
+    opened_at: dt.datetime | None = None
 
 
 class BrokerAccountResponse(BaseResponseModel):
-    id: Optional[str] = None
-    client_id: Optional[str] = None
-    account_number: Optional[str] = None
-    balance: Optional[Decimal] = Field(default=Decimal("0.00"))
-    monthly_income: Optional[Decimal] = Field(default=Decimal("0.00"))
-    strategy_id: Optional[str] = None
-    status: Optional[str] = "active"
-    next_commission_date: Optional[datetime] = None
-    opened_at: Optional[datetime] = None
+    id: str | None = None
+    client_id: str | None = None
+    account_number: str | None = None
+    balance: Decimal | None = Field(default=Decimal("0.00"))
+    monthly_income: Decimal | None = Field(default=Decimal("0.00"))
+    strategy_id: str | None = None
+    status: str | None = "active"
+    next_commission_date: dt.datetime | None = None
+    opened_at: dt.datetime | None = None
 
 
 class PortfolioResponse(BaseResponseModel):
-    savings_accounts: List[SavingsAccountResponse] = Field(default_factory=list)
-    deposits: List[DepositResponse] = Field(default_factory=list)
-    broker_accounts: List[BrokerAccountResponse] = Field(default_factory=list)
+    savings_accounts: list[SavingsAccountResponse] = Field(default_factory=list)
+    deposits: list[DepositResponse] = Field(default_factory=list)
+    broker_accounts: list[BrokerAccountResponse] = Field(default_factory=list)
 
 
 # ============================================================================
 # СХЕМЫ ОТВЕТОВ ЦИФРОВОГО РУБЛЯ
 # ============================================================================
 
+
 class WalletResponse(BaseResponseModel):
-    id: Optional[str] = None
-    client_id: Optional[str] = None
-    wallet_number: Optional[str] = None
-    balance: Optional[Decimal] = Field(default=Decimal("0.00"))
-    frozen_balance: Optional[Decimal] = Field(default=Decimal("0.00"))
-    status: Optional[str] = "active"
-    opened_at: Optional[datetime] = None
+    id: str | None = None
+    client_id: str | None = None
+    wallet_number: str | None = None
+    balance: Decimal | None = Field(default=Decimal("0.00"))
+    frozen_balance: Decimal | None = Field(default=Decimal("0.00"))
+    status: str | None = "active"
+    opened_at: dt.datetime | None = None
 
 
 class RubleTransactionResponse(BaseResponseModel):
-    id: Optional[str] = None
-    sender_wallet_id: Optional[str] = None
-    receiver_wallet_id: Optional[str] = None
-    amount: Optional[Decimal] = Field(default=Decimal("0.00"))
-    status: Optional[str] = "completed"
-    smart_contract_id: Optional[str] = None
-    signature: Optional[str] = None
-    timestamp: Optional[datetime] = None
+    id: str | None = None
+    sender_wallet_id: str | None = None
+    receiver_wallet_id: str | None = None
+    amount: Decimal | None = Field(default=Decimal("0.00"))
+    status: str | None = "completed"
+    smart_contract_id: str | None = None
+    signature: str | None = None
+    timestamp: dt.datetime | None = None
 
 
 class SmartContractResponse(BaseResponseModel):
-    id: Optional[str] = None
-    creator_wallet_id: Optional[str] = None
-    receiver_wallet_id: Optional[str] = None
-    amount: Optional[Decimal] = Field(default=Decimal("0.00"))
-    condition_type: Optional[str] = None
-    contract_code: Optional[str] = None
-    condition_status: Optional[str] = "pending"
-    status: Optional[str] = "active"
-    error_message: Optional[str] = None
-    created_at: Optional[datetime] = None
-    executed_at: Optional[datetime] = None
+    id: str | None = None
+    creator_wallet_id: str | None = None
+    receiver_wallet_id: str | None = None
+    amount: Decimal | None = Field(default=Decimal("0.00"))
+    condition_type: str | None = None
+    contract_code: str | None = None
+    condition_status: str | None = "pending"
+    status: str | None = "active"
+    error_message: str | None = None
+    created_at: dt.datetime | None = None
+    executed_at: dt.datetime | None = None
 
 
 # ============================================================================
 # СХЕМЫ КРИПТОГРАФИЧЕСКИХ ЧЕКОВ И СЕРТИФИКАТОВ (БЛОК 5 АРХИТЕКТУРЫ)
 # ============================================================================
 
+
 class SignedReceiptData(BaseResponseModel):
     receipt_id: str
     action: str
     status: str = "completed"
     timestamp: str
-    request_nonce: Optional[str] = None
+    request_nonce: str | None = None
     data: dict = Field(default_factory=dict)
 
 
@@ -191,13 +196,13 @@ class SignedReceiptResponse(BaseResponseModel):
     signer_cn: str = "Financial AI Simulation Bank"
     cert_fingerprint: str
     bank_cert_pem: str
-    ca_cert_pem: Optional[str] = None
+    ca_cert_pem: str | None = None
 
 
 class TransferSuccessResponse(BaseResponseModel):
     status: str = "success"
-    transaction_id: Optional[str] = None
-    signed_receipt: Optional[SignedReceiptResponse] = None
+    transaction_id: str | None = None
+    signed_receipt: SignedReceiptResponse | None = None
 
 
 class BankCertificatesInfoResponse(BaseResponseModel):
@@ -205,4 +210,3 @@ class BankCertificatesInfoResponse(BaseResponseModel):
     bank_cert_pem: str
     bank_fingerprint: str
     signer_cn: str
-

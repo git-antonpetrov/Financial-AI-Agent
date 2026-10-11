@@ -1,32 +1,54 @@
 import uuid
-from datetime import datetime, date, timezone, timedelta
-from sqlalchemy import Column, String, Numeric, DateTime, ForeignKey
-from sqlalchemy.orm import relationship
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+
+from sqlalchemy import Column, DateTime, ForeignKey, String
+from sqlalchemy.orm import relationship
+
+from src.simulations.core.crypto.at_rest import EncryptedDecimal, EncryptedText
 from src.simulations.db.digital_ruble.db.database import Base
-from src.simulations.core.crypto.at_rest import EncryptedText, EncryptedDecimal
+
 
 def generate_uuid():
     return str(uuid.uuid4())
 
+
 def get_moscow_now():
     return (datetime.now(timezone.utc) + timedelta(hours=3)).replace(tzinfo=None)
+
 
 class Wallet(Base):
     __tablename__ = "wallets"
     id = Column(String, primary_key=True, default=generate_uuid)
-    client_id = Column(String, unique=True, nullable=False, index=True) # 1 кошелек = 1 гражданин
+    client_id = Column(String, unique=True, nullable=False, index=True)  # 1 кошелек = 1 гражданин
     wallet_number = Column(EncryptedText(deterministic=True), unique=True, nullable=False)
     balance = Column(EncryptedDecimal, default=Decimal("0.00"))
     frozen_balance = Column(EncryptedDecimal, default=Decimal("0.00"))
     status = Column(String, default="active", index=True)  # Возможные значения: active, blocked
     opened_at = Column(DateTime, default=get_moscow_now)
 
-    sent_transactions = relationship("RubleTransaction", foreign_keys="[RubleTransaction.sender_wallet_id]", back_populates="sender")
-    received_transactions = relationship("RubleTransaction", foreign_keys="[RubleTransaction.receiver_wallet_id]", back_populates="receiver")
+    sent_transactions = relationship(
+        "RubleTransaction",
+        foreign_keys="[RubleTransaction.sender_wallet_id]",
+        back_populates="sender",
+    )
+    received_transactions = relationship(
+        "RubleTransaction",
+        foreign_keys="[RubleTransaction.receiver_wallet_id]",
+        back_populates="receiver",
+    )
 
-    created_contracts = relationship("SmartContract", foreign_keys="[SmartContract.creator_wallet_id]", back_populates="creator")
-    received_contracts = relationship("SmartContract", foreign_keys="[SmartContract.receiver_wallet_id]", back_populates="receiver")
+    created_contracts = relationship(
+        "SmartContract",
+        foreign_keys="[SmartContract.creator_wallet_id]",
+        back_populates="creator",
+    )
+    received_contracts = relationship(
+        "SmartContract",
+        foreign_keys="[SmartContract.receiver_wallet_id]",
+        back_populates="receiver",
+    )
+
 
 class RubleTransaction(Base):
     __tablename__ = "ruble_transactions"
@@ -40,8 +62,13 @@ class RubleTransaction(Base):
     timestamp = Column(DateTime, default=get_moscow_now, index=True)
 
     sender = relationship("Wallet", foreign_keys=[sender_wallet_id], back_populates="sent_transactions")
-    receiver = relationship("Wallet", foreign_keys=[receiver_wallet_id], back_populates="received_transactions")
+    receiver = relationship(
+        "Wallet",
+        foreign_keys=[receiver_wallet_id],
+        back_populates="received_transactions",
+    )
     smart_contract = relationship("SmartContract", back_populates="transactions")
+
 
 class SmartContract(Base):
     __tablename__ = "smart_contracts"

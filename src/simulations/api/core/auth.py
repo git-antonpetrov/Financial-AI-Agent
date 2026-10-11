@@ -1,16 +1,16 @@
 import os
 import secrets
-from typing import Optional, List
-from fastapi import Header, HTTPException, status, Depends, Request
 
-from src.simulations.core.utils.console_logger import log_warning, log_error, log_info
+from fastapi import Header, HTTPException, Request, status
+
 from src.simulations.core.crypto.enclave_verifier import get_enclave_verifier
+from src.simulations.core.utils.console_logger import log_error, log_info, log_warning
 
 
 def extract_token_from_headers(
-    x_bootstrap_token: Optional[str] = None,
-    authorization: Optional[str] = None,
-) -> Optional[str]:
+    x_bootstrap_token: str | None = None,
+    authorization: str | None = None,
+) -> str | None:
     """
     Извлекает токен аутентификации из переданных заголовков.
     Возвращает строку токена или None.
@@ -29,8 +29,8 @@ def extract_token_from_headers(
 
 
 def extract_token(
-    x_bootstrap_token: Optional[str] = Header(None, alias="X-Bootstrap-Token"),
-    authorization: Optional[str] = Header(None, alias="Authorization"),
+    x_bootstrap_token: str | None = Header(None, alias="X-Bootstrap-Token"),
+    authorization: str | None = Header(None, alias="Authorization"),
 ) -> str:
     """
     FastAPI зависимость: извлекает токен аутентификации или бросает HTTP 401.
@@ -41,11 +41,14 @@ def extract_token(
 
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Отсутствует токен аутентификации (X-Bootstrap-Token или Authorization) или цифровая подпись Анклава (X-Enclave-Signature)"
+        detail=(
+            "Отсутствует токен аутентификации (X-Bootstrap-Token или Authorization) "
+            "или цифровая подпись Анклава (X-Enclave-Signature)"
+        ),
     )
 
 
-def verify_agent_token(token: str, allowed_env_vars: List[str], domain_name: str) -> str:
+def verify_agent_token(token: str, allowed_env_vars: list[str], domain_name: str) -> str:
     """
     Проверяет валидность токена агента с защитой от атак по времени (timing attacks).
     """
@@ -61,10 +64,13 @@ def verify_agent_token(token: str, allowed_env_vars: List[str], domain_name: str
         valid_tokens.append(main_token.strip())
 
     if not valid_tokens:
-        log_error("Simulation Auth", f"Не сконфигурированы токены доступа для домена '{domain_name}'")
+        log_error(
+            "Simulation Auth",
+            f"Не сконфигурированы токены доступа для домена '{domain_name}'",
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Ошибка конфигурации сервера: токены для сервиса '{domain_name}' не настроены"
+            detail=f"Ошибка конфигурации сервера: токены для сервиса '{domain_name}' не настроены",
         )
 
     # Проверка совпадения токена с разрешенными
@@ -87,19 +93,22 @@ def verify_agent_token(token: str, allowed_env_vars: List[str], domain_name: str
                 log_warning("Simulation Auth", f"Междоменный доступ к '{domain_name}' отклонен")
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"Доступ к сервису '{domain_name}' запрещен для данного агента"
+                    detail=f"Доступ к сервису '{domain_name}' запрещен для данного агента",
                 )
 
-    log_warning("Simulation Auth", f"Недействительный токен при попытке обращения к '{domain_name}'")
+    log_warning(
+        "Simulation Auth",
+        f"Недействительный токен при попытке обращения к '{domain_name}'",
+    )
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Недействительный токен аутентификации"
+        detail="Недействительный токен аутентификации",
     )
 
 
 async def check_enclave_or_token_auth(
     request: Request,
-    allowed_env_vars: List[str],
+    allowed_env_vars: list[str],
     domain_name: str,
 ) -> str:
     """
@@ -117,7 +126,7 @@ async def check_enclave_or_token_auth(
         if not (enclave_sig and nonce and timestamp):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Для аутентификации Анклава требуются все заголовки: X-Enclave-Signature, X-Nonce, X-Timestamp"
+                detail="Для аутентификации Анклава требуются все заголовки: X-Enclave-Signature, X-Nonce, X-Timestamp",
             )
 
         # Читаем тело запроса
@@ -136,15 +145,12 @@ async def check_enclave_or_token_auth(
         if not is_valid:
             if "Replay Attack" in reason or "уже был использован" in reason:
                 log_warning("Simulation Auth", f"Replay attack на '{domain_name}': {reason}")
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=reason
-                )
-            log_warning("Simulation Auth", f"Ошибка верификации Анклава на '{domain_name}': {reason}")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=reason
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=reason)
+            log_warning(
+                "Simulation Auth",
+                f"Ошибка верификации Анклава на '{domain_name}': {reason}",
             )
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=reason)
 
         # Запоминаем проверенный nonce в состоянии запроса для включения в Signed Receipt
         request.state.enclave_nonce = nonce
@@ -156,17 +162,24 @@ async def check_enclave_or_token_auth(
             authorization=request.headers.get("Authorization"),
         )
         if optional_token:
-            verify_agent_token(token=optional_token, allowed_env_vars=allowed_env_vars, domain_name=domain_name)
+            verify_agent_token(
+                token=optional_token,
+                allowed_env_vars=allowed_env_vars,
+                domain_name=domain_name,
+            )
             request.state.authenticated_agent = optional_token
 
-        log_info("Simulation Auth", f"Успешная верификация подписи Анклава для домена '{domain_name}' (nonce={nonce})")
+        log_info(
+            "Simulation Auth",
+            f"Успешная верификация подписи Анклава для домена '{domain_name}' (nonce={nonce})",
+        )
         return f"enclave:{nonce}"
 
     # Строгий режим безопасности: подпись Анклава обязательна по умолчанию (SEC-09)
     if os.getenv("REQUIRE_ENCLAVE_SIGNATURE", "true").lower() in ("true", "1", "yes"):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Строгий режим безопасности: требуется цифровая подпись Анклава (X-Enclave-Signature)"
+            detail="Строгий режим безопасности: требуется цифровая подпись Анклава (X-Enclave-Signature)",
         )
 
     # Иначе стандартная проверка Bootstrap токена
@@ -177,7 +190,10 @@ async def check_enclave_or_token_auth(
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Отсутствует токен аутентификации (X-Bootstrap-Token или Authorization) или цифровая подпись Анклава (X-Enclave-Signature)"
+            detail=(
+                "Отсутствует токен аутентификации (X-Bootstrap-Token или Authorization) "
+                "или цифровая подпись Анклава (X-Enclave-Signature)"
+            ),
         )
 
     return verify_agent_token(token=token, allowed_env_vars=allowed_env_vars, domain_name=domain_name)
@@ -188,7 +204,7 @@ async def verify_bank_token(request: Request) -> str:
     return await check_enclave_or_token_auth(
         request=request,
         allowed_env_vars=["AGENT_BANK_BOOTSTRAP_TOKEN"],
-        domain_name="Bank"
+        domain_name="Bank",
     )
 
 
@@ -197,7 +213,7 @@ async def verify_invest_token(request: Request) -> str:
     return await check_enclave_or_token_auth(
         request=request,
         allowed_env_vars=["AGENT_INVEST_BOOTSTRAP_TOKEN"],
-        domain_name="Invest"
+        domain_name="Invest",
     )
 
 
@@ -206,17 +222,17 @@ async def verify_digital_token(request: Request) -> str:
     allowed = ["AGENT_DIGITAL_BOOTSTRAP_TOKEN"]
     if request.url.path.endswith("/condition"):
         allowed.extend(["ORACLE_BOOTSTRAP_TOKEN", "AGENT_ORACLE_BOOTSTRAP_TOKEN"])
-    return await check_enclave_or_token_auth(
-        request=request,
-        allowed_env_vars=allowed,
-        domain_name="Digital Ruble"
-    )
+    return await check_enclave_or_token_auth(request=request, allowed_env_vars=allowed, domain_name="Digital Ruble")
 
 
 async def verify_oracle_token(request: Request) -> str:
     """FastAPI Dependency для проверки прав оракула при обновлении условий контракта."""
     return await check_enclave_or_token_auth(
         request=request,
-        allowed_env_vars=["ORACLE_BOOTSTRAP_TOKEN", "AGENT_ORACLE_BOOTSTRAP_TOKEN", "AGENT_DIGITAL_BOOTSTRAP_TOKEN"],
-        domain_name="Oracle"
+        allowed_env_vars=[
+            "ORACLE_BOOTSTRAP_TOKEN",
+            "AGENT_ORACLE_BOOTSTRAP_TOKEN",
+            "AGENT_DIGITAL_BOOTSTRAP_TOKEN",
+        ],
+        domain_name="Oracle",
     )

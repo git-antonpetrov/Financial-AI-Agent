@@ -1,16 +1,21 @@
 import uuid
-from datetime import datetime, date, timezone, timedelta
-from sqlalchemy import Column, String, Numeric, DateTime, ForeignKey
-from sqlalchemy.orm import relationship
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+
+from sqlalchemy import Column, DateTime, ForeignKey, Numeric, String
+from sqlalchemy.orm import relationship
+
+from src.simulations.core.crypto.at_rest import EncryptedDecimal, EncryptedText
 from src.simulations.db.invest.db.database import Base
-from src.simulations.core.crypto.at_rest import EncryptedText, EncryptedDecimal
+
 
 def generate_uuid():
     return str(uuid.uuid4())
 
+
 def get_moscow_now():
     return (datetime.now(timezone.utc) + timedelta(hours=3)).replace(tzinfo=None)
+
 
 class InvestmentStrategy(Base):
     __tablename__ = "investment_strategies"
@@ -20,8 +25,9 @@ class InvestmentStrategy(Base):
     risk_level = Column(String, nullable=False)  # Уровень риска: Low, Medium, High
     instruments = Column(String, nullable=False)
     commission_fee = Column(Numeric(5, 2), default=0.00)  # % комиссии (от 5 до 25)
-    
+
     broker_accounts = relationship("BrokerAccount", back_populates="strategy")
+
 
 class SavingsAccount(Base):
     __tablename__ = "savings_accounts"
@@ -34,6 +40,7 @@ class SavingsAccount(Base):
     next_payment_date = Column(DateTime, nullable=True, index=True)
     next_payment_amount = Column(Numeric(12, 2), default=0.00)
     opened_at = Column(DateTime, default=get_moscow_now)
+
 
 class Deposit(Base):
     __tablename__ = "deposits"
@@ -48,6 +55,7 @@ class Deposit(Base):
     next_payment_amount = Column(Numeric(12, 2), default=0.00)
     opened_at = Column(DateTime, default=get_moscow_now)
 
+
 class BrokerAccount(Base):
     __tablename__ = "broker_accounts"
     id = Column(String, primary_key=True, default=generate_uuid)
@@ -60,5 +68,4 @@ class BrokerAccount(Base):
     next_commission_date = Column(DateTime, nullable=True, index=True)  # Дата списания комиссии
     opened_at = Column(DateTime, default=get_moscow_now)
 
-    
     strategy = relationship("InvestmentStrategy", back_populates="broker_accounts")

@@ -1,13 +1,12 @@
 import datetime
 import os
 from pathlib import Path
-from typing import Tuple, Optional
 
 from cryptography import x509
-from cryptography.x509.oid import NameOID
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 
 from .passphrase_vault import resolve_root_ca_passphrase
 
@@ -15,7 +14,7 @@ from .passphrase_vault import resolve_root_ca_passphrase
 class RootCAEngine:
     """
     Ядро Корневого Удостоверяющего Центра (Root CA Engine).
-    
+
     Управляет жизненным циклом 4096-битной пары ключей Root CA и корневого сертификата:
     1. Приватный ключ всегда сохраняется на диске в зашифрованном виде (PKCS#8 + AES-256).
     2. Серийные номера сертификатов инкрементируются через счетчик serial.txt.
@@ -29,7 +28,7 @@ class RootCAEngine:
     def __init__(
         self,
         data_dir: Path | str,
-        passphrase: Optional[str] = None,
+        passphrase: str | None = None,
         key_size: int = 4096,
         validity_years: int = 10,
     ):
@@ -42,10 +41,10 @@ class RootCAEngine:
         self.cert_path = self.data_dir / "ca.crt"
         self.serial_path = self.data_dir / "serial.txt"
 
-        self._cached_cert: Optional[x509.Certificate] = None
-        self._cached_private_key: Optional[rsa.RSAPrivateKey] = None
+        self._cached_cert: x509.Certificate | None = None
+        self._cached_private_key: rsa.RSAPrivateKey | None = None
 
-    def ensure_initialized(self) -> Tuple[x509.Certificate, rsa.RSAPrivateKey]:
+    def ensure_initialized(self) -> tuple[x509.Certificate, rsa.RSAPrivateKey]:
         """
         Гарантирует инициализацию Root CA: загружает существующий или генерирует новый.
         """
@@ -56,9 +55,9 @@ class RootCAEngine:
 
     def initialize(
         self,
-        common_name: Optional[str] = None,
+        common_name: str | None = None,
         force: bool = False,
-    ) -> Tuple[x509.Certificate, rsa.RSAPrivateKey]:
+    ) -> tuple[x509.Certificate, rsa.RSAPrivateKey]:
         """
         Генерирует новую пару ключей Root CA, сохраняет зашифрованный приватный ключ
         и выпускает самоподписанный корневой сертификат.
@@ -83,9 +82,7 @@ class RootCAEngine:
         encrypted_pem = private_key.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.BestAvailableEncryption(
-                self.passphrase.encode("utf-8")
-            ),
+            encryption_algorithm=serialization.BestAvailableEncryption(self.passphrase.encode("utf-8")),
         )
         self.key_path.write_bytes(encrypted_pem)
         try:
@@ -95,14 +92,16 @@ class RootCAEngine:
             pass
 
         # 3. Формирование Subject и Issuer
-        subject = issuer = x509.Name([
-            x509.NameAttribute(NameOID.COUNTRY_NAME, "RU"),
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, self.DEFAULT_ORG),
-            x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, self.DEFAULT_OU),
-            x509.NameAttribute(NameOID.COMMON_NAME, cn),
-        ])
+        subject = issuer = x509.Name(
+            [
+                x509.NameAttribute(NameOID.COUNTRY_NAME, "RU"),
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, self.DEFAULT_ORG),
+                x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, self.DEFAULT_OU),
+                x509.NameAttribute(NameOID.COMMON_NAME, cn),
+            ]
+        )
 
-        now = datetime.datetime.now(datetime.timezone.utc)
+        now = datetime.datetime.now(datetime.UTC)
         validity_days = self.validity_years * 365 + 2  # учет високосных лет
 
         # 4. Формирование самоподписанного сертификата X.509 Root CA
@@ -152,14 +151,12 @@ class RootCAEngine:
         self._cached_private_key = private_key
         return cert, private_key
 
-    def load_ca(self) -> Tuple[x509.Certificate, rsa.RSAPrivateKey]:
+    def load_ca(self) -> tuple[x509.Certificate, rsa.RSAPrivateKey]:
         """
         Загружает сертификат и расшифровывает приватный ключ Root CA в оперативную память.
         """
         if not self.key_path.exists() or not self.cert_path.exists():
-            raise FileNotFoundError(
-                f"Файлы Root CA не найдены в {self.data_dir}. Выполните initialize()."
-            )
+            raise FileNotFoundError(f"Файлы Root CA не найдены в {self.data_dir}. Выполните initialize().")
 
         cert_bytes = self.cert_path.read_bytes()
         cert = x509.load_pem_x509_certificate(cert_bytes, default_backend())

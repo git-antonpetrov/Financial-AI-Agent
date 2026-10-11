@@ -1,39 +1,42 @@
-import os
 import hashlib
 import json
-import requests
+import os
 import re
+from collections.abc import Callable
+from typing import Any
+
+import requests
 import yaml
-from typing import Callable, Any, Optional
-try:
-    from src.common.logger import log_info, log_error, log_warning
-except ImportError:
-    from core.utils.console_logger import log_info, log_error, log_warning
 
 try:
-    from src.admin_client.backend.core.utils.pdf_converter import convert_to_pdf
-    from src.admin_client.backend.core.utils.content_ai import ContentCaptureRecognizer
+    from src.common.logger import log_error, log_info, log_warning
 except ImportError:
-    from core.utils.pdf_converter import convert_to_pdf
+    from core.utils.console_logger import log_error, log_info, log_warning
+
+try:
+    from src.admin_client.backend.core.utils.content_ai import ContentCaptureRecognizer
+    from src.admin_client.backend.core.utils.pdf_converter import convert_to_pdf
+except ImportError:
     from core.utils.content_ai import ContentCaptureRecognizer
+    from core.utils.pdf_converter import convert_to_pdf
 
 try:
     from src.admin_client.backend.core.crypto import (
-        ZeroTrustClientSigner,
-        find_root_ca_in_windows_store,
-        find_client_cert_in_windows_store,
-        export_windows_cert_to_cache,
         WindowsCertificateStoreError,
+        ZeroTrustClientSigner,
+        export_windows_cert_to_cache,
+        find_client_cert_in_windows_store,
+        find_root_ca_in_windows_store,
         get_windows_cert_store_help_message,
     )
 except ImportError:
     try:
         from core.crypto import (
-            ZeroTrustClientSigner,
-            find_root_ca_in_windows_store,
-            find_client_cert_in_windows_store,
-            export_windows_cert_to_cache,
             WindowsCertificateStoreError,
+            ZeroTrustClientSigner,
+            export_windows_cert_to_cache,
+            find_client_cert_in_windows_store,
+            find_root_ca_in_windows_store,
             get_windows_cert_store_help_message,
         )
     except ImportError:
@@ -42,12 +45,16 @@ except ImportError:
         find_client_cert_in_windows_store = None
         export_windows_cert_to_cache = None
         WindowsCertificateStoreError = RuntimeError
-        get_windows_cert_store_help_message = lambda x: "Сертификаты Zero-Trust не найдены"
+
+        def get_windows_cert_store_help_message(x):
+            return "Сертификаты Zero-Trust не найдены"
+
 
 import threading
 
 _ACTIVE_MD5_LOCK = threading.Lock()
 _ACTIVE_MD5S = set()
+
 
 class DocumentPipeline:
     """
@@ -62,15 +69,15 @@ class DocumentPipeline:
         contentai_username: str = "",
         contentai_password: str = "",
         contentai_api_uri: str = "",
-        ca_cert_path: Optional[str] = None,
-        client_cert_path: Optional[str] = None,
-        client_key_path: Optional[str] = None,
-        signer: Optional[Any] = None,
-        use_zero_trust: bool = True
+        ca_cert_path: str | None = None,
+        client_cert_path: str | None = None,
+        client_key_path: str | None = None,
+        signer: Any | None = None,
+        use_zero_trust: bool = True,
     ):
         """
         Инициализирует экземпляр пайплайна с параметрами подключения к серверу, Content AI и mTLS.
-        
+
         Args:
             server_url (str): Базовый URL сервера (например, https://api.my-vds.com)
             admin_token (str): JWT токен администратора для авторизации запросов
@@ -80,7 +87,7 @@ class DocumentPipeline:
             signer (Optional[ZeroTrustClientSigner]): Экземпляр клиента цифровой подписи
             use_zero_trust (bool): Использовать защищенный эндпоинт /api/v1/rag/documents с цифровой подписью
         """
-        self.server_url = server_url.rstrip('/')
+        self.server_url = server_url.rstrip("/")
         self.headers = {"Authorization": f"Bearer {admin_token}"}
         self.contentai_username = contentai_username
         self.contentai_password = contentai_password
@@ -103,7 +110,11 @@ class DocumentPipeline:
 
         self.client_cert_path = client_cert_path or os.getenv("ADMIN_CLIENT_CERT_PATH")
         if not self.client_cert_path or not os.path.exists(self.client_cert_path):
-            for default_cert in ["./certs/admin_client.crt", "/certs/admin_client.crt", "certs/admin_client.crt"]:
+            for default_cert in [
+                "./certs/admin_client.crt",
+                "/certs/admin_client.crt",
+                "certs/admin_client.crt",
+            ]:
                 if os.path.exists(default_cert):
                     self.client_cert_path = default_cert
                     break
@@ -116,7 +127,11 @@ class DocumentPipeline:
 
         self.client_key_path = client_key_path or os.getenv("ADMIN_CLIENT_KEY_PATH")
         if not self.client_key_path or not os.path.exists(self.client_key_path):
-            for default_key in ["./certs/admin_client.key", "/certs/admin_client.key", "certs/admin_client.key"]:
+            for default_key in [
+                "./certs/admin_client.key",
+                "/certs/admin_client.key",
+                "certs/admin_client.key",
+            ]:
                 if os.path.exists(default_key):
                     self.client_key_path = default_key
                     break
@@ -143,26 +158,29 @@ class DocumentPipeline:
                     mode=signer_mode,
                     cert_path=self.client_cert_path,
                     key_path=self.client_key_path,
-                    ca_cert_path=self.ca_cert_path
+                    ca_cert_path=self.ca_cert_path,
                 )
             except Exception as e:
-                log_warning("Pipeline", f"Не удалось инициализировать ZeroTrustClientSigner: {e}")
+                log_warning(
+                    "Pipeline",
+                    f"Не удалось инициализировать ZeroTrustClientSigner: {e}",
+                )
                 self.signer = None
         else:
             self.signer = None
-        
+
         # Функция обратного вызова для отправки прогресса во фронтенд (React)
         # Если она не задана, по умолчанию ничего не делает.
         # Сигнатура: callback(filename, status_enum, display_message)
         self.on_progress_update: Callable[[str, str, str], None] = lambda filename, status, message: None
-        
+
         # Ленивая инициализация клиента Content AI
         self._recognizer = None
 
     def set_progress_callback(self, callback: Callable[[str, str, str], None]):
         """
         Устанавливает функцию обратного вызова для передачи статуса обработки в пользовательский интерфейс.
-        
+
         Args:
             callback: Функция, принимающая (имя_файла, статус, текстовое_сообщение).
                       Примеры статусов: 'processing', 'completed', 'error', 'skipped'
@@ -172,17 +190,17 @@ class DocumentPipeline:
     def process_file(self, file_path: str, agent_name: str) -> dict[str, Any]:
         """
         Обрабатывает отдельный документ, последовательно выполняя все шаги пайплайна.
-        
+
         Args:
             file_path (str): Локальный путь к файлу на компьютере администратора
             agent_name (str): Имя RAG-агента (например, 'digital')
-            
+
         Returns:
             dict: Словарь с итоговым результатом обработки
         """
         filename = os.path.basename(file_path)
         log_info("Pipeline", f"Начало обработки файла: {filename}")
-        
+
         # Отправляем в React красивое уведомление о старте
         self.on_progress_update(filename, "processing", "Шаг 1: Вычисление MD5 и проверка дубликатов...")
 
@@ -192,32 +210,34 @@ class DocumentPipeline:
             # ШАГ 1: ВЫЧИСЛЕНИЕ ХЭША И ПРОВЕРКА НА ДУБЛЬ
             # ==========================================
             file_hash = self._calculate_md5(file_path)
-            
+
             with _ACTIVE_MD5_LOCK:
                 if file_hash in _ACTIVE_MD5S:
                     msg = "Пропущен: Точная копия файла уже находится в процессе обработки локально"
-                    log_warning("Pipeline", f"Файл {filename} отброшен (локальный дубликат): {msg}")
+                    log_warning(
+                        "Pipeline",
+                        f"Файл {filename} отброшен (локальный дубликат): {msg}",
+                    )
                     self.on_progress_update(filename, "skipped", msg)
                     return {"status": "skipped", "reason": "md5_duplicate_local"}
                 _ACTIVE_MD5S.add(file_hash)
                 is_hash_locked = True
-                
+
             is_duplicate = self._check_duplicate_on_server(filename, file_hash, agent_name)
             if is_duplicate:
                 msg = "Пропущен: Точная копия файла уже загружена (дубликат)"
                 log_warning("Pipeline", f"Файл {filename} отброшен: {msg}")
-                
+
                 # Сигнализируем React'у, что файл нужно покрасить в серый/желтый цвет
                 self.on_progress_update(filename, "skipped", msg)
                 return {"status": "skipped", "reason": "md5_duplicate"}
-
 
             # ==========================================
             # ШАГ 2: КОНВЕРТАЦИЯ В PDF (ПРИ НЕОБХОДИМОСТИ)
             # ==========================================
             working_file_path = file_path
             _, ext = os.path.splitext(file_path)
-            if ext.lower() not in ['.pdf']:
+            if ext.lower() not in [".pdf"]:
                 log_info("Pipeline", f"Конвертация {filename} в PDF...")
                 self.on_progress_update(filename, "processing", f"Шаг 2: Конвертация {ext} в PDF...")
                 # Кладем сконвертированный PDF во временную папку (рядом с оригиналом)
@@ -233,73 +253,84 @@ class DocumentPipeline:
             self.on_progress_update(filename, "processing", "Шаг 3: Распознавание текста (Content AI)...")
             log_info("Pipeline", "Отправка документа в Content AI...")
             if not self._recognizer:
-                self._recognizer = ContentCaptureRecognizer(username=self.contentai_username, password=self.contentai_password, api_uri=self.contentai_api_uri)
-                
+                self._recognizer = ContentCaptureRecognizer(
+                    username=self.contentai_username,
+                    password=self.contentai_password,
+                    api_uri=self.contentai_api_uri,
+                )
+
             ocr_results = self._recognizer.recognize(working_file_path)
-            
+
             if filename_to_recognize not in ocr_results:
                 raise Exception("Content AI не вернул результаты для файла")
-                
+
             parsed_dict = ocr_results[filename_to_recognize]["parsed_dict"]
             recognized_text = self._extract_text_from_parsed_dict(parsed_dict)
-            
+
             if not recognized_text.strip():
                 raise Exception("Из документа не удалось извлечь ни одного слова (текст пуст). Возможно файл битый.")
 
             # ==========================================
             # ШАГ 4: АНАЛИЗ НАЗВАНИЯ И ТИПА ДОКУМЕНТА (GEMINI)
             # ==========================================
-            self.on_progress_update(filename, "processing", "Шаг 4: Анализ названия и типа документа (Gemini)...")
+            self.on_progress_update(
+                filename,
+                "processing",
+                "Шаг 4: Анализ названия и типа документа (Gemini)...",
+            )
             log_info("Pipeline", "Отправка текста на LLM-анализ...")
-            
+
             # Берем первые ~15000 символов, чтобы не превысить лимит токенов (хватит для понимания сути документа)
             analyze_url = f"{self.server_url}/api/llm/analyze"
             analyze_resp = self.session.post(
                 analyze_url,
                 headers=self.headers,
                 json={"text": recognized_text[:15000]},
-                timeout=(5, 120)
+                timeout=(5, 120),
             )
             try:
                 analyze_resp.raise_for_status()
             except requests.exceptions.HTTPError as e:
                 error_detail = analyze_resp.text
                 raise Exception(f"HTTP Error {analyze_resp.status_code}: {error_detail}") from e
-                
+
             analyze_data = analyze_resp.json()
-            
+
             system_name = analyze_data.get("system_name")
             short_name = analyze_data.get("short_name")
-            
+
             if not system_name or not short_name:
                 raise Exception(f"LLM вернул некорректный ответ: {analyze_data}")
-                
-            log_info("Pipeline", f"LLM успешно определил имена: system_name='{system_name}', short_name='{short_name}'")
+
+            log_info(
+                "Pipeline",
+                f"LLM успешно определил имена: system_name='{system_name}', short_name='{short_name}'",
+            )
 
             # ==========================================
             # ШАГ 5: ПРОВЕРКА ВЕРСИИ ПО ДАТЕ
             # ==========================================
             self.on_progress_update(filename, "processing", "Шаг 5: Проверка актуальности версии...")
             log_info("Pipeline", f"Проверка версии для {short_name}...")
-            
+
             date_url = f"{self.server_url}/api/documents/check/date"
             date_payload = {
                 "system_name": system_name,
                 "short_name": short_name,
                 "file_hash": file_hash,
                 "filename": filename,
-                "agent_name": agent_name
+                "agent_name": agent_name,
             }
-            
+
             date_resp = self.session.post(date_url, headers=self.headers, json=date_payload, timeout=(5, 120))
             date_resp.raise_for_status()
-            
+
             if date_resp.json().get("status") == "old_version":
                 msg = "Пропущен: У нас уже загружена более новая версия этого документа"
                 log_warning("Pipeline", f"Файл {filename} отброшен: {msg}")
                 self.on_progress_update(filename, "skipped", msg)
                 return {"status": "skipped", "reason": "old_version"}
-                
+
             log_info("Pipeline", "Проверка актуальности пройдена (документ новый или свежий)")
 
             # ==========================================
@@ -307,43 +338,56 @@ class DocumentPipeline:
             # ==========================================
             self.on_progress_update(filename, "processing", "Шаг 6: Поиск отмененных актов (Gemini)...")
             log_info("Pipeline", "Поиск абзацев об отмене...")
-            
+
             repealed_paragraphs = self._extract_repeal_paragraphs(recognized_text)
             repealed_short_names = []
-            
+
             if repealed_paragraphs:
-                log_info("Pipeline", f"Найдено подозрительных абзацев: {len(repealed_paragraphs)}. Отправляем в LLM...")
+                log_info(
+                    "Pipeline",
+                    f"Найдено подозрительных абзацев: {len(repealed_paragraphs)}. Отправляем в LLM...",
+                )
                 repeal_url = f"{self.server_url}/api/llm/find_repealed"
                 repeal_resp = self.session.post(
                     repeal_url,
                     headers=self.headers,
                     json={"snippets": repealed_paragraphs},
-                    timeout=(5, 120)
+                    timeout=(5, 120),
                 )
-                
+
                 if repeal_resp.status_code == 200:
                     repealed_short_names = repeal_resp.json().get("short_names", [])
                     if repealed_short_names:
-                        log_info("Pipeline", f"Найдено отмененных актов: {repealed_short_names}")
+                        log_info(
+                            "Pipeline",
+                            f"Найдено отмененных актов: {repealed_short_names}",
+                        )
                 else:
-                    log_warning("Pipeline", f"Ошибка сервера при поиске отмененных актов: {repeal_resp.text}")
+                    log_warning(
+                        "Pipeline",
+                        f"Ошибка сервера при поиске отмененных актов: {repeal_resp.text}",
+                    )
 
             # ==========================================
             # ШАГ 7: СБОРКА MARKDOWN И ОТПРАВКА НА СЕРВЕР
             # ==========================================
-            self.on_progress_update(filename, "processing", "Шаг 7: Подготовка и загрузка на сервер (Векторизация)...")
+            self.on_progress_update(
+                filename,
+                "processing",
+                "Шаг 7: Подготовка и загрузка на сервер (Векторизация)...",
+            )
             log_info("Pipeline", "Формирование Markdown и отправка...")
-            
+
             # Формируем главный файл (upsert) с безопасной сериализацией YAML frontmatter
             frontmatter_data = {
                 "short_name": str(short_name),
-                "system_name": str(system_name)
+                "system_name": str(system_name),
             }
             frontmatter_yaml = yaml.safe_dump(frontmatter_data, allow_unicode=True, default_flow_style=False).strip()
-            markdown_content = f'---\n{frontmatter_yaml}\n---\n\n{recognized_text}'
-            
+            markdown_content = f"---\n{frontmatter_yaml}\n---\n\n{recognized_text}"
+
             # Санитизация system_name для безопасного имени файла в multipart-запросе
-            safe_system_name = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', str(system_name)).strip('._')
+            safe_system_name = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", str(system_name)).strip("._")
             if not safe_system_name:
                 safe_system_name = f"doc_{file_hash[:8]}"
 
@@ -354,7 +398,10 @@ class DocumentPipeline:
             if not self.signer:
                 raise RuntimeError("ZeroTrustClientSigner не инициализирован для защищенной отправки документов в RAG")
             try:
-                log_info("Pipeline", "Отправка документа через защищенный Zero-Trust RAG эндпоинт /api/v1/rag/documents...")
+                log_info(
+                    "Pipeline",
+                    "Отправка документа через защищенный Zero-Trust RAG эндпоинт /api/v1/rag/documents...",
+                )
                 ack_receipt = self.submit_zero_trust_document(
                     document_title=str(system_name),
                     content=markdown_content,
@@ -364,13 +411,19 @@ class DocumentPipeline:
                         "agent_name": agent_name,
                         "short_name": str(short_name),
                         "file_hash": file_hash,
-                        "filename": filename
-                    }
+                        "filename": filename,
+                    },
                 )
                 if not ack_receipt.get("receipt_verified"):
-                    raise RuntimeError(f"Квитанция сервера AckReceipt не прошла криптографическую проверку подписи (receipt_id={ack_receipt.get('receipt_id')})")
+                    raise RuntimeError(
+                        "Квитанция сервера AckReceipt не прошла криптографическую проверку подписи "
+                        f"(receipt_id={ack_receipt.get('receipt_id')})"
+                    )
                 zero_trust_used = True
-                log_info("Pipeline", f"Документ успешно передан в RAG через Zero-Trust (receipt_id={ack_receipt.get('receipt_id')})")
+                log_info(
+                    "Pipeline",
+                    f"Документ успешно передан в RAG через Zero-Trust (receipt_id={ack_receipt.get('receipt_id')})",
+                )
             except Exception as zte:
                 log_error("Pipeline", f"Ошибка Zero-Trust отправки документа: {zte}")
                 raise RuntimeError(f"Zero-Trust передача документа завершилась ошибкой: {zte}") from zte
@@ -379,10 +432,18 @@ class DocumentPipeline:
             # ШАГ 8: ОТПРАВКА СПИСКА УСТАРЕВШИХ АКТОВ
             # ==========================================
             if repealed_short_names:
-                self.on_progress_update(filename, "processing", "Шаг 8: Отправка списка устаревших актов на удаление...")
+                self.on_progress_update(
+                    filename,
+                    "processing",
+                    "Шаг 8: Отправка списка устаревших актов на удаление...",
+                )
                 if not self.signer:
                     raise RuntimeError("ZeroTrustClientSigner не инициализирован для защищенного удаления документов")
-                log_info("Pipeline", "Отправка списка устаревших актов через защищенный Zero-Trust эндпоинт /api/v1/rag/documents/delete...")
+                log_info(
+                    "Pipeline",
+                    "Отправка списка устаревших актов через защищенный Zero-Trust "
+                    "эндпоинт /api/v1/rag/documents/delete...",
+                )
                 del_ack = self.submit_zero_trust_document_delete(
                     repealed_short_names=repealed_short_names,
                     collection_name=f"knowledge-{agent_name}",
@@ -390,61 +451,70 @@ class DocumentPipeline:
                         "source": "admin_workstation",
                         "agent_name": agent_name,
                         "file_hash": file_hash,
-                        "filename": filename
-                    }
+                        "filename": filename,
+                    },
                 )
                 if not del_ack.get("receipt_verified"):
-                    raise RuntimeError(f"Квитанция сервера AckReceipt для удаления не прошла криптографическую проверку (receipt_id={del_ack.get('receipt_id')})")
-                log_info("Pipeline", f"Устаревшие акты успешно удалены через Zero-Trust (receipt_id={del_ack.get('receipt_id')})")
+                    raise RuntimeError(
+                        "Квитанция сервера AckReceipt для удаления не прошла криптографическую проверку "
+                        f"(receipt_id={del_ack.get('receipt_id')})"
+                    )
+                log_info(
+                    "Pipeline",
+                    f"Устаревшие акты успешно удалены через Zero-Trust (receipt_id={del_ack.get('receipt_id')})",
+                )
 
             # Успешное завершение всего пайплайна для этого файла!
             success_msg = "Успешно! Документ отправлен в очередь на обработку."
             log_info("Pipeline", success_msg)
             self.on_progress_update(filename, "completed", success_msg)
-            
+
             return {
-                "status": "success", 
-                "file_hash": file_hash, 
-                "system_name": system_name, 
+                "status": "success",
+                "file_hash": file_hash,
+                "system_name": system_name,
                 "short_name": short_name,
                 "repealed_docs": repealed_short_names,
                 "text_length": len(recognized_text),
                 "zero_trust": zero_trust_used,
-                "receipt": ack_receipt
+                "receipt": ack_receipt,
             }
 
         except requests.exceptions.RequestException as e:
             # Отдельно ловим сетевые ошибки (если VDS упал)
-            error_msg = f"Ошибка сети при связи с сервером: {str(e)}"
+            error_msg = f"Ошибка сети при связи с сервером: {e!s}"
             log_error("Pipeline", f"Сбой в файле {filename} -> {error_msg}")
             self.on_progress_update(filename, "error", error_msg)
             return {"status": "error", "message": error_msg}
-            
+
         except Exception as e:
-            error_msg = f"Критическая ошибка: {str(e)}"
+            error_msg = f"Критическая ошибка: {e!s}"
             log_error("Pipeline", f"Сбой в файле {filename} -> {error_msg}")
             self.on_progress_update(filename, "error", error_msg)
             return {"status": "error", "message": str(e)}
 
         finally:
             # Освобождаем локальную блокировку MD5 только если этот поток её установил
-            if is_hash_locked and 'file_hash' in locals():
+            if is_hash_locked and "file_hash" in locals():
                 with _ACTIVE_MD5_LOCK:
                     _ACTIVE_MD5S.discard(file_hash)
-                    
+
             # Очистка временных файлов PDF
-            if 'working_file_path' in locals() and working_file_path != file_path and os.path.exists(working_file_path):
+            if "working_file_path" in locals() and working_file_path != file_path and os.path.exists(working_file_path):
                 try:
                     os.remove(working_file_path)
                 except Exception as ex:
-                    log_warning("Pipeline", f"Не удалось удалить временный файл {working_file_path}: {ex}")
+                    log_warning(
+                        "Pipeline",
+                        f"Не удалось удалить временный файл {working_file_path}: {ex}",
+                    )
 
     def submit_zero_trust_document(
         self,
         document_title: str,
         content: str,
         collection_name: str = "financial_kb",
-        metadata: Optional[dict[str, Any]] = None
+        metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         Отправляет документ в защищенный эндпоинт RAG (POST /api/v1/rag/documents)
@@ -457,7 +527,7 @@ class DocumentPipeline:
             "document_title": document_title,
             "collection_name": collection_name,
             "content": content,
-            "metadata": metadata or {}
+            "metadata": metadata or {},
         }
         body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
@@ -466,7 +536,7 @@ class DocumentPipeline:
         combined_headers = {
             **self.headers,
             **zt_headers,
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
 
         url = f"{self.server_url}/api/v1/rag/documents"
@@ -492,15 +562,24 @@ class DocumentPipeline:
                         server_key_or_cert = pk_data.get("certificate") or pk_data.get("public_key")
                         if server_key_or_cert:
                             receipt_verified = self.signer.verify_server_receipt(
-                                resp_data, server_sig, trusted_server_cert_or_pubkey=server_key_or_cert
+                                resp_data,
+                                server_sig,
+                                trusted_server_cert_or_pubkey=server_key_or_cert,
                             )
                 except Exception:
                     pass
 
             if not receipt_verified:
-                log_warning("Pipeline", f"Предупреждение: подпись квитанции сервера {resp_data.get('receipt_id')} не подтверждена")
+                log_warning(
+                    "Pipeline",
+                    f"Предупреждение: подпись квитанции сервера {resp_data.get('receipt_id')} не подтверждена",
+                )
             else:
-                log_info("Pipeline", f"Квитанция сервера AckReceipt подтверждена криптографически: receipt_id={resp_data.get('receipt_id')}")
+                log_info(
+                    "Pipeline",
+                    "Квитанция сервера AckReceipt подтверждена криптографически: "
+                    f"receipt_id={resp_data.get('receipt_id')}",
+                )
 
         resp_data["receipt_verified"] = receipt_verified
         return resp_data
@@ -509,7 +588,7 @@ class DocumentPipeline:
         self,
         repealed_short_names: list[str],
         collection_name: str = "financial_kb",
-        metadata: Optional[dict[str, Any]] = None
+        metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         Отправляет список отмененных актов в защищенный эндпоинт отмены (POST /api/v1/rag/documents/delete)
@@ -522,7 +601,7 @@ class DocumentPipeline:
             "short_names": repealed_short_names,
             "collection_name": collection_name,
             "reason": "Repealed by newer regulatory act",
-            "metadata": metadata or {}
+            "metadata": metadata or {},
         }
         body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
@@ -530,7 +609,7 @@ class DocumentPipeline:
         combined_headers = {
             **self.headers,
             **zt_headers,
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
 
         url = f"{self.server_url}/api/v1/rag/documents/delete"
@@ -554,15 +633,24 @@ class DocumentPipeline:
                         server_key_or_cert = pk_data.get("certificate") or pk_data.get("public_key")
                         if server_key_or_cert:
                             receipt_verified = self.signer.verify_server_receipt(
-                                resp_data, server_sig, trusted_server_cert_or_pubkey=server_key_or_cert
+                                resp_data,
+                                server_sig,
+                                trusted_server_cert_or_pubkey=server_key_or_cert,
                             )
                 except Exception:
                     pass
 
             if not receipt_verified:
-                log_warning("Pipeline", f"Предупреждение: подпись квитанции сервера {resp_data.get('receipt_id')} не подтверждена")
+                log_warning(
+                    "Pipeline",
+                    f"Предупреждение: подпись квитанции сервера {resp_data.get('receipt_id')} не подтверждена",
+                )
             else:
-                log_info("Pipeline", f"Квитанция сервера AckReceipt подтверждена криптографически: receipt_id={resp_data.get('receipt_id')}")
+                log_info(
+                    "Pipeline",
+                    "Квитанция сервера AckReceipt подтверждена криптографически: "
+                    f"receipt_id={resp_data.get('receipt_id')}",
+                )
 
         resp_data["receipt_verified"] = receipt_verified
         return resp_data
@@ -581,10 +669,10 @@ class DocumentPipeline:
     def _check_duplicate_on_server(self, filename: str, file_hash: str, agent_name: str) -> bool:
         """
         Отправляет POST-запрос к FastAPI серверу для проверки наличия дубликата документа по MD5.
-        
+
         Returns:
             bool: True если дубликат существует, False если файл новый.
-            
+
         Raises:
             requests.exceptions.RequestException: Если сервер вернул ошибку 500 или недоступен.
         """
@@ -592,19 +680,19 @@ class DocumentPipeline:
         payload = {
             "file_hash": file_hash,
             "filename": filename,
-            "agent_name": agent_name
+            "agent_name": agent_name,
         }
-        
+
         # Отправляем JSON и заголовки с токеном через защищенную mTLS-сессию
         response = self.session.post(url, headers=self.headers, json=payload, timeout=(5, 120))
-        
+
         # Если статус не 200 (например, 401 Unauthorized или 500 Internal Server Error) — выбрасываем исключение
-        response.raise_for_status() 
-        
+        response.raise_for_status()
+
         data = response.json()
         if data.get("status") == "duplicate":
             return True
-            
+
         return False
 
     def _extract_text_from_parsed_dict(self, parsed_data: Any) -> str:
@@ -624,7 +712,7 @@ class DocumentPipeline:
             texts.append(parsed_data.strip())
         elif isinstance(parsed_data, (int, float)):
             texts.append(str(parsed_data))
-        
+
         # Отфильтруем пустые строки и склеим через пробел/перенос строки
         return "\n".join(filter(bool, texts))
 
@@ -632,11 +720,15 @@ class DocumentPipeline:
         """
         Выделяет абзацы текста с юридическими формулировками об отмене или утрате силы нормативных актов.
         """
-        paragraphs = text.split('\n')
+        paragraphs = text.split("\n")
         candidates = []
+        pattern = (
+            r"(?:призна\w*|считать)\s+(?:утративш\w*|недействительн\w*)\s+силу|"
+            r"утра(?:чива\w*|тил\w*)\s+силу|отмен(?:яет(?:ся)?|ить)\b|"
+            r"считать\s+не\s*действующ\w*"
+        )
         for p in paragraphs:
             # Ищем юридические формулировки отмены или признания недействительным
-            pattern = r'(?:призна\w*|считать)\s+(?:утративш\w*|недействительн\w*)\s+силу|утра(?:чива\w*|тил\w*)\s+силу|отмен(?:яет(?:ся)?|ить)\b|считать\s+не\s*действующ\w*'
             if re.search(pattern, p, re.IGNORECASE):
                 cleaned_p = p.strip()
                 if cleaned_p:

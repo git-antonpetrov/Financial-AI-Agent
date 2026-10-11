@@ -7,13 +7,12 @@
 работоспособности семантического поиска по сгенерированным эмбеддингам.
 """
 
-import os
-import sys
 import base64
 import hashlib
+import os
 from typing import Any
+
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from core.utils.console_logger import log_warning, log_info
 
 MAGIC_ENVELOPE_V1 = b"ENC1"
 MAGIC_ENVELOPE_V2_PREFIX = b"ENC2:"
@@ -85,6 +84,7 @@ def resolve_encryption_key(key: bytes | str | None = None) -> bytes:
         # 4. Деривация через derive_key / SHA-256
         try:
             from security import derive_key
+
             derivation_method = os.getenv("KEY_DERIVATION_METHOD", "sha256").lower()
             return derive_key(encoded, method=derivation_method)
         except Exception:
@@ -97,7 +97,7 @@ def encrypt_chroma_chunk(
     chunk: str,
     key: bytes | str | None = None,
     aad: bytes | str | None = None,
-    kid: str | None = None
+    kid: str | None = None,
 ) -> str:
     """
     Шифрует текстовый чанк с использованием AES-256-GCM.
@@ -131,7 +131,7 @@ _ENVELOPE_B64_PREFIX = "RU5DM"  # b"ENC1" и b"ENC2" в Base64url: оба нач
 def is_encrypted_chunk(val: Any) -> bool:
     """
     Строго проверяет, является ли значение строкой зашифрованного пакета ENC1 или ENC2.
-    
+
     В отличие от примитивной эвристики startswith("RU5D"), данная функция исключает
     ложные срабатывания (false positives) для обычных строк, случайно начинающихся с 'RU5D'.
     """
@@ -153,26 +153,23 @@ def is_encrypted_chunk(val: Any) -> bool:
         delim_idx = raw_payload.find(b":", len(MAGIC_ENVELOPE_V2_PREFIX))
         if delim_idx == -1:
             return False
-        rest = raw_payload[delim_idx + 1:]
+        rest = raw_payload[delim_idx + 1 :]
         return len(rest) >= 12 + 16
 
-    return (
-        len(raw_payload) >= _MIN_ENVELOPE_BYTES_LEN
-        and raw_payload.startswith(MAGIC_ENVELOPE_V1)
-    )
+    return len(raw_payload) >= _MIN_ENVELOPE_BYTES_LEN and raw_payload.startswith(MAGIC_ENVELOPE_V1)
 
 
 def decrypt_chroma_chunk(
     val: str,
     key: bytes | str | None = None,
     aad: bytes | str | None = None,
-    is_encrypted: bool | None = None
+    is_encrypted: bool | None = None,
 ) -> str:
     """
     Расшифровывает чанк, сохраненный в ChromaDB (поддерживает форматы ENC2 и legacy ENC1).
     Если строка не является зашифрованным пакетом (унаследованные данные),
     возвращает её без изменений (обратная совместимость).
-    
+
     Параметр is_encrypted (опционально) позволяет использовать значение флага
     из метаданных документа (is_encrypted в ChromaDB) для точного решения.
     """
@@ -203,7 +200,7 @@ def decrypt_chroma_chunk(
             if is_encrypted is True:
                 raise ValueError("Ошибка расшифровки чанка ChromaDB: нарушена структура зашифрованного пакета ENC2.")
             return val
-        rest = raw_payload[delim_idx + 1:]
+        rest = raw_payload[delim_idx + 1 :]
         if len(rest) < 12 + 16:
             if is_encrypted is True:
                 raise ValueError("Ошибка расшифровки чанка ChromaDB: нарушена структура зашифрованного пакета ENC2.")
@@ -230,14 +227,16 @@ def decrypt_chroma_chunk(
         decrypted_bytes = aesgcm.decrypt(nonce, ciphertext_and_tag, aad_bytes)
         return decrypted_bytes.decode("utf-8")
     except Exception as e:
-        raise ValueError("Ошибка расшифровки чанка ChromaDB: нарушена целостность, неверный ключ или поврежден тег аутентификации.") from e
+        raise ValueError(
+            "Ошибка расшифровки чанка ChromaDB: нарушена целостность, неверный ключ или поврежден тег аутентификации."
+        ) from e
 
 
 def encrypt_chroma_metadata(
     metadata: dict[str, Any],
     key: bytes | str | None = None,
     preserve_keys: set[str] | None = None,
-    kid: str | None = None
+    kid: str | None = None,
 ) -> dict[str, Any]:
     """
     Шифрует чувствительные строковые поля в словаре метаданных документа.
@@ -268,7 +267,7 @@ def encrypt_chroma_metadata(
 def decrypt_chroma_metadata(
     metadata: dict[str, Any],
     key: bytes | str | None = None,
-    preserve_keys: set[str] | None = None
+    preserve_keys: set[str] | None = None,
 ) -> dict[str, Any]:
     """
     Расшифровывает все зашифрованные поля в словаре метаданных ChromaDB.
@@ -301,7 +300,7 @@ def encrypt_batch(
     metadatas: list[dict[str, Any]],
     key: bytes | str | None = None,
     preserve_keys: set[str] | None = None,
-    kid: str | None = None
+    kid: str | None = None,
 ) -> tuple[list[str], list[dict[str, Any]]]:
     """
     Шифрует батч чанков и список соответствующих метаданных для сохранения в ChromaDB.
@@ -311,10 +310,7 @@ def encrypt_batch(
     return encrypted_chunks, encrypted_metadatas
 
 
-def decrypt_chroma_results(
-    results: dict[str, Any],
-    key: bytes | str | None = None
-) -> dict[str, Any]:
+def decrypt_chroma_results(results: dict[str, Any], key: bytes | str | None = None) -> dict[str, Any]:
     """
     Прозрачно расшифровывает документы и метаданные в ответе от ChromaDB (collection.query или collection.get).
     Поддерживает как вложенные списки (query), так и плоские списки (get).

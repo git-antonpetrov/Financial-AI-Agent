@@ -1,0 +1,14 @@
+[flake8]
+max-line-length = 120
+extend-ignore = E203, W503
+per-file-ignores =
+    src/simulations/api/main.py: E402
+    src/simulations/workers/bank_eod/main.py: E402
+    src/simulations/workers/bank_eod/tasks.py: E402
+    src/simulations/workers/digital_eod/main.py: E402
+    src/simulations/workers/digital_eod/tasks.py: E402
+    src/simulations/workers/invest_eod/main.py: E402
+    src/simulations/workers/invest_eod/tasks.py: E402
+    src/simulations/db/bank/scripts/seed_db.py: E402
+    src/simulations/db/digital_ruble/scripts/seed_db.py: E402
+    src/simulations/db/invest/scripts/seed_db.py: E402

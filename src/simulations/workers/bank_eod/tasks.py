@@ -1,42 +1,50 @@
 import random
-from datetime import timedelta, datetime, date, timezone
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+
 from dateutil.relativedelta import relativedelta
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
 from src.simulations.db.bank.db.client import get_async_session_maker
+
 AsyncSessionLocal = get_async_session_maker()
-from src.simulations.db.bank.db.models import Account, Transaction, AutoPayment, get_moscow_time
-from src.simulations.core.utils.console_logger import log_info, log_error
+from src.simulations.core.utils.console_logger import log_info
+from src.simulations.db.bank.db.models import (
+    Account,
+    AutoPayment,
+    Transaction,
+    get_moscow_time,
+)
+
 
 async def process_auto_payments(session, current_date):
     """
     Обработка автоплатежей, у которых наступила дата платежа.
     """
     log_info("Bank EOD", f"Обработка автоплатежей на {current_date}...")
-    
+
     result = await session.execute(
         select(AutoPayment).where(
-            AutoPayment.is_active == True,
-            AutoPayment.next_payment_date <= current_date
+            AutoPayment.is_active.is_(True),
+            AutoPayment.next_payment_date <= current_date,
         )
     )
     autopayments = result.scalars().all()
-    
+
     processed = 0
     for ap in autopayments:
         # Получаем счет
         account = await session.get(Account, ap.account_id)
         if not account or account.status != "active":
             continue
-            
+
         acc_bal = Decimal(str(account.balance))
         ap_amt = Decimal(str(ap.amount))
         if acc_bal >= ap_amt:
             # Списываем деньги
             account.balance = acc_bal - ap_amt
-            
+
             # Создаем транзакцию
             tx = Transaction(
                 account_id=account.id,
@@ -46,16 +54,16 @@ async def process_auto_payments(session, current_date):
                 description=f"Автоплатеж: {ap.recipient}",
                 status="completed",
                 date=current_date,
-                time=datetime.now(timezone.utc).time()
+                time=datetime.now(UTC).time(),
             )
             session.add(tx)
-            
+
             # Обновляем дату следующего платежа
             if ap.schedule == "monthly":
                 ap.next_payment_date = ap.next_payment_date + relativedelta(months=1)
             else:  # Еженедельное расписание (weekly)
                 ap.next_payment_date = ap.next_payment_date + timedelta(days=7)
-                
+
             processed += 1
         else:
             # Денег не хватает
@@ -67,14 +75,15 @@ async def process_auto_payments(session, current_date):
                 description=f"Недостаточно средств. Автоплатеж: {ap.recipient}",
                 status="failed",
                 date=current_date,
-                time=datetime.now(timezone.utc).time()
+                time=datetime.now(UTC).time(),
             )
             session.add(tx)
             # Сдвигаем на завтра чтобы попробовать снова
             ap.next_payment_date = ap.next_payment_date + timedelta(days=1)
-            
+
     await session.commit()
     log_info("Bank EOD", f"Успешно обработано автоплатежей: {processed}")
+
 
 async def process_tariff_fees(session, current_date):
     """
@@ -82,12 +91,14 @@ async def process_tariff_fees(session, current_date):
     """
     if current_date.day != 1:
         return
-        
+
     log_info("Bank EOD", f"Списание абонентской платы по тарифам на {current_date}...")
-    
-    result = await session.execute(select(Account).options(selectinload(Account.tariff)).where(Account.status == "active"))
+
+    result = await session.execute(
+        select(Account).options(selectinload(Account.tariff)).where(Account.status == "active")
+    )
     accounts = result.scalars().all()
-    
+
     processed = 0
     for acc in accounts:
         tariff_cost = Decimal(str(acc.tariff.service_cost))
@@ -103,7 +114,7 @@ async def process_tariff_fees(session, current_date):
                     description=f"Плата за обслуживание тарифа '{acc.tariff.name}'",
                     status="completed",
                     date=current_date,
-                    time=datetime.now(timezone.utc).time()
+                    time=datetime.now(UTC).time(),
                 )
                 session.add(tx)
                 processed += 1
@@ -116,12 +127,13 @@ async def process_tariff_fees(session, current_date):
                     description=f"Недостаточно средств для платы за тариф '{acc.tariff.name}'",
                     status="failed",
                     date=current_date,
-                    time=datetime.now(timezone.utc).time()
+                    time=datetime.now(UTC).time(),
                 )
                 session.add(tx)
-            
+
     await session.commit()
     log_info("Bank EOD", f"Списана абонентская плата по {processed} счетам")
+
 
 async def process_salaries(session, current_date):
     """
@@ -129,12 +141,12 @@ async def process_salaries(session, current_date):
     """
     if current_date.day not in [10, 25]:
         return
-        
+
     log_info("Bank EOD", f"Генерация зарплат на {current_date}...")
-    
+
     result = await session.execute(select(Account).where(Account.status == "active"))
     accounts = result.scalars().all()
-    
+
     # Чтобы не начислять зп на все 3 счета одного клиента, будем вести учет, кому уже начислили
     paid_clients = set()
     processed = 0
@@ -142,13 +154,13 @@ async def process_salaries(session, current_date):
     for acc in accounts:
         if acc.client_id in paid_clients:
             continue
-            
+
         salary_amount = 0
-        if acc.client_id == "11111111-1111-1111-1111-111111111111": # Иванов (Ваня)
+        if acc.client_id == "11111111-1111-1111-1111-111111111111":  # Иванов (Ваня)
             salary_amount = random.randint(75000, 150000)
-        elif acc.client_id == "22222222-2222-2222-2222-222222222222": # Петров (Петя)
+        elif acc.client_id == "22222222-2222-2222-2222-222222222222":  # Петров (Петя)
             salary_amount = random.randint(150000, 200000)
-        elif acc.client_id == "33333333-3333-3333-3333-333333333333": # Васильков (Вася)
+        elif acc.client_id == "33333333-3333-3333-3333-333333333333":  # Васильков (Вася)
             salary_amount = random.randint(200000, 250000)
         else:
             continue
@@ -160,17 +172,18 @@ async def process_salaries(session, current_date):
             category="income",
             operation_type="salary",
             amount=salary_decimal,
-            description=f"Поступление зарплаты",
+            description="Поступление зарплаты",
             status="completed",
             date=current_date,
-            time=get_moscow_time()
+            time=get_moscow_time(),
         )
         session.add(tx)
         paid_clients.add(acc.client_id)
         processed += 1
-            
+
     await session.commit()
     log_info("Bank EOD", f"Начислена зарплата {processed} клиентам")
+
 
 async def run_bank_eod():
     """
@@ -178,11 +191,11 @@ async def run_bank_eod():
     """
     async with AsyncSessionLocal() as session:
         current_date = date.today()
-        
+
         log_info("Bank EOD", f"=== НАЧАЛО EOD ДЛЯ ДАТЫ {current_date} ===")
-        
+
         await process_auto_payments(session, current_date)
         await process_tariff_fees(session, current_date)
         await process_salaries(session, current_date)
-        
-        log_info("Bank EOD", f"=== EOD ЗАВЕРШЕН ===")
+
+        log_info("Bank EOD", "=== EOD ЗАВЕРШЕН ===")

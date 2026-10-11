@@ -5,32 +5,49 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parents[3]))
 
 import os
+from contextlib import asynccontextmanager
+
 import uvicorn
+
 # pyrefly: ignore [missing-import]
 from fastapi import FastAPI
+
 # pyrefly: ignore [missing-import]
 from fastapi.middleware.cors import CORSMiddleware
-from src.simulations.core.utils.console_logger import log_info
+
+from src.simulations.api.routers.bank import (
+    pki_router as bank_pki_router,
+)
 
 # Здесь будут импорты роутеров
-from src.simulations.api.routers.bank import router as bank_router, pki_router as bank_pki_router
+from src.simulations.api.routers.bank import (
+    router as bank_router,
+)
 from src.simulations.api.routers.invest import router as invest_router
 from src.simulations.api.routers.ruble import router as ruble_router
-
-from contextlib import asynccontextmanager
+from src.simulations.core.utils.console_logger import log_error, log_info
 from src.simulations.db.bank.db.client import get_async_engine as get_bank_engine
+from src.simulations.db.digital_ruble.db.client import (
+    get_async_engine as get_ruble_engine,
+)
 from src.simulations.db.invest.db.client import get_async_engine as get_invest_engine
-from src.simulations.db.digital_ruble.db.client import get_async_engine as get_ruble_engine
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Валидация строгого режима безопасности (SEC-10)
     strict_sec = os.getenv("STRICT_SECURITY", "false").lower() in ("true", "1")
     if strict_sec:
-        require_enclave = os.getenv("REQUIRE_ENCLAVE_SIGNATURE", "true").lower() in ("true", "1")
+        require_enclave = os.getenv("REQUIRE_ENCLAVE_SIGNATURE", "true").lower() in (
+            "true",
+            "1",
+        )
         if not require_enclave:
             raise RuntimeError("STRICT_SECURITY: REQUIRE_ENCLAVE_SIGNATURE must be true in production")
-        require_oracle = os.getenv("REQUIRE_ORACLE_SIGNATURE", "true").lower() in ("true", "1")
+        require_oracle = os.getenv("REQUIRE_ORACLE_SIGNATURE", "true").lower() in (
+            "true",
+            "1",
+        )
         if not require_oracle:
             raise RuntimeError("STRICT_SECURITY: REQUIRE_ORACLE_SIGNATURE must be true in production")
 
@@ -46,19 +63,23 @@ async def lifespan(app: FastAPI):
         try:
             engine = engine_fn()
             await engine.dispose()
-            log_info("Simulation API", f"Пул соединений {name} успешно освобожден (engine.dispose)")
+            log_info(
+                "Simulation API",
+                f"Пул соединений {name} успешно освобожден (engine.dispose)",
+            )
         except Exception as e:
             log_error("Simulation API", f"Ошибка при освобождении пула {name}: {e}")
+
 
 app = FastAPI(
     title="Financial AI Agent - Simulation API",
     description="""
-    Единый API-шлюз симуляции для взаимодействия MCP-серверов (агента) 
+    Единый API-шлюз симуляции для взаимодействия MCP-серверов (агента)
     с Банком, Инвестициями и Цифровым рублем.
     Обеспечивает кросс-доменные операции и централизованный доступ к изолированным БД.
     """,
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
 cors_env = os.getenv("CORS_ALLOWED_ORIGINS", "")
@@ -110,6 +131,7 @@ async def health_check():
     Эндпоинт для проверки жизнеспособности (health check) API.
     """
     return {"status": "ok", "message": "Simulation API is running"}
+
 
 if __name__ == "__main__":
     log_info("Simulation API", "Запуск сервера API...")

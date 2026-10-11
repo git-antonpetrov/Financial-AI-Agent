@@ -1,0 +1,27 @@
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E203"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/simulations/api/main.py" = ["E402"]
+"src/simulations/workers/*" = ["E402"]
+"src/simulations/db/*/scripts/*" = ["E402"]
+
+[tool.pyrefly]
+preset = "off"
+disable-type-errors-in-ide = true
+enable-fallback-search-path = true
+search-path = [
+    ".",
+    "src",
+    "src/admin_server/fastapi",
+    "src/admin_server",
+    "src/admin_client/backend",
+    "src/simulations",
+    "src/simulations/api",
+    "src/pki",
+]

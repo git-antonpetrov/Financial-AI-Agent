@@ -5,22 +5,22 @@
 
 try:
     from src.common.logger import (
+        log_error,
         log_info,
         log_success,
         log_warning,
-        log_error,
     )
 except ImportError:
     from common.logger import (
+        log_error,
         log_info,
         log_success,
         log_warning,
-        log_error,
     )
 
 __all__ = [
+    "log_error",
     "log_info",
     "log_success",
     "log_warning",
-    "log_error",
 ]

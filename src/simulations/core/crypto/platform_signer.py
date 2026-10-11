@@ -1,13 +1,12 @@
 import base64
-from decimal import Decimal
-from typing import Optional, Union
 from datetime import datetime
+from decimal import Decimal
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
-from src.simulations.core.crypto.bank_ca import get_bank_ca, BankCertificateAuthority
+from src.simulations.core.crypto.bank_ca import BankCertificateAuthority, get_bank_ca
 
 
 class DigitalPlatformSigner:
@@ -16,16 +15,16 @@ class DigitalPlatformSigner:
     Заменяет фиктивные подписи (simulated_sig_...) на криптографически стойкие цифровые подписи (RSA-PSS).
     """
 
-    def __init__(self, ca: Optional[BankCertificateAuthority] = None):
+    def __init__(self, ca: BankCertificateAuthority | None = None):
         self.ca = ca or get_bank_ca()
 
     @staticmethod
     def canonical_transaction_payload(
-        sender_id: Union[str, int],
-        receiver_id: Union[str, int],
-        amount: Union[Decimal, str, float],
-        contract_id: Optional[Union[str, int]] = None,
-        timestamp: Optional[Union[datetime, str, int, float]] = None,
+        sender_id: str | int,
+        receiver_id: str | int,
+        amount: Decimal | str | float,
+        contract_id: str | int | None = None,
+        timestamp: datetime | str | float | None = None,
     ) -> bytes:
         amt_str = str(Decimal(str(amount)))
         c_id = str(contract_id) if contract_id is not None else "direct"
@@ -35,11 +34,11 @@ class DigitalPlatformSigner:
 
     def sign_transaction(
         self,
-        sender_id: Union[str, int],
-        receiver_id: Union[str, int],
-        amount: Union[Decimal, str, float],
-        contract_id: Optional[Union[str, int]] = None,
-        timestamp: Optional[Union[datetime, str, int, float]] = None,
+        sender_id: str | int,
+        receiver_id: str | int,
+        amount: Decimal | str | float,
+        contract_id: str | int | None = None,
+        timestamp: datetime | str | float | None = None,
     ) -> str:
         """
         Формирует цифровую подпись транзакции цифрового рубля ключом оператора платформы.
@@ -67,12 +66,12 @@ class DigitalPlatformSigner:
 
     def verify_transaction_signature(
         self,
-        sender_id: Union[str, int],
-        receiver_id: Union[str, int],
-        amount: Union[Decimal, str, float],
+        sender_id: str | int,
+        receiver_id: str | int,
+        amount: Decimal | str | float,
         signature_b64: str,
-        contract_id: Optional[Union[str, int]] = None,
-        timestamp: Optional[Union[datetime, str, int, float]] = None,
+        contract_id: str | int | None = None,
+        timestamp: datetime | str | float | None = None,
     ) -> bool:
         """
         Проверяет подлинность транзакции по открытому ключу платформы Банка.
@@ -109,7 +108,7 @@ class DigitalPlatformSigner:
 
 
 # Синглтон подписанта
-_DIGITAL_SIGNER_INSTANCE: Optional[DigitalPlatformSigner] = None
+_DIGITAL_SIGNER_INSTANCE: DigitalPlatformSigner | None = None
 
 
 def get_digital_platform_signer() -> DigitalPlatformSigner:

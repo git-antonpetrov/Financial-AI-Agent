@@ -2,21 +2,21 @@
 Единый фасад криптографической подписи и проверки квитанций для Admin Client (Zero-Trust Signer).
 """
 
-import os
-from pathlib import Path
-import time
-import datetime
-import uuid
-import json
 import base64
+import datetime
 import hashlib
+import json
+import os
 import re
-from typing import Optional, Any, Union
+import time
+import uuid
+from pathlib import Path
+from typing import Any
 
-from cryptography.hazmat.primitives.asymmetric import rsa, ec, padding
-from cryptography.hazmat.primitives import hashes, serialization
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 
 from .canonical import compute_rag_canonical_digest, compute_receipt_canonical_bytes
 from .hardware_bridge import HardwareSigningBridge, SimulatedTPMBridge
@@ -38,15 +38,15 @@ class ZeroTrustClientSigner:
     def __init__(
         self,
         mode: str = "hardware",
-        cert_path: Optional[str] = None,
-        key_path: Optional[str] = None,
-        ca_cert_path: Optional[str] = None,
-        key_pem: Optional[str] = None,
-        cert_pem: Optional[str] = None,
-        ca_cert_pem: Optional[str] = None,
+        cert_path: str | None = None,
+        key_path: str | None = None,
+        ca_cert_path: str | None = None,
+        key_pem: str | None = None,
+        cert_pem: str | None = None,
+        ca_cert_pem: str | None = None,
         signing_scheme: str = "PSS",
         hardware_key_name: str = "FinancialAI_Admin_TPM_Key",
-        require_biometrics: bool = False
+        require_biometrics: bool = False,
     ):
         if mode == "auto":
             raise ValueError(
@@ -61,7 +61,7 @@ class ZeroTrustClientSigner:
         self.ca_cert_path = ca_cert_path
         self._ca_cert_pem = ca_cert_pem
 
-        self._active_bridge: Union[HardwareSigningBridge, SimulatedTPMBridge, SoftwareSigningBridge]
+        self._active_bridge: HardwareSigningBridge | SimulatedTPMBridge | SoftwareSigningBridge
 
         if mode == "hardware":
             if not HardwareSigningBridge.is_tpm_available():
@@ -71,7 +71,7 @@ class ZeroTrustClientSigner:
                 require_biometrics=require_biometrics,
                 cert_path=cert_path,
                 cert_pem=cert_pem,
-                ca_cert_path=ca_cert_path
+                ca_cert_path=ca_cert_path,
             )
         elif mode == "simulated_tpm":
             self._active_bridge = SimulatedTPMBridge(
@@ -80,7 +80,7 @@ class ZeroTrustClientSigner:
                 cert_path=cert_path,
                 cert_pem=cert_pem,
                 ca_cert_path=ca_cert_path,
-                ca_cert_pem=ca_cert_pem
+                ca_cert_pem=ca_cert_pem,
             )
         elif mode == "software":
             self._active_bridge = SoftwareSigningBridge(
@@ -89,7 +89,7 @@ class ZeroTrustClientSigner:
                 key_pem=key_pem,
                 cert_pem=cert_pem,
                 ca_cert_path=ca_cert_path,
-                ca_cert_pem=ca_cert_pem
+                ca_cert_pem=ca_cert_pem,
             )
         else:
             raise ValueError(
@@ -110,7 +110,7 @@ class ZeroTrustClientSigner:
         pub_pem = self.get_public_key_pem()
         der = serialization.load_pem_public_key(pub_pem.encode("utf-8")).public_bytes(
             encoding=serialization.Encoding.DER,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
         )
         return f"sha256:{hashlib.sha256(der).hexdigest()}"
 
@@ -121,8 +121,8 @@ class ZeroTrustClientSigner:
     def create_rag_request_headers(
         self,
         body_bytes: bytes,
-        nonce: Optional[str] = None,
-        timestamp: Optional[int] = None
+        nonce: str | None = None,
+        timestamp: int | None = None,
     ) -> dict[str, str]:
         """
         Формирует защитные заголовки Zero-Trust для отправки в POST /api/v1/rag/documents:
@@ -134,11 +134,7 @@ class ZeroTrustClientSigner:
         req_ts = timestamp if timestamp is not None else int(time.time())
         req_nonce = nonce if nonce is not None else uuid.uuid4().hex
 
-        canonical = compute_rag_canonical_digest(
-            timestamp=req_ts,
-            nonce=req_nonce,
-            body_bytes=body_bytes
-        )
+        canonical = compute_rag_canonical_digest(timestamp=req_ts, nonce=req_nonce, body_bytes=body_bytes)
 
         sig_b64 = self.sign(canonical)
 
@@ -149,7 +145,7 @@ class ZeroTrustClientSigner:
             "X-Cert": self.get_certificate_pem(),
         }
 
-    def _resolve_trusted_root_ca_pem(self) -> Optional[str]:
+    def _resolve_trusted_root_ca_pem(self) -> str | None:
         """Разрешает PEM-строку доверенного Root CA из параметров, переменных окружения, диска или Windows Store."""
         if self._ca_cert_pem and self._ca_cert_pem.strip():
             return self._ca_cert_pem.strip()
@@ -195,6 +191,7 @@ class ZeroTrustClientSigner:
 
         try:
             from .cert_validator import find_root_ca_in_windows_store
+
             win_ca = find_root_ca_in_windows_store()
             if win_ca:
                 return win_ca[0]
@@ -207,11 +204,11 @@ class ZeroTrustClientSigner:
         self,
         receipt_data: dict[str, Any],
         server_signature_b64: str,
-        trusted_server_cert_or_pubkey: Optional[str] = None
+        trusted_server_cert_or_pubkey: str | None = None,
     ) -> bool:
         """
         Криптографически проверяет подлинность квитанции сервера (AckReceipt).
-        
+
         Args:
             receipt_data: Словарь с данными квитанции.
             server_signature_b64: Цифровая подпись сервера в Base64.
@@ -256,7 +253,11 @@ class ZeroTrustClientSigner:
                     try:
                         with open(cand, "r", encoding="utf-8") as f:
                             content = f.read().strip()
-                            if "BEGIN CERTIFICATE" in content or "BEGIN PUBLIC KEY" in content or "BEGIN RSA PUBLIC KEY" in content:
+                            if (
+                                "BEGIN CERTIFICATE" in content
+                                or "BEGIN PUBLIC KEY" in content
+                                or "BEGIN RSA PUBLIC KEY" in content
+                            ):
                                 pub_key_source = content
                                 break
                     except Exception:
@@ -279,7 +280,7 @@ class ZeroTrustClientSigner:
             if b"-----BEGIN CERTIFICATE-----" in pem_bytes:
                 cert_blocks = re.findall(
                     r"-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----",
-                    pub_key_source
+                    pub_key_source,
                 )
                 if not cert_blocks:
                     return False
@@ -303,7 +304,7 @@ class ZeroTrustClientSigner:
                 except Exception:
                     return False
 
-                now = datetime.datetime.now(datetime.timezone.utc)
+                now = datetime.datetime.now(datetime.UTC)
                 if now < root_cert.not_valid_before_utc or now > root_cert.not_valid_after_utc:
                     return False
 
@@ -321,21 +322,21 @@ class ZeroTrustClientSigner:
                             child.signature,
                             child.tbs_certificate_bytes,
                             padding.PKCS1v15(),
-                            child.signature_hash_algorithm
+                            child.signature_hash_algorithm,
                         )
                         return True
                     elif isinstance(issuer_key, ec.EllipticCurvePublicKey):
                         issuer_key.verify(
                             child.signature,
                             child.tbs_certificate_bytes,
-                            ec.ECDSA(child.signature_hash_algorithm)
+                            ec.ECDSA(child.signature_hash_algorithm),
                         )
                         return True
                     elif hasattr(issuer_key, "verify"):
                         issuer_key.verify(
                             child.signature,
                             child.tbs_certificate_bytes,
-                            child.signature_hash_algorithm
+                            child.signature_hash_algorithm,
                         )
                         return True
                     return False
@@ -347,7 +348,7 @@ class ZeroTrustClientSigner:
                     while current.issuer != root_cert.subject:
                         matching_issuer = next(
                             (ic for ic in intermediates if ic.subject == current.issuer),
-                            None
+                            None,
                         )
                         if not matching_issuer:
                             return False
@@ -375,8 +376,11 @@ class ZeroTrustClientSigner:
                     pub_key.verify(
                         raw_sig,
                         canonical_receipt,
-                        padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
-                        hashes.SHA256()
+                        padding.PSS(
+                            mgf=padding.MGF1(hashes.SHA256()),
+                            salt_length=padding.PSS.MAX_LENGTH,
+                        ),
+                        hashes.SHA256(),
                     )
                     return True
                 except InvalidSignature:
@@ -387,8 +391,11 @@ class ZeroTrustClientSigner:
                     pub_key.verify(
                         raw_sig,
                         canonical_receipt,
-                        padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
-                        hashes.SHA256()
+                        padding.PSS(
+                            mgf=padding.MGF1(hashes.SHA256()),
+                            salt_length=padding.PSS.DIGEST_LENGTH,
+                        ),
+                        hashes.SHA256(),
                     )
                     return True
                 except InvalidSignature:
@@ -396,12 +403,7 @@ class ZeroTrustClientSigner:
 
                 # Пробуем PKCS#1 v1.5
                 try:
-                    pub_key.verify(
-                        raw_sig,
-                        canonical_receipt,
-                        padding.PKCS1v15(),
-                        hashes.SHA256()
-                    )
+                    pub_key.verify(raw_sig, canonical_receipt, padding.PKCS1v15(), hashes.SHA256())
                     return True
                 except InvalidSignature:
                     pass
@@ -423,14 +425,15 @@ class ZeroTrustClientSigner:
         jwt_token: str,
         content: str,
         collection_name: str = "financial_kb",
-        metadata: Optional[dict[str, Any]] = None,
-        document_title: Optional[str] = None,
-        session: Optional[Any] = None
+        metadata: dict[str, Any] | None = None,
+        document_title: str | None = None,
+        session: Any | None = None,
     ) -> dict[str, Any]:
         """
         Отправляет документ в защищенный эндпоинт RAG (POST /api/v1/rag/documents) с цифровой подписью.
         """
         import requests
+
         http_client = session or requests.Session()
 
         meta = metadata or {}
@@ -445,14 +448,14 @@ class ZeroTrustClientSigner:
             "document_title": str(doc_title),
             "collection_name": collection_name,
             "content": content,
-            "metadata": meta
+            "metadata": meta,
         }
         body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         zt_headers = self.create_rag_request_headers(body_bytes)
         headers = {
             "Authorization": f"Bearer {jwt_token.replace('Bearer ', '').strip()}",
             "Content-Type": "application/json",
-            **zt_headers
+            **zt_headers,
         }
         resp = http_client.post(url, data=body_bytes, headers=headers, timeout=(5, 120))
         resp.raise_for_status()
@@ -467,4 +470,3 @@ class ZeroTrustClientSigner:
             )
         resp_data["receipt_verified"] = receipt_verified
         return resp_data
-

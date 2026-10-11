@@ -1,0 +1,38 @@
+{
+  "css.lint.unknownAtRules": "ignore",
+  "python.defaultInterpreterPath": "${workspaceFolder}/venv/Scripts/python.exe",
+  "python.analysis.typeCheckingMode": "off",
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}",
+    "${workspaceFolder}/src",
+    "${workspaceFolder}/src/admin_server/fastapi",
+    "${workspaceFolder}/src/admin_server",
+    "${workspaceFolder}/src/admin_client/backend",
+    "${workspaceFolder}/src/simulations",
+    "${workspaceFolder}/src/simulations/api",
+    "${workspaceFolder}/src/pki"
+  ],
+  "python.autoComplete.extraPaths": [
+    "${workspaceFolder}",
+    "${workspaceFolder}/src",
+    "${workspaceFolder}/src/admin_server/fastapi",
+    "${workspaceFolder}/src/admin_server",
+    "${workspaceFolder}/src/admin_client/backend",
+    "${workspaceFolder}/src/simulations",
+    "${workspaceFolder}/src/simulations/api",
+    "${workspaceFolder}/src/pki"
+  ],
+  "python.analysis.diagnosticSeverityOverrides": {
+    "reportMissingImports": "none",
+    "reportMissingModuleSource": "none",
+    "reportGeneralTypeIssues": "none",
+    "reportOptionalMemberAccess": "none",
+    "reportOptionalSubscript": "none",
+    "reportPrivateImportUsage": "none",
+    "reportUnknownMemberType": "none",
+    "reportUnknownVariableType": "none"
+  },
+  "python.pyrefly.disableTypeErrors": true,
+  "python.pyrefly.displayTypeErrors": "force-off",
+  "python.pyrefly.typeCheckingMode": "off"
+}

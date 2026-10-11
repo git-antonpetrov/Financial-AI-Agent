@@ -8,14 +8,15 @@
 import hashlib
 import inspect
 import json
-from datetime import datetime, timezone
-from typing import Any, Optional
+from datetime import UTC, datetime
+from typing import Any
+
+from core.utils.console_logger import log_error, log_warning
+from sqlalchemy import func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import func, text
-from . import models
 
-from core.utils.console_logger import log_warning, log_error
+from . import models
 
 GENESIS_HASH = "0000000000000000000000000000000000000000000000000000000000000000"
 
@@ -23,49 +24,51 @@ GENESIS_HASH = "0000000000000000000000000000000000000000000000000000000000000000
 def format_audit_timestamp(dt: datetime) -> str:
     """Приводит дату и время к строгому формату UTC ISO 8601 для воспроизводимого хеширования."""
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     else:
-        dt = dt.astimezone(timezone.utc)
+        dt = dt.astimezone(UTC)
     return dt.isoformat()
 
 
 def compute_audit_hash(
     timestamp_str: str,
     actor: str,
-    actor_ip: Optional[str],
+    actor_ip: str | None,
     action: str,
-    resource: Optional[str],
+    resource: str | None,
     status: str,
-    details: Optional[str],
-    prev_hash: str
+    details: str | None,
+    prev_hash: str,
 ) -> str:
     """
     Вычисляет криптографический SHA-256 хэш записи аудита на основе канонического строкового представления.
     Формат: {timestamp}|{actor}|{actor_ip}|{action}|{resource}|{status}|{details}|{prev_hash}
     """
-    payload = "|".join([
-        timestamp_str.strip(),
-        actor.strip(),
-        (actor_ip or "").strip(),
-        action.strip(),
-        (resource or "").strip(),
-        status.strip(),
-        (details or "").strip(),
-        prev_hash.strip()
-    ])
+    payload = "|".join(
+        [
+            timestamp_str.strip(),
+            actor.strip(),
+            (actor_ip or "").strip(),
+            action.strip(),
+            (resource or "").strip(),
+            status.strip(),
+            (details or "").strip(),
+            prev_hash.strip(),
+        ]
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 async def log_audit_event(
-    db: Optional[AsyncSession],
+    db: AsyncSession | None,
     actor: str,
     action: str,
     status: str = "SUCCESS",
-    resource: Optional[str] = None,
-    actor_ip: Optional[str] = None,
-    details: Optional[Any] = None,
-    timestamp: Optional[datetime] = None
-) -> Optional[models.AuditLog]:
+    resource: str | None = None,
+    actor_ip: str | None = None,
+    details: Any | None = None,
+    timestamp: datetime | None = None,
+) -> models.AuditLog | None:
     """
     Атомарно создает новую запись в криптографически связанном журнале аудита.
     Автоматически извлекает хэш последней записи и формирует неразрывную цепочку.
@@ -74,10 +77,10 @@ async def log_audit_event(
         return None
 
     if timestamp is None:
-        timestamp = datetime.now(timezone.utc)
+        timestamp = datetime.now(UTC)
 
     # Приведение details к строковому формату (JSON при словаре/списке)
-    details_str: Optional[str] = None
+    details_str: str | None = None
     if details is not None:
         if isinstance(details, (dict, list)):
             details_str = json.dumps(details, ensure_ascii=False, sort_keys=True)
@@ -91,12 +94,21 @@ async def log_audit_event(
         bind = getattr(db, "get_bind", lambda: None)() if hasattr(db, "get_bind") else None
         if bind and getattr(bind, "dialect", None) and getattr(bind.dialect, "name", "") == "postgresql":
             # Динамический хэшированный advisory lock для строгой последовательности цепочки аудита
-            lock_id = int(hashlib.md5(f"audit_chain_{action}".encode("utf-8")).hexdigest()[:8], 16) - 2147483648
+            lock_id = (
+                int(
+                    hashlib.md5(f"audit_chain_{action}".encode()).hexdigest()[:8],
+                    16,
+                )
+                - 2147483648
+            )
             lock_res = db.execute(text(f"SELECT pg_advisory_xact_lock({lock_id})"))
             if inspect.isawaitable(lock_res):
                 await lock_res
     except Exception as e:
-        log_warning("Audit", f"Предупреждение: сбой взятия advisory lock для журнала аудита: {e}")
+        log_warning(
+            "Audit",
+            f"Предупреждение: сбой взятия advisory lock для журнала аудита: {e}",
+        )
 
     # Получение последней записи в журнале
     prev_hash = GENESIS_HASH
@@ -119,7 +131,7 @@ async def log_audit_event(
         resource=resource,
         status=status,
         details=details_str,
-        prev_hash=prev_hash
+        prev_hash=prev_hash,
     )
 
     audit_entry = models.AuditLog(
@@ -131,7 +143,7 @@ async def log_audit_event(
         status=status,
         details=details_str,
         prev_hash=prev_hash,
-        record_hash=record_hash
+        record_hash=record_hash,
     )
 
     try:
@@ -172,7 +184,7 @@ async def verify_audit_chain(db: AsyncSession) -> dict[str, Any]:
             "is_valid": True,
             "total_records": 0,
             "broken_record_id": None,
-            "details": "Журнал аудита пуст, цепочка не содержит записей."
+            "details": "Журнал аудита пуст, цепочка не содержит записей.",
         }
 
     expected_prev_hash = GENESIS_HASH
@@ -188,7 +200,7 @@ async def verify_audit_chain(db: AsyncSession) -> dict[str, Any]:
                 "details": (
                     f"Нарушение целостности цепочки (разрыв связи) на записи id={entry.id}: "
                     f"ожидался prev_hash='{expected_prev_hash}', фактически='{entry.prev_hash}'"
-                )
+                ),
             }
 
         # 2. Проверка неизменности самой записи (пересчет хэша)
@@ -201,7 +213,7 @@ async def verify_audit_chain(db: AsyncSession) -> dict[str, Any]:
             resource=entry.resource,
             status=entry.status,
             details=entry.details,
-            prev_hash=entry.prev_hash
+            prev_hash=entry.prev_hash,
         )
 
         if entry.record_hash != recomputed_hash:
@@ -213,7 +225,7 @@ async def verify_audit_chain(db: AsyncSession) -> dict[str, Any]:
                 "details": (
                     f"Обнаружена подделка данных (Tamper detected) на записи id={entry.id}: "
                     f"хэш в базе='{entry.record_hash}', вычисленный='{recomputed_hash}'"
-                )
+                ),
             }
 
         expected_prev_hash = entry.record_hash
@@ -222,7 +234,7 @@ async def verify_audit_chain(db: AsyncSession) -> dict[str, Any]:
         "is_valid": True,
         "total_records": len(entries),
         "broken_record_id": None,
-        "details": f"Криптографическая цепочка полностью подтверждена: проверено {len(entries)} записей."
+        "details": f"Криптографическая цепочка полностью подтверждена: проверено {len(entries)} записей.",
     }
 
 
@@ -230,9 +242,9 @@ async def get_audit_logs(
     db: AsyncSession,
     limit: int = 50,
     offset: int = 0,
-    actor: Optional[str] = None,
-    action: Optional[str] = None,
-    status: Optional[str] = None
+    actor: str | None = None,
+    action: str | None = None,
+    status: str | None = None,
 ) -> tuple[list[models.AuditLog], int]:
     """Возвращает список записей журнала аудита с фильтрацией и постраничной навигацией."""
     count_stmt = select(func.count(models.AuditLog.id))
@@ -263,24 +275,16 @@ async def get_audit_summary(db: AsyncSession) -> dict[str, Any]:
     total_res = await db.execute(select(func.count(models.AuditLog.id)))
     total = total_res.scalar_one()
 
-    success_res = await db.execute(
-        select(func.count(models.AuditLog.id)).where(models.AuditLog.status == "SUCCESS")
-    )
+    success_res = await db.execute(select(func.count(models.AuditLog.id)).where(models.AuditLog.status == "SUCCESS"))
     success_count = success_res.scalar_one()
 
-    failure_res = await db.execute(
-        select(func.count(models.AuditLog.id)).where(models.AuditLog.status == "FAILURE")
-    )
+    failure_res = await db.execute(select(func.count(models.AuditLog.id)).where(models.AuditLog.status == "FAILURE"))
     failure_count = failure_res.scalar_one()
 
-    warning_res = await db.execute(
-        select(func.count(models.AuditLog.id)).where(models.AuditLog.status == "WARNING")
-    )
+    warning_res = await db.execute(select(func.count(models.AuditLog.id)).where(models.AuditLog.status == "WARNING"))
     warning_count = warning_res.scalar_one()
 
-    last_res = await db.execute(
-        select(models.AuditLog).order_by(models.AuditLog.id.desc()).limit(1)
-    )
+    last_res = await db.execute(select(models.AuditLog).order_by(models.AuditLog.id.desc()).limit(1))
     last_log = last_res.scalars().first()
 
     verification = await verify_audit_chain(db)
@@ -292,5 +296,5 @@ async def get_audit_summary(db: AsyncSession) -> dict[str, Any]:
         "warning_count": warning_count,
         "last_event": last_log,
         "is_chain_intact": verification["is_valid"],
-        "verification_details": verification["details"]
+        "verification_details": verification["details"],
     }

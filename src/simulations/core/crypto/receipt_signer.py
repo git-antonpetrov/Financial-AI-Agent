@@ -2,9 +2,9 @@ import base64
 import json
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
@@ -12,7 +12,7 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
-from src.simulations.core.crypto.bank_ca import get_bank_ca, BankCertificateAuthority
+from src.simulations.core.crypto.bank_ca import BankCertificateAuthority, get_bank_ca
 
 
 def _canonical_json(data: Any) -> bytes:
@@ -20,6 +20,7 @@ def _canonical_json(data: Any) -> bytes:
     Каноническая детерминированная сериализация данных в UTF-8 JSON.
     Сортировка ключей, отсутствие пробелов между разделителями.
     """
+
     def _default(obj):
         if isinstance(obj, Decimal):
             return str(obj)
@@ -45,14 +46,15 @@ class ReceiptSigner:
     Формирует и криптографически подписывает чеки-квитанции (Signed Receipt)
     приватным ключом Банка в соответствии с пунктом 5 архитектуры arch.txt.
     """
-    _active_ca: Optional[BankCertificateAuthority] = None
 
-    def __init__(self, ca: Optional[BankCertificateAuthority] = None):
+    _active_ca: BankCertificateAuthority | None = None
+
+    def __init__(self, ca: BankCertificateAuthority | None = None):
         self.ca = ca or get_bank_ca()
         ReceiptSigner._active_ca = self.ca
 
     @classmethod
-    def _resolve_trusted_ca_pem(cls, explicit_pem: Optional[str] = None) -> Optional[str]:
+    def _resolve_trusted_ca_pem(cls, explicit_pem: str | None = None) -> str | None:
         """Определяет доверенный сертификат Root CA из параметров, активного CA Банка или доверенных файлов."""
         if explicit_pem:
             return explicit_pem
@@ -87,10 +89,10 @@ class ReceiptSigner:
     def create_and_sign_receipt(
         self,
         action: str,
-        data: Dict[str, Any],
-        request_nonce: Optional[str] = None,
+        data: dict[str, Any],
+        request_nonce: str | None = None,
         status: str = "completed",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Создает канонический чек операции и подписывает его приватным ключом Банка (RSA-PSS SHA-256).
         """
@@ -101,7 +103,7 @@ class ReceiptSigner:
             "receipt_id": str(uuid.uuid4()),
             "action": action,
             "status": status,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "request_nonce": request_nonce,
             "data": data,
         }
@@ -136,9 +138,9 @@ class ReceiptSigner:
     @classmethod
     def verify_receipt(
         cls,
-        signed_receipt: Dict[str, Any],
-        trusted_ca_cert_pem: Optional[str] = None,
-    ) -> Tuple[bool, str]:
+        signed_receipt: dict[str, Any],
+        trusted_ca_cert_pem: str | None = None,
+    ) -> tuple[bool, str]:
         """
         Верифицирует подписанный чек Банка:
         1. Проверяет валидность сертификата Банка через доверенный Root CA.
@@ -153,7 +155,10 @@ class ReceiptSigner:
             bank_cert_pem = signed_receipt.get("bank_cert_pem")
 
             if not receipt or not signature_b64 or not bank_cert_pem:
-                return False, "Отсутствуют обязательные поля чека (receipt, signature или bank_cert_pem)"
+                return (
+                    False,
+                    "Отсутствуют обязательные поля чека (receipt, signature или bank_cert_pem)",
+                )
 
             # 1. Проверка сертификата Банка СТРОГО через доверенный CA (SEC-06)
             # Запрещено извлечение доверенного CA из входящего JSON (signed_receipt.get("ca_cert_pem"))!
@@ -185,20 +190,25 @@ class ReceiptSigner:
                             pass
 
             if not candidate_cas:
-                return False, "Доверенный корневой сертификат (Root CA) не настроен на сервере"
+                return (
+                    False,
+                    "Доверенный корневой сертификат (Root CA) не настроен на сервере",
+                )
 
             matched_ca_pem = None
             from src.simulations.core.crypto.chain_validator import get_chain_validator
+
             for ca_pem in candidate_cas:
                 if BankCertificateAuthority.verify_certificate_against_ca(bank_cert_pem, ca_pem):
-                    is_chain_valid, _ = get_chain_validator(root_ca_cert=ca_pem).validate_certificate_chain(bank_cert_pem)
+                    is_chain_valid, _ = get_chain_validator(root_ca_cert=ca_pem).validate_certificate_chain(
+                        bank_cert_pem
+                    )
                     if is_chain_valid:
                         matched_ca_pem = ca_pem
                         break
 
             if not matched_ca_pem:
                 return False, "Сертификат Банка не прошел валидацию доверенным Root CA"
-
 
             # 2. Загрузка открытого ключа Банка из сертификата
             bank_cert = x509.load_pem_x509_certificate(bank_cert_pem.encode("utf-8"), default_backend())
@@ -229,7 +239,7 @@ class ReceiptSigner:
 
 
 # Синглтон для быстрого доступа
-_RECEIPT_SIGNER_INSTANCE: Optional[ReceiptSigner] = None
+_RECEIPT_SIGNER_INSTANCE: ReceiptSigner | None = None
 
 
 def get_receipt_signer() -> ReceiptSigner:

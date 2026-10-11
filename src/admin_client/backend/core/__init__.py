@@ -1,15 +1,15 @@
 """Инициализирует базовый модуль ядра клиентского приложения."""
 
 from .remote_client import (
+    AuthenticationError,
     RemoteAdminClient,
     RemoteClientError,
-    AuthenticationError,
     SessionExpiredError,
 )
 
 __all__ = [
+    "AuthenticationError",
     "RemoteAdminClient",
     "RemoteClientError",
-    "AuthenticationError",
     "SessionExpiredError",
 ]

@@ -1,28 +1,33 @@
-import os
-import sys
-import re
-import uuid
-import secrets
-import hmac
-import hashlib
-import struct
-import time
 import base64
-from typing import Any, Callable, Optional, Tuple, Union, Dict, List
-from datetime import datetime, timedelta, timezone
+import hashlib
+import hmac
+import os
+import re
+import secrets
+import struct
+import threading
+import time
+import uuid
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-import jwt
+from typing import Any
+
 import bcrypt
+import jwt
+
 try:
     import pyotp
 except ImportError:
     pyotp = None
 from cryptography import x509
-from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from fastapi import Depends, HTTPException, status, Request
+
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
+
 try:
     import redis  # type: ignore
 except ImportError:
@@ -31,54 +36,82 @@ try:
     from minio import sse as minio_sse  # type: ignore
 except ImportError:
     minio_sse = None
-from core.utils.console_logger import log_error, log_warning, log_info
+from core.utils.console_logger import log_error, log_info, log_warning
 
 try:
     from rbac import (
-        Role,
-        Permission,
+        ROLE_DESCRIPTIONS,  # noqa: F401
         ROLE_PERMISSIONS,
-        ROLE_DESCRIPTIONS,
         CurrentUser,
-        get_permissions_for_role,
+        Permission,
+        Role,
+        get_permissions_for_role,  # noqa: F401
     )
 except ImportError:
     from .rbac import (
-        Role,
-        Permission,
+        ROLE_DESCRIPTIONS,  # noqa: F401
         ROLE_PERMISSIONS,
-        ROLE_DESCRIPTIONS,
         CurrentUser,
-        get_permissions_for_role,
+        Permission,
+        Role,
+        get_permissions_for_role,  # noqa: F401
     )
 
 VALID_ADMIN_USERS: set[str] = {"admin", "operator", "auditor"}
 
+__all__ = [
+    "ROLE_DESCRIPTIONS",
+    "ROLE_PERMISSIONS",
+    "CurrentUser",
+    "Permission",
+    "Role",
+    "get_permissions_for_role",
+]
+
+
 class Settings:
-    """Конфигурация параметров безопасности и аутентификации на основе асимметричного алгоритма RS256, 2FA и шифрования данных при хранении."""
+    """
+    Конфигурация параметров безопасности и аутентификации на основе асимметричного алгоритма RS256,
+    2FA и шифрования данных при хранении.
+    """
+
     ALGORITHM: str = "RS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15"))  # 15 минут вместо 12 часов
-    REFRESH_TOKEN_EXPIRE_DAYS: int = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))      # 7 дней для refresh-токена
+    REFRESH_TOKEN_EXPIRE_DAYS: int = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))  # 7 дней для refresh-токена
     ADMIN_PASSWORD_HASH: str = os.getenv("ADMIN_PASSWORD_HASH", "")
     ADMIN_TOTP_SECRET: str = os.getenv("ADMIN_TOTP_SECRET", "").strip()
-    REQUIRE_2FA: bool = os.getenv("REQUIRE_2FA", "false").lower() in ("true", "1", "yes")
-    
+    REQUIRE_2FA: bool = os.getenv("REQUIRE_2FA", "false").lower() in (
+        "true",
+        "1",
+        "yes",
+    )
+
     # Параметры шифрования при хранении (Data at Rest / AES-256-GCM / MinIO SSE)
     DATA_ENCRYPTION_KEY: str = os.getenv("DATA_ENCRYPTION_KEY", "").strip()
-    MINIO_SSE_ENABLED: bool = os.getenv("MINIO_SSE_ENABLED", "false").lower() in ("true", "1", "yes")
+    MINIO_SSE_ENABLED: bool = os.getenv("MINIO_SSE_ENABLED", "false").lower() in (
+        "true",
+        "1",
+        "yes",
+    )
     MINIO_SSE_TYPE: str = os.getenv("MINIO_SSE_TYPE", "s3").lower().strip()
     MINIO_SSE_C_KEY: str = os.getenv("MINIO_SSE_C_KEY", "").strip()
     MINIO_KMS_SECRET_KEY: str = os.getenv("MINIO_KMS_SECRET_KEY", "").strip()
 
     # Параметры взаимного TLS (mTLS) и защиты сетевого трафика (In-Transit Encryption)
-    REQUIRE_MTLS: bool = os.getenv("REQUIRE_MTLS", "false").lower() in ("true", "1", "yes")
+    REQUIRE_MTLS: bool = os.getenv("REQUIRE_MTLS", "false").lower() in (
+        "true",
+        "1",
+        "yes",
+    )
     ALLOWED_MTLS_SUBJECTS: list[str] = [
         s.strip() for s in os.getenv("ALLOWED_MTLS_SUBJECTS", "").split(",") if s.strip()
     ]
-    ALLOWED_MTLS_ISSUERS: list[str] = [
-        s.strip() for s in os.getenv("ALLOWED_MTLS_ISSUERS", "").split(",") if s.strip()
-    ]
-    MINIO_SECURE: bool = os.getenv("MINIO_SECURE", "false").lower() in ("true", "1", "yes")
+    ALLOWED_MTLS_ISSUERS: list[str] = [s.strip() for s in os.getenv("ALLOWED_MTLS_ISSUERS", "").split(",") if s.strip()]
+    MINIO_SECURE: bool = os.getenv("MINIO_SECURE", "false").lower() in (
+        "true",
+        "1",
+        "yes",
+    )
     REDIS_SSL: bool = os.getenv("REDIS_SSL", "false").lower() in ("true", "1", "yes")
     POSTGRES_SSLMODE: str = os.getenv("POSTGRES_SSLMODE", "prefer").strip()
 
@@ -113,12 +146,14 @@ class Settings:
 
         # Кандидаты для поиска приватного ключа
         priv_candidates = [priv_path] if priv_path else []
-        priv_candidates.extend([
-            os.getenv("SERVER_KEY_PATH", "").strip(),
-            "/certs/admin_server.key",
-            "./certs/admin_server.key",
-            "certs/admin_server.key",
-        ])
+        priv_candidates.extend(
+            [
+                os.getenv("SERVER_KEY_PATH", "").strip(),
+                "/certs/admin_server.key",
+                "./certs/admin_server.key",
+                "certs/admin_server.key",
+            ]
+        )
         try:
             repo_certs = Path(__file__).resolve().parents[3] / "certs"
             priv_candidates.append(str(repo_certs / "admin_server.key"))
@@ -133,7 +168,10 @@ class Settings:
                     if "BEGIN RSA PRIVATE KEY" in content or "BEGIN PRIVATE KEY" in content:
                         priv_pem = content
             except Exception as e:
-                log_error("Безопасность", f"Не удалось прочитать приватный ключ из файла {priv_path}: {e}")
+                log_error(
+                    "Безопасность",
+                    f"Не удалось прочитать приватный ключ из файла {priv_path}: {e}",
+                )
         elif priv_raw:
             priv_pem = priv_raw.replace("\\n", "\n").strip()
         else:
@@ -146,19 +184,24 @@ class Settings:
                                 priv_pem = content
                                 break
                     except Exception as e:
-                        log_error("Безопасность", f"Не удалось прочитать приватный ключ из файла {cand}: {e}")
+                        log_error(
+                            "Безопасность",
+                            f"Не удалось прочитать приватный ключ из файла {cand}: {e}",
+                        )
 
         # Кандидаты для поиска публичного ключа и сертификата
         pub_candidates = [pub_path] if pub_path else []
-        pub_candidates.extend([
-            os.getenv("SERVER_CERT_PATH", "").strip(),
-            "/certs/admin_server.crt",
-            "./certs/admin_server.crt",
-            "certs/admin_server.crt",
-            "/certs/admin_server.pub",
-            "./certs/admin_server.pub",
-            "certs/admin_server.pub",
-        ])
+        pub_candidates.extend(
+            [
+                os.getenv("SERVER_CERT_PATH", "").strip(),
+                "/certs/admin_server.crt",
+                "./certs/admin_server.crt",
+                "certs/admin_server.crt",
+                "/certs/admin_server.pub",
+                "./certs/admin_server.pub",
+                "certs/admin_server.pub",
+            ]
+        )
         try:
             repo_certs = Path(__file__).resolve().parents[3] / "certs"
             pub_candidates.append(str(repo_certs / "admin_server.crt"))
@@ -174,35 +217,56 @@ class Settings:
                     if "BEGIN CERTIFICATE" in content:
                         self.SERVER_CERT = content
                         c = x509.load_pem_x509_certificate(content.encode("utf-8"))
-                        pub_pem = c.public_key().public_bytes(
-                            encoding=serialization.Encoding.PEM,
-                            format=serialization.PublicFormat.SubjectPublicKeyInfo
-                        ).decode("utf-8")
+                        pub_pem = (
+                            c.public_key()
+                            .public_bytes(
+                                encoding=serialization.Encoding.PEM,
+                                format=serialization.PublicFormat.SubjectPublicKeyInfo,
+                            )
+                            .decode("utf-8")
+                        )
                     elif "BEGIN PUBLIC KEY" in content or "BEGIN RSA PUBLIC KEY" in content:
                         pub_pem = content
             except Exception as e:
-                log_error("Безопасность", f"Не удалось прочитать публичный ключ из файла {pub_path}: {e}")
+                log_error(
+                    "Безопасность",
+                    f"Не удалось прочитать публичный ключ из файла {pub_path}: {e}",
+                )
         elif pub_raw:
             pub_pem = pub_raw.replace("\\n", "\n").strip()
             if "BEGIN CERTIFICATE" in pub_pem:
                 self.SERVER_CERT = pub_pem
                 try:
                     c = x509.load_pem_x509_certificate(pub_pem.encode("utf-8"))
-                    pub_pem = c.public_key().public_bytes(
-                        encoding=serialization.Encoding.PEM,
-                        format=serialization.PublicFormat.SubjectPublicKeyInfo
-                    ).decode("utf-8")
+                    pub_pem = (
+                        c.public_key()
+                        .public_bytes(
+                            encoding=serialization.Encoding.PEM,
+                            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+                        )
+                        .decode("utf-8")
+                    )
                 except Exception as e:
-                    log_error("Безопасность", f"Не удалось извлечь публичный ключ из сертификата: {e}")
+                    log_error(
+                        "Безопасность",
+                        f"Не удалось извлечь публичный ключ из сертификата: {e}",
+                    )
         elif priv_pem:
             try:
                 loaded_priv = serialization.load_pem_private_key(priv_pem.encode("utf-8"), password=None)
-                pub_pem = loaded_priv.public_key().public_bytes(
-                    encoding=serialization.Encoding.PEM,
-                    format=serialization.PublicFormat.SubjectPublicKeyInfo
-                ).decode("utf-8")
+                pub_pem = (
+                    loaded_priv.public_key()
+                    .public_bytes(
+                        encoding=serialization.Encoding.PEM,
+                        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+                    )
+                    .decode("utf-8")
+                )
             except Exception as e:
-                log_error("Безопасность", f"Не удалось извлечь публичный ключ из приватного ключа: {e}")
+                log_error(
+                    "Безопасность",
+                    f"Не удалось извлечь публичный ключ из приватного ключа: {e}",
+                )
         else:
             for cand in pub_candidates:
                 if cand and os.path.exists(cand):
@@ -212,16 +276,23 @@ class Settings:
                             if "BEGIN CERTIFICATE" in content:
                                 self.SERVER_CERT = content
                                 c = x509.load_pem_x509_certificate(content.encode("utf-8"))
-                                pub_pem = c.public_key().public_bytes(
-                                    encoding=serialization.Encoding.PEM,
-                                    format=serialization.PublicFormat.SubjectPublicKeyInfo
-                                ).decode("utf-8")
+                                pub_pem = (
+                                    c.public_key()
+                                    .public_bytes(
+                                        encoding=serialization.Encoding.PEM,
+                                        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+                                    )
+                                    .decode("utf-8")
+                                )
                                 break
                             elif "BEGIN PUBLIC KEY" in content or "BEGIN RSA PUBLIC KEY" in content:
                                 pub_pem = content
                                 break
                     except Exception as e:
-                        log_error("Безопасность", f"Не удалось прочитать публичный ключ из файла {cand}: {e}")
+                        log_error(
+                            "Безопасность",
+                            f"Не удалось прочитать публичный ключ из файла {cand}: {e}",
+                        )
 
         # 4. Если сертификат еще не загружен, проверяем наличие X.509 сертификата для сервера
         if not self.SERVER_CERT:
@@ -277,6 +348,7 @@ class Settings:
         if self.PRIVATE_KEY:
             try:
                 from cryptography.hazmat.primitives import serialization
+
                 serialization.load_pem_private_key(self.PRIVATE_KEY.encode("utf-8"), password=None)
             except Exception as e:
                 missing.append(f"JWT_PRIVATE_KEY поврежден или не читается в формате PEM: {e}")
@@ -296,7 +368,9 @@ class Settings:
             missing.append(f"Файл ROOT_CA_CERT_PATH не найден на диске: {ca_cert_path}")
 
         for agent in ["DIGITAL", "BANK", "INVEST", "MAIN"]:
-            if not getattr(self, f"AGENT_{agent}_BOOTSTRAP_TOKEN", None) and not os.getenv(f"AGENT_{agent}_BOOTSTRAP_TOKEN"):
+            if not getattr(self, f"AGENT_{agent}_BOOTSTRAP_TOKEN", None) and not os.getenv(
+                f"AGENT_{agent}_BOOTSTRAP_TOKEN"
+            ):
                 missing.append(f"AGENT_{agent}_BOOTSTRAP_TOKEN")
 
         data_key = self.DATA_ENCRYPTION_KEY or os.getenv("DATA_ENCRYPTION_KEY", "")
@@ -315,9 +389,9 @@ class Settings:
 
         # SEC-10: Строгая валидация STRICT_SECURITY
         if os.getenv("STRICT_SECURITY", "false").lower() == "true":
-            if not (self.REQUIRE_MTLS is True):
+            if self.REQUIRE_MTLS is not True:
                 raise RuntimeError("STRICT_SECURITY: REQUIRE_MTLS must be true")
-            if not (self.REQUIRE_2FA is True):
+            if self.REQUIRE_2FA is not True:
                 raise RuntimeError("STRICT_SECURITY: REQUIRE_2FA must be true")
 
             forbidden_passwords = {"change_me", "secret", "admin123", "minioadmin"}
@@ -339,7 +413,8 @@ class Settings:
         if not self.ADMIN_TOTP_SECRET:
             log_info(
                 "Безопасность",
-                "ADMIN_TOTP_SECRET не задан в .env. Сервер ожидает загрузку секрета из зашифрованной базы данных или первичную привязку 2FA (onboarding)."
+                "ADMIN_TOTP_SECRET не задан в .env. Сервер ожидает загрузку секрета "
+                "из зашифрованной базы данных или первичную привязку 2FA (onboarding).",
             )
 
     def get_bootstrap_token(self, agent_name: str) -> str | None:
@@ -379,28 +454,37 @@ try:
     else:
         redis_blacklist = None
 except Exception as e:
-    log_error("Аутентификация", f"Не удалось инициализировать клиент Redis для черного списка: {e}")
+    log_error(
+        "Аутентификация",
+        f"Не удалось инициализировать клиент Redis для черного списка: {e}",
+    )
     redis_blacklist = None
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
+
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Проверяет соответствие открытого пароля его bcrypt-хэшу."""
     try:
-        return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
+        return bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8"))
     except Exception:
         return False
 
+
 def get_password_hash(password: str) -> str:
     """Формирует bcrypt-хэш из переданного пароля."""
-    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
 
 def create_access_token(data: dict, role: str | Role | None = None) -> str:
-    """Создает подписанный асимметричным приватным ключом RSA (RS256) короткоживущий (15 мин) access-токен с уникальным jti и правами RBAC."""
+    """
+    Создает подписанный асимметричным приватным ключом RSA (RS256)
+    короткоживущий (15 мин) access-токен с уникальным jti и правами RBAC.
+    """
     to_encode = data.copy()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     expire = now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    
+
     raw_role = role or to_encode.get("role") or Role.SUPERADMIN
     if isinstance(raw_role, Role):
         role_str = raw_role.value
@@ -416,22 +500,28 @@ def create_access_token(data: dict, role: str | Role | None = None) -> str:
     perms = [p.value for p in ROLE_PERMISSIONS.get(role_enum, set())]
     sub = to_encode.get("sub", "admin")
 
-    to_encode.update({
-        "sub": sub,
-        "role": role_str,
-        "permissions": perms,
-        "type": "access",
-        "iat": now,
-        "exp": expire,
-        "jti": str(uuid.uuid4())
-    })
+    to_encode.update(
+        {
+            "sub": sub,
+            "role": role_str,
+            "permissions": perms,
+            "type": "access",
+            "iat": now,
+            "exp": expire,
+            "jti": str(uuid.uuid4()),
+        }
+    )
     encoded_jwt = jwt.encode(to_encode, settings.PRIVATE_KEY, algorithm=settings.ALGORITHM)
     return encoded_jwt
 
+
 def create_refresh_token(data: dict, role: str | Role | None = None) -> str:
-    """Создает подписанный асимметричным приватным ключом RSA (RS256) refresh-токен (7 дней) для ротации (RTR) с сохранением роли."""
+    """
+    Создает подписанный асимметричным приватным ключом RSA (RS256) refresh-токен
+    (7 дней) для ротации (RTR) с сохранением роли.
+    """
     to_encode = data.copy()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     expire = now + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
 
     raw_role = role or to_encode.get("role") or Role.SUPERADMIN
@@ -441,26 +531,34 @@ def create_refresh_token(data: dict, role: str | Role | None = None) -> str:
         role_str = str(raw_role).lower().strip()
 
     try:
-        role_enum = Role(role_str)
+        Role(role_str)
     except ValueError:
-        role_enum = Role.SUPERADMIN
         role_str = Role.SUPERADMIN.value
 
     sub = to_encode.get("sub", "admin")
-    to_encode.update({
-        "sub": sub,
-        "role": role_str,
-        "type": "refresh",
-        "iat": now,
-        "exp": expire,
-        "jti": str(uuid.uuid4())
-    })
+    to_encode.update(
+        {
+            "sub": sub,
+            "role": role_str,
+            "type": "refresh",
+            "iat": now,
+            "exp": expire,
+            "jti": str(uuid.uuid4()),
+        }
+    )
     encoded_jwt = jwt.encode(to_encode, settings.PRIVATE_KEY, algorithm=settings.ALGORITHM)
     return encoded_jwt
 
+
 def decode_access_token(token: str) -> dict:
     """Декодирует и валидирует токен публичным RSA-ключом (RS256), защищая от подделки и подмены алгоритма."""
-    return jwt.decode(token, settings.PUBLIC_KEY, algorithms=[settings.ALGORITHM], options={"require": ["exp"]})
+    return jwt.decode(
+        token,
+        settings.PUBLIC_KEY,
+        algorithms=[settings.ALGORITHM],
+        options={"require": ["exp"]},
+    )
+
 
 async def get_current_admin(token: str = Depends(oauth2_scheme)) -> CurrentUser:
     """
@@ -493,7 +591,10 @@ async def get_current_admin(token: str = Depends(oauth2_scheme)) -> CurrentUser:
             if check_jti or check_tok:
                 is_revoked = True
         except Exception as e:
-            log_error("Аутентификация", f"Предупреждение безопасности: сбой проверки черного списка в Redis: {e}")
+            log_error(
+                "Аутентификация",
+                f"Предупреждение безопасности: сбой проверки черного списка в Redis: {e}",
+            )
             if os.getenv("AUTH_FAIL_CLOSED", "false").lower() == "true":
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -501,8 +602,11 @@ async def get_current_admin(token: str = Depends(oauth2_scheme)) -> CurrentUser:
                     headers={"WWW-Authenticate": "Bearer"},
                 )
     else:
-        log_warning("Аутентификация", "Черный список Redis не инициализирован; проверка отзыва токена невозможна")
-            
+        log_warning(
+            "Аутентификация",
+            "Черный список Redis не инициализирован; проверка отзыва токена невозможна",
+        )
+
     if is_revoked:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -540,6 +644,7 @@ async def get_current_admin(token: str = Depends(oauth2_scheme)) -> CurrentUser:
 
     return CurrentUser(username=username, role=role_enum, permissions=perms)
 
+
 def verify_and_rotate_refresh_token(refresh_token: str) -> tuple[str, str]:
     """
     Проверяет refresh-токен, инвалидирует его в черном списке Redis (Refresh Token Rotation)
@@ -565,9 +670,17 @@ def verify_and_rotate_refresh_token(refresh_token: str) -> tuple[str, str]:
     if redis_blacklist:
         try:
             check_jti = (redis_blacklist.exists(f"blacklist:{jti}") in (1, True, "1")) if jti else False
-            check_tok = redis_blacklist.exists(f"blacklist:{refresh_token}") in (1, True, "1")
+            check_tok = redis_blacklist.exists(f"blacklist:{refresh_token}") in (
+                1,
+                True,
+                "1",
+            )
             if check_jti or check_tok:
-                log_error("Безопасность", f"Попытка повторного использования отозванного refresh-токена (jti={jti})! Возможная компрометация сессии.")
+                log_error(
+                    "Безопасность",
+                    f"Попытка повторного использования отозванного refresh-токена (jti={jti})! "
+                    "Возможная компрометация сессии.",
+                )
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Refresh token already used or revoked",
@@ -576,7 +689,10 @@ def verify_and_rotate_refresh_token(refresh_token: str) -> tuple[str, str]:
         except HTTPException:
             raise
         except Exception as e:
-            log_error("Безопасность", f"Сбой проверки черного списка Redis при ротации refresh-токена: {e}")
+            log_error(
+                "Безопасность",
+                f"Сбой проверки черного списка Redis при ротации refresh-токена: {e}",
+            )
             if os.getenv("AUTH_FAIL_CLOSED", "false").lower() == "true":
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -585,7 +701,7 @@ def verify_and_rotate_refresh_token(refresh_token: str) -> tuple[str, str]:
 
         # Инвалидируем использованный refresh-токен
         try:
-            now_ts = int(datetime.now(timezone.utc).timestamp())
+            now_ts = int(datetime.now(UTC).timestamp())
             exp = payload.get("exp")
             ttl = max(1, exp - now_ts) if exp else settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400
             redis_blacklist.setex(f"blacklist:{jti}", ttl, "rotated")
@@ -605,7 +721,9 @@ def verify_and_rotate_refresh_token(refresh_token: str) -> tuple[str, str]:
     return new_access, new_refresh
 
 
-async def get_current_user(current_admin: Any = Depends(get_current_admin)) -> CurrentUser:
+async def get_current_user(
+    current_admin: Any = Depends(get_current_admin),
+) -> CurrentUser:
     """
     Зависимость FastAPI для извлечения текущего пользователя.
     Поддерживает прямые вызовы get_current_admin, а также тестовые overrides.
@@ -629,7 +747,11 @@ async def get_current_user(current_admin: Any = Depends(get_current_admin)) -> C
                 headers={"WWW-Authenticate": "Bearer"},
             )
         perms = current_admin.get("permissions") or ROLE_PERMISSIONS.get(role_enum, set()).copy()
-        return CurrentUser(username=str(current_admin.get("username", "admin")), role=role_enum, permissions=perms)
+        return CurrentUser(
+            username=str(current_admin.get("username", "admin")),
+            role=role_enum,
+            permissions=perms,
+        )
     return CurrentUser(username=str(current_admin), role=Role.SUPERADMIN)
 
 
@@ -637,16 +759,15 @@ def require_role(*required_roles: Role | str) -> Callable:
     """
     Фабрика зависимостей: проверяет, что роль текущего пользователя входит в список разрешенных.
     """
-    valid_role_values = {
-        r.value if isinstance(r, Role) else str(r).lower().strip()
-        for r in required_roles
-    }
+    valid_role_values = {r.value if isinstance(r, Role) else str(r).lower().strip() for r in required_roles}
 
-    async def role_checker(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
+    async def role_checker(
+        user: CurrentUser = Depends(get_current_user),
+    ) -> CurrentUser:
         if user.role.value not in valid_role_values:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Forbidden: insufficient role privileges. Required one of: {sorted(list(valid_role_values))}"
+                detail=f"Forbidden: insufficient role privileges. Required one of: {sorted(list(valid_role_values))}",
             )
         return user
 
@@ -667,12 +788,14 @@ def require_permission(*required_permissions: Permission | str) -> Callable:
             except ValueError:
                 pass
 
-    async def permission_checker(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
+    async def permission_checker(
+        user: CurrentUser = Depends(get_current_user),
+    ) -> CurrentUser:
         for perm in perm_enums:
             if not user.has_permission(perm):
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"Forbidden: missing required permission '{perm.value}'"
+                    detail=f"Forbidden: missing required permission '{perm.value}'",
                 )
         return user
 
@@ -688,15 +811,23 @@ def calculate_key_fingerprint(public_key_pem: str) -> str:
     except Exception:
         return "sha256:unknown"
 
+
 def generate_key_id(agent_name: str, public_key_pem: str) -> str:
     """Генерирует уникальный идентификатор ключа (Key ID / kid) на основе имени и хэша ключа."""
     digest = hashlib.sha256(public_key_pem.strip().encode("utf-8")).hexdigest()[:12]
     return f"{agent_name}-{digest}"
 
+
 # Локальное хранилище отозванных сертификатов и ключей для тестов и отказоустойчивости при сбое Redis
 _revoked_certs_memory: set[str] = set()
 
-def revoke_agent_key_in_redis(agent_name: str, kid: str | None = None, ttl_seconds: int = 86400 * 90, redis_conn=None):
+
+def revoke_agent_key_in_redis(
+    agent_name: str,
+    kid: str | None = None,
+    ttl_seconds: int = 86400 * 90,
+    redis_conn=None,
+):
     """Помещает отозванный ключ агента в черный список Redis и локальную память для мгновенного отклонения запросов."""
     client = redis_conn or redis_blacklist
     a_clean = agent_name.strip().lower() if agent_name else ""
@@ -721,6 +852,7 @@ def revoke_agent_key_in_redis(agent_name: str, kid: str | None = None, ttl_secon
         except Exception as e:
             log_error("Безопасность", f"Ошибка сохранения отзыва ключа агента в Redis: {e}")
 
+
 def is_agent_key_revoked_in_redis(agent_name: str, kid: str | None = None, redis_conn=None) -> bool:
     """Проверяет статус отзыва ключа агента в локальной памяти и черном списке Redis."""
     a_clean = agent_name.strip().lower() if agent_name else ""
@@ -738,6 +870,7 @@ def is_agent_key_revoked_in_redis(agent_name: str, kid: str | None = None, redis
         except Exception as e:
             log_warning("Безопасность", f"Ошибка проверки отзыва агента в Redis: {e}")
     return False
+
 
 def unrevoke_agent_key_in_redis(agent_name: str, kid: str | None = None, redis_conn=None) -> None:
     """Снимает блокировку с агента/ключа в локальной памяти и Redis при реактивации."""
@@ -764,6 +897,7 @@ def unrevoke_agent_key_in_redis(agent_name: str, kid: str | None = None, redis_c
         except Exception as e:
             log_warning("Безопасность", f"Ошибка снятия блокировки агента в Redis: {e}")
 
+
 async def run_revocation_listener(redis_client_instance=None):
     """
     Фоновый асинхронный подписчик на Redis-канал 'security:revocations'.
@@ -775,6 +909,7 @@ async def run_revocation_listener(redis_client_instance=None):
     pubsub = None
     try:
         import asyncio
+
         pubsub = client.pubsub()
         pubsub.subscribe("security:revocations")
         while True:
@@ -801,6 +936,7 @@ async def run_revocation_listener(redis_client_instance=None):
             except Exception:
                 pass
 
+
 def verify_agent_jwt(token: str, public_key: str, expected_kid: str | None = None) -> dict | None:
     """Проверяет подпись JWT-токена агента по алгоритму RS256 с валидацией kid и обязательным exp."""
     try:
@@ -808,13 +944,17 @@ def verify_agent_jwt(token: str, public_key: str, expected_kid: str | None = Non
             unverified_headers = jwt.get_unverified_header(token)
             token_kid = unverified_headers.get("kid")
             if token_kid and token_kid != expected_kid:
-                log_warning("Аутентификация", f"Несовпадение Key ID: в токене {token_kid}, ожидался {expected_kid}")
+                log_warning(
+                    "Аутентификация",
+                    f"Несовпадение Key ID: в токене {token_kid}, ожидался {expected_kid}",
+                )
                 return None
         payload = jwt.decode(token, public_key, algorithms=["RS256"], options={"require": ["exp"]})
         return payload
     except Exception as e:
         log_warning("Аутентификация", f"Сбой проверки JWT-токена агента: {e}")
         return None
+
 
 def generate_totp_secret() -> str:
     """Генерирует криптографически стойкий 160-битный base32-секрет для TOTP (RFC 6238)."""
@@ -826,6 +966,7 @@ def generate_totp_secret() -> str:
     raw_bytes = secrets.token_bytes(20)
     return base64.b32encode(raw_bytes).decode("utf-8").rstrip("=")
 
+
 def get_totp_uri(secret: str, username: str = "admin", issuer: str = "Financial-AI-Agent") -> str:
     """Формирует URI otpauth://totp/... для сканирования QR-кода в Google Authenticator / FreeOTP."""
     try:
@@ -834,9 +975,14 @@ def get_totp_uri(secret: str, username: str = "admin", issuer: str = "Financial-
     except Exception:
         pass
     import urllib.parse
+
     encoded_issuer = urllib.parse.quote(issuer)
     encoded_username = urllib.parse.quote(username)
-    return f"otpauth://totp/{encoded_issuer}:{encoded_username}?secret={secret}&issuer={encoded_issuer}&algorithm=SHA1&digits=6&period=30"
+    return (
+        f"otpauth://totp/{encoded_issuer}:{encoded_username}?"
+        f"secret={secret}&issuer={encoded_issuer}&algorithm=SHA1&digits=6&period=30"
+    )
+
 
 def verify_totp_code(secret: str, code: str, window: int = 1) -> bool:
     """
@@ -871,7 +1017,7 @@ def verify_totp_code(secret: str, code: str, window: int = 1) -> bool:
             msg = struct.pack(">Q", counter)
             h = hmac.new(key, msg, hashlib.sha1).digest()
             offset = h[19] & 0x0F
-            token_val = (struct.unpack(">I", h[offset:offset+4])[0] & 0x7FFFFFFF) % (10 ** digits)
+            token_val = (struct.unpack(">I", h[offset : offset + 4])[0] & 0x7FFFFFFF) % (10**digits)
             expected_code = f"{token_val:0{digits}d}"
             if hmac.compare_digest(expected_code, code):
                 return True
@@ -880,12 +1026,15 @@ def verify_totp_code(secret: str, code: str, window: int = 1) -> bool:
 
     return False
 
+
 def generate_qr_svg(uri: str) -> str:
     """Генерирует SVG-изображение QR-кода для безопасного отображения в интерфейсе без сторонних CDN."""
     try:
+        import io
+
         import qrcode
         import qrcode.image.svg
-        import io
+
         factory = qrcode.image.svg.SvgPathImage
         img = qrcode.make(uri, image_factory=factory)
         stream = io.BytesIO()
@@ -957,7 +1106,7 @@ def derive_key(
     passphrase: str | bytes,
     salt: bytes | None = None,
     method: str = "pbkdf2",
-    iterations: int = 100_000
+    iterations: int = 100_000,
 ) -> bytes:
     """
     Усиленная деривация 256-битного мастер-ключа шифрования через PBKDF2 / HKDF (SEC-26)
@@ -972,8 +1121,9 @@ def derive_key(
     effective_salt = salt or b"financial-mas-data-encryption-salt-v1"
 
     if method == "hkdf":
-        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
         from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
         hkdf = HKDF(
             algorithm=hashes.SHA256(),
             length=32,
@@ -983,8 +1133,9 @@ def derive_key(
         return hkdf.derive(passphrase)
 
     # Default: PBKDF2
-    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
     from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,
@@ -1052,14 +1203,15 @@ def encrypt_data_at_rest(
     data: bytes | str,
     key: bytes | str | None = None,
     associated_data: bytes | None = None,
-    kid: str | None = None
+    kid: str | None = None,
 ) -> bytes:
     """
     Шифрует данные для безопасного хранения в БД/томах с использованием AES-256-GCM.
-    
+
     Формат зашифрованного пакета (Envelope):
     - При указании kid (SEC-11): b"ENC2:" + kid.encode() + b":" + Nonce(12) + Ciphertext + Tag(16)
-    - Legacy формат (по умолчанию без kid): [4 байта: MAGIC 'ENC1'] + [12 байтов: случайный Nonce/IV] + [Зашифрованные данные + 16 байт Auth Tag]
+    - Legacy формат (по умолчанию без kid): [4 байта: MAGIC 'ENC1'] +
+      [12 байтов: случайный Nonce/IV] + [Зашифрованные данные + 16 байт Auth Tag]
     """
     if isinstance(data, str):
         data = data.encode("utf-8")
@@ -1078,7 +1230,7 @@ def encrypt_data_at_rest(
 def decrypt_data_at_rest(
     encrypted_payload: bytes,
     key: bytes | str | None = None,
-    associated_data: bytes | None = None
+    associated_data: bytes | None = None,
 ) -> bytes:
     """
     Расшифровывает данные с проверкой аутентичности и целостности (AEAD AES-256-GCM).
@@ -1093,8 +1245,7 @@ def decrypt_data_at_rest(
         delim_idx = encrypted_payload.find(b":", prefix_len)
         if delim_idx == -1:
             raise ValueError("Зашифрованные данные ENC2 повреждены: отсутствует разделитель Key ID.")
-        kid = encrypted_payload[prefix_len:delim_idx].decode("utf-8", errors="replace")
-        rest = encrypted_payload[delim_idx + 1:]
+        rest = encrypted_payload[delim_idx + 1 :]
         min_rest_len = 12 + 16  # Nonce (12) + Tag (16)
         if len(rest) < min_rest_len:
             raise ValueError("Зашифрованные данные повреждены: длина пакета меньше минимально допустимой.")
@@ -1119,14 +1270,16 @@ def decrypt_data_at_rest(
     try:
         return aesgcm.decrypt(nonce, ciphertext_and_tag, associated_data)
     except Exception as e:
-        raise ValueError("Ошибка расшифровки данных: неверный ключ, поврежденный шифротекст или несовпадение тега аутентификации.") from e
+        raise ValueError(
+            "Ошибка расшифровки данных: неверный ключ, поврежденный шифротекст или несовпадение тега аутентификации."
+        ) from e
 
 
 def encrypt_text_at_rest(
     text: str,
     key: bytes | str | None = None,
     associated_data: bytes | None = None,
-    kid: str | None = None
+    kid: str | None = None,
 ) -> str:
     """Шифрует строковые данные и возвращает безопасную Base64url-строку (поддерживает KID)."""
     raw_cipher = encrypt_data_at_rest(text.encode("utf-8"), key=key, associated_data=associated_data, kid=kid)
@@ -1136,7 +1289,7 @@ def encrypt_text_at_rest(
 def decrypt_text_at_rest(
     encrypted_b64: str,
     key: bytes | str | None = None,
-    associated_data: bytes | None = None
+    associated_data: bytes | None = None,
 ) -> str:
     """Расшифровывает Base64url-строку и возвращает исходный UTF-8 текст."""
     if not isinstance(encrypted_b64, str):
@@ -1149,10 +1302,7 @@ def decrypt_text_at_rest(
     return decrypted_bytes.decode("utf-8")
 
 
-def get_minio_sse(
-    sse_type: str | None = None,
-    customer_key: bytes | str | None = None
-):
+def get_minio_sse(sse_type: str | None = None, customer_key: bytes | str | None = None):
     """
     Возвращает объект ServerSideEncryption (SSE-S3 или SSE-C) для MinIO client.
     Обеспечивает шифрование объектов в объектном хранилище MinIO при хранении (Data at Rest).
@@ -1167,18 +1317,25 @@ def get_minio_sse(
     sse_mod = None
     try:
         import minio.sse as actual_sse
+
         sse_mod = actual_sse
     except Exception:
         sse_mod = minio_sse
 
     if sse_mod is None or not hasattr(sse_mod, "SseS3"):
-        log_warning("MinIO SSE", "Модуль minio.sse недоступен, Server-Side Encryption отключено.")
+        log_warning(
+            "MinIO SSE",
+            "Модуль minio.sse недоступен, Server-Side Encryption отключено.",
+        )
         return None
 
     if target_type == "ssec":
         key_source = customer_key or settings.MINIO_SSE_C_KEY or settings.DATA_ENCRYPTION_KEY
         if not key_source:
-            log_warning("MinIO SSE", "Ключ SSE-C не настроен, переключение на стандартный SSE-S3.")
+            log_warning(
+                "MinIO SSE",
+                "Ключ SSE-C не настроен, переключение на стандартный SSE-S3.",
+            )
             return sse_mod.SseS3()
         key_32 = resolve_encryption_key(key_source)
         return sse_mod.SseCustomerKey(key_32)
@@ -1187,37 +1344,11 @@ def get_minio_sse(
     return sse_mod.SseS3()
 
 
-# --- ХЕЛПЕРЫ КОНВЕРТНОГО ШИФРОВАНИЯ CHROMADB (ENVELOPE ENCRYPTION) ---
-# Каноническая реализация находится в src/admin_server/vectors/chroma_envelope.py.
-# Реэкспортируем функции для сохранения обратной совместимости интерфейса security.
-try:
-    from vectors.chroma_envelope import (
-        is_encrypted_chunk,
-        encrypt_chroma_chunk,
-        decrypt_chroma_chunk,
-        encrypt_chroma_metadata,
-        decrypt_chroma_metadata,
-        decrypt_chroma_results,
-    )
-except ImportError:
-    try:
-        from src.admin_server.vectors.chroma_envelope import (
-            is_encrypted_chunk,
-            encrypt_chroma_chunk,
-            decrypt_chroma_chunk,
-            encrypt_chroma_metadata,
-            decrypt_chroma_metadata,
-            decrypt_chroma_results,
-        )
-    except ImportError:
-        pass
-
-
 def extract_cn_from_subject(subject: str | None) -> str | None:
     """Извлекает Common Name (CN) из строки Subject сертификата (например, 'CN=admin-client,O=FinancialAI')."""
     if not subject:
         return None
-    match = re.search(r'(?:^|[\/,\s])CN\s*=\s*([^,\/]+)', subject, re.IGNORECASE)
+    match = re.search(r"(?:^|[\/,\s])CN\s*=\s*([^,\/]+)", subject, re.IGNORECASE)
     if match:
         return match.group(1).strip()
     return None
@@ -1274,7 +1405,10 @@ def revoke_certificate_in_redis(
                 client.setex(f"revoked:cert:serial:{s_clean}", ttl_seconds, "revoked")
                 client.setex(f"revoked:cert:{s_clean}", ttl_seconds, "revoked")
             except Exception as e:
-                log_warning("PKI", f"Не удалось сохранить отзыв сертификата {serial} в Redis: {e}")
+                log_warning(
+                    "PKI",
+                    f"Не удалось сохранить отзыв сертификата {serial} в Redis: {e}",
+                )
         try:
             val = int(s_clean, 0)
             hex_val = format(val, "x")
@@ -1292,7 +1426,10 @@ def revoke_certificate_in_redis(
                 client.setex(f"revoked:cert:fp:{fp_clean}", ttl_seconds, "revoked")
                 client.setex(f"revoked:cert:{fp_clean}", ttl_seconds, "revoked")
             except Exception as e:
-                log_warning("PKI", f"Не удалось сохранить отзыв отпечатка {fingerprint} в Redis: {e}")
+                log_warning(
+                    "PKI",
+                    f"Не удалось сохранить отзыв отпечатка {fingerprint} в Redis: {e}",
+                )
 
     if agent_id:
         a_clean = str(agent_id).strip().lower()
@@ -1312,7 +1449,7 @@ def is_certificate_revoked_in_redis(
     serial: str | None = None,
     fingerprint: str | None = None,
     agent_id: str | None = None,
-    redis_conn=None
+    redis_conn=None,
 ) -> bool:
     """
     Проверяет статус отзыва сертификата по серийному номеру (dec/hex), отпечатку и/или идентификатору агента/CN.
@@ -1381,20 +1518,27 @@ def verify_mtls_client_certificate(request: Request) -> dict[str, Any]:
     # 1. Проверка отзыва сертификата в черном списке (CRL / Revocation list)
     if cert_info.get("serial") or cert_info.get("fingerprint"):
         if is_certificate_revoked_in_redis(cert_info.get("serial"), cert_info.get("fingerprint")):
-            log_warning("mTLS", f"Отказ в доступе: клиентский сертификат (serial: {cert_info.get('serial')}) отозван")
+            log_warning(
+                "mTLS",
+                f"Отказ в доступе: клиентский сертификат (serial: {cert_info.get('serial')}) отозван",
+            )
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Клиентский сертификат mTLS отозван (Certificate has been revoked)"
+                detail="Клиентский сертификат mTLS отозван (Certificate has been revoked)",
             )
 
     if not settings.REQUIRE_MTLS:
         return cert_info
 
     if not cert_info["verified"]:
-        log_warning("mTLS", f"Отказ в доступе: клиент не предоставил валидный TLS-сертификат (статус: {cert_info['raw_verify_status']})")
+        log_warning(
+            "mTLS",
+            "Отказ в доступе: клиент не предоставил валидный TLS-сертификат "
+            f"(статус: {cert_info['raw_verify_status']})",
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Требуется действительный клиентский TLS-сертификат (mTLS Mutual Authentication Required)"
+            detail="Требуется действительный клиентский TLS-сертификат (mTLS Mutual Authentication Required)",
         )
 
     # Проверка разрешенных субъектов (Common Name или полный Subject)
@@ -1406,23 +1550,27 @@ def verify_mtls_client_certificate(request: Request) -> dict[str, Any]:
             for allowed in settings.ALLOWED_MTLS_SUBJECTS
         )
         if not is_subject_allowed:
-            log_warning("mTLS", f"Отказ в доступе: субъект сертификата '{client_subj}' (CN: '{client_cn}') не входит в белый список")
+            log_warning(
+                "mTLS",
+                f"Отказ в доступе: субъект сертификата '{client_subj}' (CN: '{client_cn}') не входит в белый список",
+            )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Клиентский сертификат mTLS не авторизован (субъект: {client_cn or client_subj})"
+                detail=f"Клиентский сертификат mTLS не авторизован (субъект: {client_cn or client_subj})",
             )
 
     # Проверка разрешенных эмитентов (CA)
     if settings.ALLOWED_MTLS_ISSUERS:
         client_issuer = cert_info.get("issuer") or ""
-        is_issuer_allowed = any(
-            allowed in client_issuer for allowed in settings.ALLOWED_MTLS_ISSUERS
-        )
+        is_issuer_allowed = any(allowed in client_issuer for allowed in settings.ALLOWED_MTLS_ISSUERS)
         if not is_issuer_allowed:
-            log_warning("mTLS", f"Отказ в доступе: эмитент сертификата '{client_issuer}' не входит в белый список доверенных CA")
+            log_warning(
+                "mTLS",
+                f"Отказ в доступе: эмитент сертификата '{client_issuer}' не входит в белый список доверенных CA",
+            )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Эмитент клиентского сертификата mTLS не входит в список доверенных центров авторизации"
+                detail="Эмитент клиентского сертификата mTLS не входит в список доверенных центров авторизации",
             )
 
     return cert_info
@@ -1433,8 +1581,6 @@ verify_mtls_client_identity = verify_mtls_client_certificate
 
 
 # --- ЗАЩИТА ОТ АТАК ПОВТОРЕНИЯ (NONCE / REPLAY ATTACK PREVENTION) ---
-
-import threading
 
 _admin_nonces_memory: dict[str, float] = {}
 _admin_nonces_lock = threading.Lock()
@@ -1459,7 +1605,10 @@ def record_admin_nonce_if_new(nonce: str, ttl_seconds: int = 300, redis_conn=Non
                 raise NotImplementedError("Mocked redis set returned MagicMock")
             return bool(success in (True, 1, "OK", b"OK"))
         except Exception as e:
-            log_warning("ReplayProtection", f"Redis недоступен для проверки nonce ({e}), резервное использование памяти")
+            log_warning(
+                "ReplayProtection",
+                f"Redis недоступен для проверки nonce ({e}), резервное использование памяти",
+            )
 
     now = time.time()
     with _admin_nonces_lock:
@@ -1480,6 +1629,7 @@ def clear_admin_nonces_cache() -> None:
 
 # --- ЦИФРОВЫЕ ПОДПИСИ И ВЕРИФИКАЦИЯ (DIGITAL SIGNATURES & X.509) ---
 
+
 def compute_rag_canonical_digest(timestamp: int | str, nonce: str, body_bytes: bytes) -> bytes:
     """
     Вычисляет канонические байты для цифровой подписи документа:
@@ -1490,29 +1640,27 @@ def compute_rag_canonical_digest(timestamp: int | str, nonce: str, body_bytes: b
     return canonical_str.encode("utf-8")
 
 
-def verify_digital_signature(
-    public_key_or_cert: str | bytes,
-    signature_b64: str,
-    data_bytes: bytes
-) -> bool:
+def verify_digital_signature(public_key_or_cert: str | bytes, signature_b64: str, data_bytes: bytes) -> bool:
     """
     Проверяет цифровую подпись данных с поддержкой X.509 сертификатов, открытых ключей RSA и ECDSA.
     Поддерживает алгоритмы RSA-PSS, RSA-PKCS1v15 (Windows Hello / TPM CNG) и ECDSA (NIST P-256).
     """
     try:
-        from cryptography.hazmat.primitives.asymmetric import padding, rsa, ec
-        from cryptography.hazmat.primitives import hashes, serialization
         from cryptography import x509
         from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 
         raw_sig = base64.b64decode(signature_b64.strip())
 
         pub_key = None
         if isinstance(public_key_or_cert, x509.Certificate):
             pub_key = public_key_or_cert.public_key()
-        elif isinstance(public_key_or_cert, (rsa.RSAPublicKey, ec.EllipticCurvePublicKey)):
-            pub_key = public_key_or_cert
-        elif hasattr(public_key_or_cert, "verify") and not isinstance(public_key_or_cert, (str, bytes, bytearray)):
+        elif (
+            isinstance(public_key_or_cert, (rsa.RSAPublicKey, ec.EllipticCurvePublicKey))
+            or hasattr(public_key_or_cert, "verify")
+            and not isinstance(public_key_or_cert, (str, bytes, bytearray))
+        ):
             pub_key = public_key_or_cert
         else:
             if isinstance(public_key_or_cert, str):
@@ -1546,8 +1694,11 @@ def verify_digital_signature(
                 pub_key.verify(
                     raw_sig,
                     data_bytes,
-                    padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
-                    hashes.SHA256()
+                    padding.PSS(
+                        mgf=padding.MGF1(hashes.SHA256()),
+                        salt_length=padding.PSS.MAX_LENGTH,
+                    ),
+                    hashes.SHA256(),
                 )
                 return True
             except InvalidSignature:
@@ -1560,8 +1711,11 @@ def verify_digital_signature(
                 pub_key.verify(
                     raw_sig,
                     data_bytes,
-                    padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
-                    hashes.SHA256()
+                    padding.PSS(
+                        mgf=padding.MGF1(hashes.SHA256()),
+                        salt_length=padding.PSS.DIGEST_LENGTH,
+                    ),
+                    hashes.SHA256(),
                 )
                 return True
             except InvalidSignature:
@@ -1571,12 +1725,7 @@ def verify_digital_signature(
 
             # 3. RSA PKCS#1 v1.5 (совместимость с аппаратными токенами / TPM)
             try:
-                pub_key.verify(
-                    raw_sig,
-                    data_bytes,
-                    padding.PKCS1v15(),
-                    hashes.SHA256()
-                )
+                pub_key.verify(raw_sig, data_bytes, padding.PKCS1v15(), hashes.SHA256())
                 return True
             except InvalidSignature:
                 pass
@@ -1585,11 +1734,7 @@ def verify_digital_signature(
 
         elif isinstance(pub_key, ec.EllipticCurvePublicKey):
             try:
-                pub_key.verify(
-                    raw_sig,
-                    data_bytes,
-                    ec.ECDSA(hashes.SHA256())
-                )
+                pub_key.verify(raw_sig, data_bytes, ec.ECDSA(hashes.SHA256()))
                 return True
             except InvalidSignature:
                 pass
@@ -1608,29 +1753,42 @@ def sign_server_receipt(receipt_data: dict, private_key_pem: str | None = None) 
     Возвращает кортеж (signature_b64, key_fingerprint).
     """
     try:
-        from cryptography.hazmat.primitives.asymmetric import padding, rsa
-        from cryptography.hazmat.primitives import hashes, serialization
         import json
+
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
         key_pem = private_key_pem or settings.PRIVATE_KEY
         priv_key = serialization.load_pem_private_key(key_pem.encode("utf-8"), password=None)
-        excluded = {"signature", "server_key_fingerprint", "server_cert", "receipt_verified"}
+        excluded = {
+            "signature",
+            "server_key_fingerprint",
+            "server_cert",
+            "receipt_verified",
+        }
         clean_receipt = {k: v for k, v in receipt_data.items() if k not in excluded}
         canonical_receipt = json.dumps(clean_receipt, sort_keys=True, ensure_ascii=False).encode("utf-8")
         if isinstance(priv_key, rsa.RSAPrivateKey):
             raw_sig = priv_key.sign(
                 canonical_receipt,
-                padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
-                hashes.SHA256()
+                padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.MAX_LENGTH,
+                ),
+                hashes.SHA256(),
             )
         else:
             raw_sig = priv_key.sign(canonical_receipt, hashes.SHA256())
 
         sig_b64 = base64.b64encode(raw_sig).decode("ascii")
-        pub_pem = priv_key.public_key().public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        ).decode("utf-8")
+        pub_pem = (
+            priv_key.public_key()
+            .public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+            .decode("utf-8")
+        )
         fp = calculate_key_fingerprint(pub_pem)
         return sig_b64, fp
     except Exception as e:
@@ -1640,7 +1798,7 @@ def sign_server_receipt(receipt_data: dict, private_key_pem: str | None = None) 
 
 # --- СЕРВЕРНАЯ ВАЛИДАЦИЯ ЦЕПОЧКИ ДОВЕРИЯ X.509 И СТАТУСА ОТЗЫВА (ZERO-TRUST PKI) ---
 
-_trusted_root_ca_cache: Optional[Any] = None
+_trusted_root_ca_cache: Any | None = None
 
 
 def set_trusted_root_ca(ca_input: Any) -> None:
@@ -1655,7 +1813,7 @@ def reset_trusted_root_ca() -> None:
     _trusted_root_ca_cache = None
 
 
-def parse_x509_certificate(cert_input: Any) -> Optional[Any]:
+def parse_x509_certificate(cert_input: Any) -> Any | None:
     """
     Универсально парсит X.509 сертификат из объекта Certificate, пути Path/str, PEM-строки или байт (DER/PEM).
     """
@@ -1675,6 +1833,7 @@ def parse_x509_certificate(cert_input: Any) -> Optional[Any]:
             cert_str = str(cert_input).strip()
             if "%" in cert_str:
                 import urllib.parse
+
                 try:
                     unquoted = urllib.parse.unquote(cert_str)
                     if "BEGIN CERTIFICATE" in unquoted:
@@ -1716,7 +1875,7 @@ def parse_x509_certificate(cert_input: Any) -> Optional[Any]:
     return None
 
 
-def get_trusted_root_ca(custom_ca: Optional[Any] = None) -> Optional[Any]:
+def get_trusted_root_ca(custom_ca: Any | None = None) -> Any | None:
     """
     Разрешает доверенный корневой сертификат Root CA:
     1. Переданный аргумент custom_ca;
@@ -1734,7 +1893,12 @@ def get_trusted_root_ca(custom_ca: Optional[Any] = None) -> Optional[Any]:
     if _trusted_root_ca_cache is not None:
         return _trusted_root_ca_cache
 
-    env_vars = ["ROOT_CA_CERT_PATH", "SSL_CERT_FILE", "CA_CERT_PATH", "REDIS_SSL_CA_CERTS"]
+    env_vars = [
+        "ROOT_CA_CERT_PATH",
+        "SSL_CERT_FILE",
+        "CA_CERT_PATH",
+        "REDIS_SSL_CA_CERTS",
+    ]
     for var in env_vars:
         val = os.getenv(var, "").strip()
         if val and os.path.exists(val):
@@ -1770,38 +1934,34 @@ def verify_certificate_signature(cert: Any, issuer_public_key: Any) -> None:
     Верифицирует цифровую подпись сертификата открытым ключом издателя (Root CA / Intermediate CA).
     Возбуждает исключение (InvalidSignature / ValueError / TypeError), если подпись неверна.
     """
-    from cryptography.hazmat.primitives.asymmetric import rsa, ec, padding
+    from cryptography.hazmat.primitives.asymmetric import ec, padding
 
     if isinstance(issuer_public_key, rsa.RSAPublicKey):
         issuer_public_key.verify(
             cert.signature,
             cert.tbs_certificate_bytes,
             padding.PKCS1v15(),
-            cert.signature_hash_algorithm
+            cert.signature_hash_algorithm,
         )
     elif isinstance(issuer_public_key, ec.EllipticCurvePublicKey):
         issuer_public_key.verify(
             cert.signature,
             cert.tbs_certificate_bytes,
-            ec.ECDSA(cert.signature_hash_algorithm)
+            ec.ECDSA(cert.signature_hash_algorithm),
         )
     elif hasattr(issuer_public_key, "verify"):
-        issuer_public_key.verify(
-            cert.signature,
-            cert.tbs_certificate_bytes,
-            cert.signature_hash_algorithm
-        )
+        issuer_public_key.verify(cert.signature, cert.tbs_certificate_bytes, cert.signature_hash_algorithm)
     else:
         raise TypeError(f"Неподдерживаемый тип открытого ключа издателя: {type(issuer_public_key)}")
 
 
 def validate_x509_certificate_chain(
     cert_input: Any,
-    enclave_cert_input: Optional[Any] = None,
-    root_ca_input: Optional[Any] = None,
+    enclave_cert_input: Any | None = None,
+    root_ca_input: Any | None = None,
     redis_conn=None,
-    at_time: Optional[datetime] = None,
-) -> Tuple[Any, Any]:
+    at_time: datetime | None = None,
+) -> tuple[Any, Any]:
     """
     Серверная Zero-Trust валидация клиентского сертификата X.509:
     1. Парсинг сертификата leaf_cert и промежуточного enclave_cert;
@@ -1814,27 +1974,29 @@ def validate_x509_certificate_chain(
 
     При нарушении правил безопасности вызывает HTTPException(401).
     """
-    from cryptography import x509
 
     # 1. Парсинг целевого сертификата
     leaf_cert = parse_x509_certificate(cert_input)
     if not leaf_cert:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Некорректный формат клиентского сертификата X.509 (ожидается PEM/Base64)"
+            detail="Некорректный формат клиентского сертификата X.509 (ожидается PEM/Base64)",
         )
 
     # 2. Проверка срока действия
-    check_time = at_time or datetime.now(timezone.utc)
+    check_time = at_time or datetime.now(UTC)
     if check_time < leaf_cert.not_valid_before_utc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Срок действия клиентского сертификата еще не наступил (действителен с: {leaf_cert.not_valid_before_utc})"
+            detail=(
+                "Срок действия клиентского сертификата еще не наступил "
+                f"(действителен с: {leaf_cert.not_valid_before_utc})"
+            ),
         )
     if check_time > leaf_cert.not_valid_after_utc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Срок действия клиентского сертификата истек (действителен до: {leaf_cert.not_valid_after_utc})"
+            detail=(f"Срок действия клиентского сертификата истек (действителен до: {leaf_cert.not_valid_after_utc})"),
         )
 
     # 3. Строгий запрет самоподписанных сертификатов
@@ -1842,10 +2004,11 @@ def validate_x509_certificate_chain(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=(
-                f"Клиентский сертификат является самоподписанным (Subject == Issuer: '{leaf_cert.subject.rfc4514_string()}'). "
+                f"Клиентский сертификат является самоподписанным "
+                f"(Subject == Issuer: '{leaf_cert.subject.rfc4514_string()}'). "
                 "В боевой Zero-Trust архитектуре самоподписанные сертификаты строго запрещены: "
                 "сертификат обязан быть подписан доверенным Root CA."
-            )
+            ),
         )
 
     # 4. Разрешение Root CA
@@ -1853,7 +2016,7 @@ def validate_x509_certificate_chain(
     if not root_ca:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Корневой удостоверяющий центр (Root CA / ca.crt) не настроен на сервере"
+            detail="Корневой удостоверяющий центр (Root CA / ca.crt) не настроен на сервере",
         )
 
     # 5. Проверка цепочки доверия
@@ -1862,44 +2025,50 @@ def validate_x509_certificate_chain(
         if not enclave_cert:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Некорректный формат промежуточного сертификата Анклава (X-Enclave-Cert)"
+                detail="Некорректный формат промежуточного сертификата Анклава (X-Enclave-Cert)",
             )
         # Проверка срока действия анклава
         if check_time < enclave_cert.not_valid_before_utc:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Срок действия промежуточного сертификата Анклава еще не наступил"
+                detail="Срок действия промежуточного сертификата Анклава еще не наступил",
             )
         if check_time > enclave_cert.not_valid_after_utc:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Срок действия промежуточного сертификата Анклава истек"
+                detail="Срок действия промежуточного сертификата Анклава истек",
             )
         # Проверка, что Анклав подписан Root CA
         if enclave_cert.issuer != root_ca.subject:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=f"Эмитент сертификата Анклава ({enclave_cert.issuer.rfc4514_string()}) не совпадает с Root CA ({root_ca.subject.rfc4514_string()})"
+                detail=(
+                    f"Эмитент сертификата Анклава ({enclave_cert.issuer.rfc4514_string()}) "
+                    f"не совпадает с Root CA ({root_ca.subject.rfc4514_string()})"
+                ),
             )
         try:
             verify_certificate_signature(enclave_cert, root_ca.public_key())
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=f"Сертификат Анклава не прошел верификацию подписи доверенным Root CA: {e}"
+                detail=f"Сертификат Анклава не прошел верификацию подписи доверенным Root CA: {e}",
             )
         # Проверка, что leaf_cert подписан Анклавом
         if leaf_cert.issuer != enclave_cert.subject:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=f"Эмитент сертификата клиента ({leaf_cert.issuer.rfc4514_string()}) не совпадает с сертификатом Анклава ({enclave_cert.subject.rfc4514_string()})"
+                detail=(
+                    f"Эмитент сертификата клиента ({leaf_cert.issuer.rfc4514_string()}) "
+                    f"не совпадает с сертификатом Анклава ({enclave_cert.subject.rfc4514_string()})"
+                ),
             )
         try:
             verify_certificate_signature(leaf_cert, enclave_cert.public_key())
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=f"Клиентский сертификат не прошел верификацию подписи промежуточным Анклавом: {e}"
+                detail=f"Клиентский сертификат не прошел верификацию подписи промежуточным Анклавом: {e}",
             )
         # Проверка отзыва сертификата Анклава в Redis
         enc_serial_dec = str(enclave_cert.serial_number)
@@ -1914,7 +2083,7 @@ def validate_x509_certificate_chain(
         ):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Промежуточный сертификат Анклава отозван в Redis CRL (Parent CA has been revoked)"
+                detail="Промежуточный сертификат Анклава отозван в Redis CRL (Parent CA has been revoked)",
             )
     else:
         # Прямая 2-уровневая цепочка: Root CA -> Leaf Cert
@@ -1924,14 +2093,14 @@ def validate_x509_certificate_chain(
                 detail=(
                     f"Эмитент сертификата ({leaf_cert.issuer.rfc4514_string()}) "
                     f"не совпадает с доверенным Root CA ({root_ca.subject.rfc4514_string()})"
-                )
+                ),
             )
         try:
             verify_certificate_signature(leaf_cert, root_ca.public_key())
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=f"Клиентский сертификат не прошел верификацию подписи доверенным Root CA: {e}"
+                detail=f"Клиентский сертификат не прошел верификацию подписи доверенным Root CA: {e}",
             )
 
     # 6. Проверка отзыва клиентского сертификата в Redis
@@ -1949,14 +2118,9 @@ def validate_x509_certificate_chain(
     ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Клиентский сертификат или идентичность отозваны в Redis CRL (Certificate has been revoked)"
+            detail="Клиентский сертификат или идентичность отозваны в Redis CRL (Certificate has been revoked)",
         )
 
     # 7. Извлечение открытого ключа
     pub_key = leaf_cert.public_key()
     return leaf_cert, pub_key
-
-
-
-
-

@@ -1,12 +1,10 @@
 import os
-import sys
-from typing import Optional
 
 
 def resolve_root_ca_passphrase(env_var_name: str = "ROOT_CA_PASSPHRASE") -> str:
     """
     Разрешает и валидирует секретную парольную фразу для шифрования приватного ключа Root CA.
-    
+
     В соответствии со строгой Zero-Trust моделью:
     - Требует обязательного наличия ROOT_CA_PASSPHRASE в переменных окружения.
     - Минимальная допустимая длина — 16 символов.

@@ -3,37 +3,31 @@
 Реализует Enterprise-уровень защиты: изоляция ключа в микрочипе TPM с биометрическим подтверждением.
 """
 
-import sys
-import os
 import base64
 import hashlib
+import os
 import struct
-from typing import Optional, Callable
-from cryptography.hazmat.primitives.asymmetric import rsa, padding
+import sys
+from collections.abc import Callable
+
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography import x509
-from cryptography.x509.oid import NameOID
-import datetime
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 try:
     from .cert_validator import (
-        resolve_and_validate_client_certificate,
-        find_client_cert_in_windows_store,
-        find_certificate_file,
-        CertificateMissingError,
-        WindowsCertificateStoreError,
         CertificateValidationError,
         KeyMissingError,
+        find_certificate_file,
+        find_client_cert_in_windows_store,
+        resolve_and_validate_client_certificate,
     )
 except ImportError:
     from cert_validator import (
-        resolve_and_validate_client_certificate,
-        find_client_cert_in_windows_store,
-        find_certificate_file,
-        CertificateMissingError,
-        WindowsCertificateStoreError,
         CertificateValidationError,
         KeyMissingError,
+        find_certificate_file,
+        find_client_cert_in_windows_store,
+        resolve_and_validate_client_certificate,
     )
 
 
@@ -56,10 +50,10 @@ class HardwareSigningBridge:
         self,
         key_name: str = "FinancialAI_Admin_TPM_Key",
         require_biometrics: bool = False,
-        cert_path: Optional[str] = None,
-        cert_pem: Optional[str] = None,
-        ca_cert_path: Optional[str] = None,
-        auto_create_key: bool = True
+        cert_path: str | None = None,
+        cert_pem: str | None = None,
+        ca_cert_path: str | None = None,
+        auto_create_key: bool = True,
     ):
         self.key_name = key_name
         self.require_biometrics = require_biometrics
@@ -71,7 +65,7 @@ class HardwareSigningBridge:
         self._is_windows = sys.platform == "win32"
         self._provider_handle = None
         self._key_handle = None
-        self._cached_public_key_pem: Optional[str] = None
+        self._cached_public_key_pem: str | None = None
 
         if not self._is_windows:
             raise RuntimeError("HardwareSigningBridge (TPM 2.0 / CNG) доступен только на платформе Windows")
@@ -86,13 +80,10 @@ class HardwareSigningBridge:
         try:
             import ctypes
             from ctypes import wintypes
+
             ncrypt = ctypes.windll.ncrypt
             h_prov = wintypes.HANDLE()
-            status = ncrypt.NCryptOpenStorageProvider(
-                ctypes.byref(h_prov),
-                cls.MS_PLATFORM_CRYPTO_PROVIDER,
-                0
-            )
+            status = ncrypt.NCryptOpenStorageProvider(ctypes.byref(h_prov), cls.MS_PLATFORM_CRYPTO_PROVIDER, 0)
             if status == 0 and h_prov.value:
                 ncrypt.NCryptFreeObject(h_prov)
                 return True
@@ -114,27 +105,15 @@ class HardwareSigningBridge:
             raise RuntimeError("Системная библиотека ncrypt.dll недоступна")
 
         h_prov = wintypes.HANDLE()
-        status = ncrypt.NCryptOpenStorageProvider(
-            ctypes.byref(h_prov),
-            self.MS_PLATFORM_CRYPTO_PROVIDER,
-            0
-        )
+        status = ncrypt.NCryptOpenStorageProvider(ctypes.byref(h_prov), self.MS_PLATFORM_CRYPTO_PROVIDER, 0)
         if status != 0 or not h_prov.value:
             err_code = hex(status if status >= 0 else (1 << 32) + status)
-            raise RuntimeError(
-                f"Не удалось открыть Microsoft Platform Crypto Provider (TPM 2.0), статус: {err_code}"
-            )
+            raise RuntimeError(f"Не удалось открыть Microsoft Platform Crypto Provider (TPM 2.0), статус: {err_code}")
         self._provider_handle = h_prov
 
         h_key = wintypes.HANDLE()
         flags = self.NCRYPT_SILENT_FLAG if not self.require_biometrics else 0
-        open_status = ncrypt.NCryptOpenKey(
-            self._provider_handle,
-            ctypes.byref(h_key),
-            self.key_name,
-            0,
-            flags
-        )
+        open_status = ncrypt.NCryptOpenKey(self._provider_handle, ctypes.byref(h_key), self.key_name, 0, flags)
 
         if open_status == 0 and h_key.value:
             self._key_handle = h_key
@@ -142,33 +121,18 @@ class HardwareSigningBridge:
 
         if not self.auto_create_key:
             err_code = hex(open_status if open_status >= 0 else (1 << 32) + open_status)
-            raise RuntimeError(
-                f"Аппаратный ключ '{self.key_name}' не найден в TPM 2.0, код: {err_code}"
-            )
+            raise RuntimeError(f"Аппаратный ключ '{self.key_name}' не найден в TPM 2.0, код: {err_code}")
 
         create_status = ncrypt.NCryptCreatePersistedKey(
-            self._provider_handle,
-            ctypes.byref(h_key),
-            "RSA",
-            self.key_name,
-            0,
-            0
+            self._provider_handle, ctypes.byref(h_key), "RSA", self.key_name, 0, 0
         )
         if create_status != 0 or not h_key.value:
             err_code = hex(create_status if create_status >= 0 else (1 << 32) + create_status)
-            raise RuntimeError(
-                f"Не удалось создать аппаратный ключ в TPM 2.0, статус: {err_code}"
-            )
+            raise RuntimeError(f"Не удалось создать аппаратный ключ в TPM 2.0, статус: {err_code}")
 
         # Установка длины ключа: 2048 бит
         key_length = ctypes.c_ulong(2048)
-        ncrypt.NCryptSetProperty(
-            h_key,
-            "Length",
-            ctypes.byref(key_length),
-            ctypes.sizeof(key_length),
-            0
-        )
+        ncrypt.NCryptSetProperty(h_key, "Length", ctypes.byref(key_length), ctypes.sizeof(key_length), 0)
 
         # Политика экспорта: 0 (NCRYPT_ALLOW_EXPORT_NONE — закрытый ключ аппаратный и неэкспортируемый)
         export_policy = ctypes.c_ulong(0)
@@ -177,7 +141,7 @@ class HardwareSigningBridge:
             "Export Policy",
             ctypes.byref(export_policy),
             ctypes.sizeof(export_policy),
-            0
+            0,
         )
 
         # Финализация ключа внутри TPM
@@ -210,15 +174,10 @@ class HardwareSigningBridge:
         hash_digest = hashlib.sha256(canonical_bytes).digest()
 
         class BCRYPT_PSS_PADDING_INFO(ctypes.Structure):
-            _fields_ = [
-                ("pszAlgId", wintypes.LPCWSTR),
-                ("cbSalt", wintypes.DWORD)
-            ]
+            _fields_ = [("pszAlgId", wintypes.LPCWSTR), ("cbSalt", wintypes.DWORD)]
 
         class BCRYPT_PKCS1_PADDING_INFO(ctypes.Structure):
-            _fields_ = [
-                ("pszAlgId", wintypes.LPCWSTR)
-            ]
+            _fields_ = [("pszAlgId", wintypes.LPCWSTR)]
 
         if scheme.upper() == "PKCS1":
             pad_info = BCRYPT_PKCS1_PADDING_INFO("SHA256")
@@ -238,7 +197,7 @@ class HardwareSigningBridge:
             None,
             0,
             ctypes.byref(sig_len),
-            pad_flag
+            pad_flag,
         )
         if status != 0 or sig_len.value == 0:
             err_code = hex(status if status >= 0 else (1 << 32) + status)
@@ -253,7 +212,7 @@ class HardwareSigningBridge:
             sig_buf,
             sig_len.value,
             ctypes.byref(sig_len),
-            pad_flag
+            pad_flag,
         )
         if status2 != 0:
             err_code = hex(status2 if status2 >= 0 else (1 << 32) + status2)
@@ -275,16 +234,7 @@ class HardwareSigningBridge:
         ncrypt = ctypes.windll.ncrypt
 
         cb_out = wintypes.DWORD(0)
-        status = ncrypt.NCryptExportKey(
-            self._key_handle,
-            0,
-            "RSAPUBLICBLOB",
-            None,
-            None,
-            0,
-            ctypes.byref(cb_out),
-            0
-        )
+        status = ncrypt.NCryptExportKey(self._key_handle, 0, "RSAPUBLICBLOB", None, None, 0, ctypes.byref(cb_out), 0)
         if status != 0 or cb_out.value == 0:
             err_code = hex(status if status >= 0 else (1 << 32) + status)
             raise RuntimeError(f"Ошибка запроса размера публичного ключа из TPM 2.0: {err_code}")
@@ -298,16 +248,16 @@ class HardwareSigningBridge:
             buf,
             cb_out.value,
             ctypes.byref(cb_out),
-            0
+            0,
         )
         if status2 != 0:
             err_code = hex(status2 if status2 >= 0 else (1 << 32) + status2)
             raise RuntimeError(f"Ошибка экспорта публичного ключа из TPM 2.0: {err_code}")
 
         blob = bytes(buf)
-        _, _, exp_len, mod_len, _, _ = struct.unpack('<IIIIII', blob[:24])
-        exp_bytes = blob[24:24 + exp_len]
-        mod_bytes = blob[24 + exp_len:24 + exp_len + mod_len]
+        _, _, exp_len, mod_len, _, _ = struct.unpack("<IIIIII", blob[:24])
+        exp_bytes = blob[24 : 24 + exp_len]
+        mod_bytes = blob[24 + exp_len : 24 + exp_len + mod_len]
 
         e = int.from_bytes(exp_bytes, "big")
         n = int.from_bytes(mod_bytes, "big")
@@ -316,7 +266,7 @@ class HardwareSigningBridge:
         pub_key = pub_numbers.public_key()
         pem = pub_key.public_bytes(
             encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
         ).decode("utf-8")
 
         self._cached_public_key_pem = pem
@@ -327,7 +277,7 @@ class HardwareSigningBridge:
         pub_pem = self.get_public_key_pem()
         der = serialization.load_pem_public_key(pub_pem.encode("utf-8")).public_bytes(
             encoding=serialization.Encoding.DER,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
         )
         return f"sha256:{hashlib.sha256(der).hexdigest()}"
 
@@ -346,12 +296,12 @@ class HardwareSigningBridge:
             cert_path=self.cert_path,
             cert_pem=None,
             ca_cert_path=self.ca_cert_path,
-            expected_public_key=tpm_pub_key
+            expected_public_key=tpm_pub_key,
         )
         self._cert_pem = pem_data
         return pem_data
 
-    def _find_cert_in_windows_store(self) -> Optional[str]:
+    def _find_cert_in_windows_store(self) -> str | None:
         """Ищет соответствующий сертификат в системном хранилище сертификатов Windows 'MY'."""
         try:
             tpm_pub_key = serialization.load_pem_public_key(self.get_public_key_pem().encode("utf-8"))
@@ -361,7 +311,7 @@ class HardwareSigningBridge:
                 validated_pem, _ = resolve_and_validate_client_certificate(
                     cert_pem=pem_data,
                     ca_cert_path=self.ca_cert_path,
-                    expected_public_key=tpm_pub_key
+                    expected_public_key=tpm_pub_key,
                 )
                 return validated_pem
         except Exception:
@@ -371,8 +321,8 @@ class HardwareSigningBridge:
     def close(self) -> None:
         """Освобождает дескрипторы CNG с защитой от сбоев во время выгрузки интерпретатора Python."""
         try:
-            import sys
             import ctypes
+            import sys
         except Exception:
             return
 
@@ -414,20 +364,21 @@ class SimulatedTPMBridge:
     - Приватный ключ хранится изолированно в памяти (имитация Non-Exportable);
     - Подписание требует биометрической верификации через callback (Windows Hello prompt);
     - Генерирует подписи PKCS#1 v1.5 или RSA-PSS, совместимые с проверкой на сервере;
-    - Требует обязательный легитимный сертификат, подписанный Root CA. Генерация самоподписанных сертификатов строго запрещена.
+    - Требует обязательный легитимный сертификат, подписанный Root CA.
+      Генерация самоподписанных сертификатов строго запрещена.
     """
 
     def __init__(
         self,
         key_name: str = "Simulated_TPM_Hello_Key",
-        biometric_prompt_callback: Optional[Callable[[], bool]] = None,
-        private_key: Optional[rsa.RSAPrivateKey] = None,
-        key_path: Optional[str] = None,
-        key_pem: Optional[str] = None,
-        cert_path: Optional[str] = None,
-        cert_pem: Optional[str] = None,
-        ca_cert_path: Optional[str] = None,
-        ca_cert_pem: Optional[str] = None,
+        biometric_prompt_callback: Callable[[], bool] | None = None,
+        private_key: rsa.RSAPrivateKey | None = None,
+        key_path: str | None = None,
+        key_pem: str | None = None,
+        cert_path: str | None = None,
+        cert_pem: str | None = None,
+        ca_cert_path: str | None = None,
+        ca_cert_pem: str | None = None,
     ):
         self.key_name = key_name
         self.biometric_prompt_callback = biometric_prompt_callback or (lambda: True)
@@ -441,7 +392,7 @@ class SimulatedTPMBridge:
             cert_pem=cert_pem,
             ca_cert_path=ca_cert_path,
             ca_cert_pem=ca_cert_pem,
-            expected_public_key=private_key.public_key() if private_key else None
+            expected_public_key=private_key.public_key() if private_key else None,
         )
 
         # 2. Валидация приватного ключа
@@ -459,7 +410,7 @@ class SimulatedTPMBridge:
             found_key_file = find_certificate_file(
                 custom_path=key_path,
                 env_var="ADMIN_CLIENT_KEY_PATH",
-                default_filenames=("admin_client.key",)
+                default_filenames=("admin_client.key",),
             )
             if found_key_file:
                 with open(found_key_file, "rb") as f:
@@ -474,21 +425,25 @@ class SimulatedTPMBridge:
         # Проверка соответствия публичного ключа сертификата и приватного ключа
         cert_pub_bytes = self._cert_obj.public_key().public_bytes(
             encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
         )
         priv_pub_bytes = self._private_key.public_key().public_bytes(
             encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
         )
         if cert_pub_bytes != priv_pub_bytes:
             raise CertificateValidationError("Публичный ключ сертификата не соответствует приватному ключу TPM")
 
     def get_public_key_pem(self) -> str:
         """Возвращает открытый ключ TPM в формате PEM."""
-        return self._private_key.public_key().public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        ).decode("utf-8")
+        return (
+            self._private_key.public_key()
+            .public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+            .decode("utf-8")
+        )
 
     def get_certificate_pem(self) -> str:
         """Возвращает X.509 сертификат TPM в формате PEM."""
@@ -509,18 +464,14 @@ class SimulatedTPMBridge:
             raise PermissionError("Биометрическая аутентификация Windows Hello отклонена пользователем")
 
         if scheme == "PKCS1":
-            sig = self._private_key.sign(
-                canonical_bytes,
-                padding.PKCS1v15(),
-                hashes.SHA256()
-            )
+            sig = self._private_key.sign(canonical_bytes, padding.PKCS1v15(), hashes.SHA256())
         else:
             sig = self._private_key.sign(
                 canonical_bytes,
                 padding.PSS(
                     mgf=padding.MGF1(hashes.SHA256()),
-                    salt_length=padding.PSS.MAX_LENGTH
+                    salt_length=padding.PSS.MAX_LENGTH,
                 ),
-                hashes.SHA256()
+                hashes.SHA256(),
             )
         return base64.b64encode(sig).decode("ascii")
