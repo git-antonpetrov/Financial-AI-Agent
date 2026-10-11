@@ -312,6 +312,30 @@ class Settings:
 
         if missing:
             raise RuntimeError(f"Отсутствуют обязательные переменные окружения безопасности: {', '.join(missing)}")
+
+        # SEC-10: Строгая валидация STRICT_SECURITY
+        if os.getenv("STRICT_SECURITY", "false").lower() == "true":
+            if not (self.REQUIRE_MTLS is True):
+                raise RuntimeError("STRICT_SECURITY: REQUIRE_MTLS must be true")
+            if not (self.REQUIRE_2FA is True):
+                raise RuntimeError("STRICT_SECURITY: REQUIRE_2FA must be true")
+
+            forbidden_passwords = {"change_me", "secret", "admin123", "minioadmin"}
+            for key, val in os.environ.items():
+                k_lower = key.lower()
+                if any(term in k_lower for term in ("password", "secret", "token", "key")):
+                    if val.strip().lower() in forbidden_passwords:
+                        raise RuntimeError(f"STRICT_SECURITY: insecure default password or secret detected in {key}")
+            for sec_name, sec_val in [
+                ("ADMIN_PASSWORD_HASH", getattr(self, "ADMIN_PASSWORD_HASH", "")),
+                ("ADMIN_TOTP_SECRET", getattr(self, "ADMIN_TOTP_SECRET", "")),
+                ("DATA_ENCRYPTION_KEY", getattr(self, "DATA_ENCRYPTION_KEY", "")),
+                ("MINIO_KMS_SECRET_KEY", getattr(self, "MINIO_KMS_SECRET_KEY", "")),
+                ("MINIO_SSE_C_KEY", getattr(self, "MINIO_SSE_C_KEY", "")),
+            ]:
+                if sec_val and str(sec_val).strip().lower() in forbidden_passwords:
+                    raise RuntimeError(f"STRICT_SECURITY: insecure default password or secret detected in {sec_name}")
+
         if not self.ADMIN_TOTP_SECRET:
             log_info(
                 "Безопасность",
@@ -436,7 +460,7 @@ def create_refresh_token(data: dict, role: str | Role | None = None) -> str:
 
 def decode_access_token(token: str) -> dict:
     """Декодирует и валидирует токен публичным RSA-ключом (RS256), защищая от подделки и подмены алгоритма."""
-    return jwt.decode(token, settings.PUBLIC_KEY, algorithms=[settings.ALGORITHM])
+    return jwt.decode(token, settings.PUBLIC_KEY, algorithms=[settings.ALGORITHM], options={"require": ["exp"]})
 
 async def get_current_admin(token: str = Depends(oauth2_scheme)) -> CurrentUser:
     """
@@ -486,12 +510,22 @@ async def get_current_admin(token: str = Depends(oauth2_scheme)) -> CurrentUser:
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Извлекаем роль и разрешения
-    raw_role = payload.get("role", "superadmin")
+    # Извлекаем роль и разрешения (SEC-07: никакой роли по умолчанию)
+    raw_role = payload.get("role")
+    if not raw_role:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing role in token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     try:
         role_enum = Role(str(raw_role).lower().strip())
     except ValueError:
-        role_enum = Role.SUPERADMIN
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing role in token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     raw_perms = payload.get("permissions")
     if raw_perms and isinstance(raw_perms, list):
@@ -559,7 +593,13 @@ def verify_and_rotate_refresh_token(refresh_token: str) -> tuple[str, str]:
         except Exception as e:
             log_error("Безопасность", f"Сбой инвалидации старого refresh-токена в Redis: {e}")
 
-    role_str = payload.get("role", "superadmin")
+    role_str = payload.get("role")
+    if not role_str or str(role_str).lower().strip() not in [r.value for r in Role]:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing role in refresh token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     new_access = create_access_token(data={"sub": username}, role=role_str)
     new_refresh = create_refresh_token(data={"sub": username}, role=role_str)
     return new_access, new_refresh
@@ -572,6 +612,24 @@ async def get_current_user(current_admin: Any = Depends(get_current_admin)) -> C
     """
     if isinstance(current_admin, CurrentUser):
         return current_admin
+    if isinstance(current_admin, dict):
+        raw_role = current_admin.get("role")
+        if not raw_role:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or missing role in token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        try:
+            role_enum = Role(str(raw_role).lower().strip())
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or missing role in token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        perms = current_admin.get("permissions") or ROLE_PERMISSIONS.get(role_enum, set()).copy()
+        return CurrentUser(username=str(current_admin.get("username", "admin")), role=role_enum, permissions=perms)
     return CurrentUser(username=str(current_admin), role=Role.SUPERADMIN)
 
 
@@ -652,14 +710,14 @@ def revoke_agent_key_in_redis(agent_name: str, kid: str | None = None, ttl_secon
                 client.setex(f"revoked:agent_key:{kid}", ttl_seconds, "revoked")
                 try:
                     client.publish("security:revocations", f"agent_key:{kid}")
-                except Exception:
-                    pass
+                except Exception as pe:
+                    log_warning("Безопасность", f"Сбой публикации в Redis PubSub: {pe}")
             if a_clean:
                 client.setex(f"revoked:agent:{a_clean}", ttl_seconds, "revoked")
                 try:
                     client.publish("security:revocations", f"agent:{a_clean}")
-                except Exception:
-                    pass
+                except Exception as pe:
+                    log_warning("Безопасность", f"Сбой публикации в Redis PubSub: {pe}")
         except Exception as e:
             log_error("Безопасность", f"Ошибка сохранения отзыва ключа агента в Redis: {e}")
 
@@ -695,14 +753,14 @@ def unrevoke_agent_key_in_redis(agent_name: str, kid: str | None = None, redis_c
                 client.delete(f"revoked:agent:{a_clean}")
                 try:
                     client.publish("security:revocations", f"unrevoked:agent:{a_clean}")
-                except Exception:
-                    pass
+                except Exception as pe:
+                    log_warning("Безопасность", f"Сбой публикации в Redis PubSub: {pe}")
             if kid:
                 client.delete(f"revoked:agent_key:{kid}")
                 try:
                     client.publish("security:revocations", f"unrevoked:agent_key:{kid}")
-                except Exception:
-                    pass
+                except Exception as pe:
+                    log_warning("Безопасность", f"Сбой публикации в Redis PubSub: {pe}")
         except Exception as e:
             log_warning("Безопасность", f"Ошибка снятия блокировки агента в Redis: {e}")
 
@@ -714,12 +772,13 @@ async def run_revocation_listener(redis_client_instance=None):
     client = redis_client_instance or redis_blacklist
     if not client:
         return
+    pubsub = None
     try:
         import asyncio
         pubsub = client.pubsub()
         pubsub.subscribe("security:revocations")
         while True:
-            msg = pubsub.get_message(ignore_subscribe_messages=True, timeout=0.5)
+            msg = await asyncio.to_thread(pubsub.get_message, ignore_subscribe_messages=True, timeout=0.5)
             if msg and msg.get("type") == "message":
                 data = msg.get("data")
                 if isinstance(data, bytes):
@@ -735,9 +794,15 @@ async def run_revocation_listener(redis_client_instance=None):
         pass
     except Exception as e:
         log_warning("PKI", f"Фоновый слушатель отзывов Redis завершил работу: {e}")
+    finally:
+        if pubsub is not None:
+            try:
+                pubsub.close()
+            except Exception:
+                pass
 
 def verify_agent_jwt(token: str, public_key: str, expected_kid: str | None = None) -> dict | None:
-    """Проверяет подпись JWT-токена агента по алгоритму RS256 с валидацией kid."""
+    """Проверяет подпись JWT-токена агента по алгоритму RS256 с валидацией kid и обязательным exp."""
     try:
         if expected_kid:
             unverified_headers = jwt.get_unverified_header(token)
@@ -745,7 +810,7 @@ def verify_agent_jwt(token: str, public_key: str, expected_kid: str | None = Non
             if token_kid and token_kid != expected_kid:
                 log_warning("Аутентификация", f"Несовпадение Key ID: в токене {token_kid}, ожидался {expected_kid}")
                 return None
-        payload = jwt.decode(token, public_key, algorithms=["RS256"])
+        payload = jwt.decode(token, public_key, algorithms=["RS256"], options={"require": ["exp"]})
         return payload
     except Exception as e:
         log_warning("Аутентификация", f"Сбой проверки JWT-токена агента: {e}")
@@ -875,8 +940,8 @@ def clear_pending_totp_secret(username: str, redis_conn=None) -> None:
     if client:
         try:
             client.delete(f"auth:2fa_pending:{username}")
-        except Exception:
-            pass
+        except Exception as e:
+            log_warning("2FA", f"Не удалось удалить временный TOTP-секрет из Redis: {e}")
     _pending_totp_cache.pop(username, None)
 
 
@@ -884,6 +949,49 @@ def clear_pending_totp_secret(username: str, redis_conn=None) -> None:
 
 
 MAGIC_ENCRYPTION_V1 = b"ENC1"
+MAGIC_ENCRYPTION_V2_PREFIX = b"ENC2:"
+DEFAULT_KEY_ID = "default"
+
+
+def derive_key(
+    passphrase: str | bytes,
+    salt: bytes | None = None,
+    method: str = "pbkdf2",
+    iterations: int = 100_000
+) -> bytes:
+    """
+    Усиленная деривация 256-битного мастер-ключа шифрования через PBKDF2 / HKDF (SEC-26)
+    с обратной совместимостью для legacy ключей (метод 'sha256' или 'legacy').
+    """
+    if isinstance(passphrase, str):
+        passphrase = passphrase.encode("utf-8")
+
+    if method in ("sha256", "legacy"):
+        return hashlib.sha256(passphrase).digest()
+
+    effective_salt = salt or b"financial-mas-data-encryption-salt-v1"
+
+    if method == "hkdf":
+        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+        from cryptography.hazmat.primitives import hashes
+        hkdf = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=effective_salt,
+            info=b"data-at-rest-encryption",
+        )
+        return hkdf.derive(passphrase)
+
+    # Default: PBKDF2
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    from cryptography.hazmat.primitives import hashes
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=effective_salt,
+        iterations=iterations,
+    )
+    return kdf.derive(passphrase)
 
 
 def resolve_encryption_key(key: bytes | str | None = None) -> bytes:
@@ -893,7 +1001,7 @@ def resolve_encryption_key(key: bytes | str | None = None) -> bytes:
       - bytes (ровно 32 байта)
       - hex-строку (64 символа)
       - base64-строку (32 декодированных байта)
-      - произвольную строку (деривация через SHA-256)
+      - произвольную строку (деривация через derive_key / SHA-256)
       - None (берется из settings.DATA_ENCRYPTION_KEY или DATA_ENCRYPTION_KEY в окружении)
     """
     if key is None:
@@ -933,8 +1041,9 @@ def resolve_encryption_key(key: bytes | str | None = None) -> bytes:
         encoded = key.encode("utf-8")
         if len(encoded) == 32:
             return encoded
-        # 4. Деривация через SHA-256 для произвольной кодовой фразы
-        return hashlib.sha256(encoded).digest()
+        # 4. Деривация через derive_key для произвольной кодовой фразы (обратная совместимость с SHA-256)
+        derivation_method = os.getenv("KEY_DERIVATION_METHOD", "sha256").lower()
+        return derive_key(encoded, method=derivation_method)
 
     raise TypeError(f"Неподдерживаемый тип ключа шифрования: {type(key).__name__}")
 
@@ -942,13 +1051,15 @@ def resolve_encryption_key(key: bytes | str | None = None) -> bytes:
 def encrypt_data_at_rest(
     data: bytes | str,
     key: bytes | str | None = None,
-    associated_data: bytes | None = None
+    associated_data: bytes | None = None,
+    kid: str | None = None
 ) -> bytes:
     """
     Шифрует данные для безопасного хранения в БД/томах с использованием AES-256-GCM.
     
     Формат зашифрованного пакета (Envelope):
-    [4 байта: MAGIC 'ENC1'] + [12 байтов: случайный Nonce/IV] + [Зашифрованные данные + 16 байт Auth Tag]
+    - При указании kid (SEC-11): b"ENC2:" + kid.encode() + b":" + Nonce(12) + Ciphertext + Tag(16)
+    - Legacy формат (по умолчанию без kid): [4 байта: MAGIC 'ENC1'] + [12 байтов: случайный Nonce/IV] + [Зашифрованные данные + 16 байт Auth Tag]
     """
     if isinstance(data, str):
         data = data.encode("utf-8")
@@ -959,6 +1070,8 @@ def encrypt_data_at_rest(
     nonce = os.urandom(12)
     aesgcm = AESGCM(resolved_key)
     ciphertext_and_tag = aesgcm.encrypt(nonce, bytes(data), associated_data)
+    if kid is not None:
+        return MAGIC_ENCRYPTION_V2_PREFIX + kid.encode("utf-8") + b":" + nonce + ciphertext_and_tag
     return MAGIC_ENCRYPTION_V1 + nonce + ciphertext_and_tag
 
 
@@ -969,21 +1082,36 @@ def decrypt_data_at_rest(
 ) -> bytes:
     """
     Расшифровывает данные с проверкой аутентичности и целостности (AEAD AES-256-GCM).
+    Поддерживает формат ENC2 с Key ID (KID) и унаследованный формат ENC1.
     Бросает ValueError при несовпадении тега, повреждении данных или неверном ключе.
     """
     if not isinstance(encrypted_payload, (bytes, bytearray)):
         raise TypeError(f"Ожидались bytes, получено: {type(encrypted_payload).__name__}")
 
-    min_len = len(MAGIC_ENCRYPTION_V1) + 12 + 16  # Magic (4) + Nonce (12) + Tag (16)
-    if len(encrypted_payload) < min_len:
-        raise ValueError("Зашифрованные данные повреждены: длина пакета меньше минимально допустимой.")
-
-    if not encrypted_payload.startswith(MAGIC_ENCRYPTION_V1):
-        raise ValueError("Неподдерживаемый формат шифрования или отсутствующий заголовок ENC1.")
-
-    header_len = len(MAGIC_ENCRYPTION_V1)
-    nonce = encrypted_payload[header_len : header_len + 12]
-    ciphertext_and_tag = encrypted_payload[header_len + 12 :]
+    if encrypted_payload.startswith(MAGIC_ENCRYPTION_V2_PREFIX):
+        prefix_len = len(MAGIC_ENCRYPTION_V2_PREFIX)
+        delim_idx = encrypted_payload.find(b":", prefix_len)
+        if delim_idx == -1:
+            raise ValueError("Зашифрованные данные ENC2 повреждены: отсутствует разделитель Key ID.")
+        kid = encrypted_payload[prefix_len:delim_idx].decode("utf-8", errors="replace")
+        rest = encrypted_payload[delim_idx + 1:]
+        min_rest_len = 12 + 16  # Nonce (12) + Tag (16)
+        if len(rest) < min_rest_len:
+            raise ValueError("Зашифрованные данные повреждены: длина пакета меньше минимально допустимой.")
+        nonce = rest[:12]
+        ciphertext_and_tag = rest[12:]
+    elif encrypted_payload.startswith(MAGIC_ENCRYPTION_V1):
+        min_len = len(MAGIC_ENCRYPTION_V1) + 12 + 16  # Magic (4) + Nonce (12) + Tag (16)
+        if len(encrypted_payload) < min_len:
+            raise ValueError("Зашифрованные данные повреждены: длина пакета меньше минимально допустимой.")
+        header_len = len(MAGIC_ENCRYPTION_V1)
+        nonce = encrypted_payload[header_len : header_len + 12]
+        ciphertext_and_tag = encrypted_payload[header_len + 12 :]
+    else:
+        min_len = len(MAGIC_ENCRYPTION_V1) + 12 + 16
+        if len(encrypted_payload) < min_len:
+            raise ValueError("Зашифрованные данные повреждены: длина пакета меньше минимально допустимой.")
+        raise ValueError("Неподдерживаемый формат шифрования или отсутствующий заголовок ENC1/ENC2.")
 
     resolved_key = resolve_encryption_key(key)
     aesgcm = AESGCM(resolved_key)
@@ -997,10 +1125,11 @@ def decrypt_data_at_rest(
 def encrypt_text_at_rest(
     text: str,
     key: bytes | str | None = None,
-    associated_data: bytes | None = None
+    associated_data: bytes | None = None,
+    kid: str | None = None
 ) -> str:
-    """Шифрует строковые данные и возвращает безопасную Base64url-строку."""
-    raw_cipher = encrypt_data_at_rest(text.encode("utf-8"), key=key, associated_data=associated_data)
+    """Шифрует строковые данные и возвращает безопасную Base64url-строку (поддерживает KID)."""
+    raw_cipher = encrypt_data_at_rest(text.encode("utf-8"), key=key, associated_data=associated_data, kid=kid)
     return base64.urlsafe_b64encode(raw_cipher).decode("ascii")
 
 

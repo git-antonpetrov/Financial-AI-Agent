@@ -2,6 +2,9 @@ import asyncio
 import os
 import re
 import json
+import time
+import threading
+import hashlib
 import secrets
 import tempfile
 import anyio
@@ -9,6 +12,7 @@ import ipaddress
 from datetime import datetime, timezone
 from typing import Optional, List
 from fastapi import FastAPI, Depends, HTTPException, Request, status, UploadFile, File, Form, Header, Query, Body
+from fastapi.responses import JSONResponse
 # pyrefly: ignore [missing-import]
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
@@ -42,6 +46,7 @@ from security import (
     unrevoke_agent_key_in_redis,
     get_minio_sse,
     verify_mtls_client_certificate,
+    record_admin_nonce_if_new,
     settings,
     oauth2_scheme,
     Role,
@@ -151,6 +156,25 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
 
+    # Освобождение соединений базы данных и Redis при завершении работы сервера (SEC-18)
+    try:
+        await engine.dispose()
+        log_info("Database", "Пул соединений базы данных успешно освобожден (engine.dispose)")
+    except Exception as e:
+        log_warning("Database", f"Сбой при вызове engine.dispose: {e}")
+
+    try:
+        if redis_client:
+            if hasattr(redis_client, "aclose"):
+                await redis_client.aclose()
+            elif hasattr(redis_client, "close"):
+                res = redis_client.close()
+                if asyncio.iscoroutine(res):
+                    await res
+            log_info("Redis", "Соединение с Redis успешно закрыто")
+    except Exception as e:
+        log_warning("Redis", f"Сбой при закрытии redis_client: {e}")
+
 app = FastAPI(title="Financial MAS - Admin Server", version="1.0.0", lifespan=lifespan)
 
 # Ограничиваем CORS только необходимыми origin, так как работаем из WebView
@@ -197,6 +221,41 @@ app.add_middleware(
         "x-ack-nonce",
     ],
 )
+
+# SEC-01: Глобальное Middleware принудительной проверки mTLS в Zero-Trust среде
+@app.middleware("http")
+async def mtls_enforcement_middleware(request: Request, call_next):
+    """
+    Глобально обеспечивает взаимную TLS-аутентификацию (mTLS) при REQUIRE_MTLS=true.
+    Проверяет валидность и статус отзыва клиентского сертификата для всех непубличных эндпоинтов.
+    """
+    if not settings.REQUIRE_MTLS:
+        return await call_next(request)
+
+    path = request.url.path
+    public_paths = {
+        "/health",
+        "/api/auth/public-key",
+        "/api/v1/auth/public-key",
+        "/docs",
+        "/openapi.json",
+        "/redoc",
+    }
+    if path in public_paths or request.method == "OPTIONS":
+        return await call_next(request)
+
+    try:
+        cert_info = verify_mtls_client_certificate(request)
+        request.state.mtls_cert_info = cert_info
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    except Exception as exc:
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"detail": f"mTLS verification failed: {exc}"}
+        )
+
+    return await call_next(request)
 
 # Подключение роутера защищенного приема документов RAG (Zero-Trust PKI)
 try:
@@ -252,20 +311,33 @@ def get_client_ip(request: Request) -> str:
             pass
     return "127.0.0.1"
 
+_in_memory_rate_limits: dict[str, list[float]] = {}
+_rate_limit_lock = threading.Lock()
+
 def check_rate_limit(key: str, max_requests: int = 15, window_seconds: int = 60) -> bool:
     """
-    Проверяет лимит запросов через Redis.
-    Возвращает True если лимит не превышен, False если превышен.
+    Проверяет лимит запросов через Redis с отказоустойчивым in-memory fallback (SEC-24).
+    Возвращает True если лимит не превышен, False если превышен (защита от brute-force).
     """
-    if not redis_client:
-        return True
-    try:
-        current = redis_client.incr(key)
-        if current == 1:
-            redis_client.expire(key, window_seconds)
-        return current <= max_requests
-    except Exception as e:
-        log_warning("RateLimit", f"Failed to check rate limit in Redis: {e}")
+    now = time.time()
+    if redis_client:
+        try:
+            current = redis_client.incr(key)
+            if current == 1:
+                redis_client.expire(key, window_seconds)
+            return current <= max_requests
+        except Exception as e:
+            log_warning("RateLimit", f"Redis недоступен для rate limiting ({e}), переключение на in-memory fallback")
+
+    # In-memory fallback: скользящее окно (Fail-Secure вместо Fail-Open)
+    with _rate_limit_lock:
+        timestamps = _in_memory_rate_limits.get(key, [])
+        valid_ts = [t for t in timestamps if now - t < window_seconds]
+        if len(valid_ts) >= max_requests:
+            _in_memory_rate_limits[key] = valid_ts
+            return False
+        valid_ts.append(now)
+        _in_memory_rate_limits[key] = valid_ts
         return True
 
 # --- МАРШРУТЫ: АВТОРИЗАЦИЯ ---
@@ -312,8 +384,8 @@ async def login(
             curr = redis_client.incr(failed_key)
             if curr == 1:
                 redis_client.expire(failed_key, 300)
-        except Exception:
-            pass
+        except Exception as e:
+            log_warning("RateLimit", f"Failed to increment login failed attempts in Redis: {e}")
         log_warning("Auth", f"Failed login attempt for user: {form_data.username} from IP: {client_ip}")
         await audit.log_audit_event(db, actor=form_data.username, action="AUTH_LOGIN_FAILED", status="FAILURE", actor_ip=client_ip, details="Unknown username")
         raise HTTPException(status_code=400, detail="Incorrect username or password")
@@ -327,8 +399,8 @@ async def login(
             curr = redis_client.incr(failed_key)
             if curr == 1:
                 redis_client.expire(failed_key, 300)
-        except Exception:
-            pass
+        except Exception as e:
+            log_warning("RateLimit", f"Failed to increment login failed attempts in Redis: {e}")
         log_warning("Auth", f"Failed login attempt (bad password) from IP: {client_ip}")
         await audit.log_audit_event(db, actor=form_data.username, action="AUTH_LOGIN_FAILED", status="FAILURE", actor_ip=client_ip, details="Incorrect password")
         raise HTTPException(status_code=400, detail="Incorrect username or password")
@@ -353,8 +425,9 @@ async def login(
         if redis_client:
             try:
                 if redis_client.exists(replay_key):
-                    log_warning("Auth", f"Replay attack detected: TOTP code {totp_code} reused from IP: {client_ip}")
-                    await audit.log_audit_event(db, actor=form_data.username, action="AUTH_2FA_REPLAY_ATTACK", status="FAILURE", actor_ip=client_ip, details=f"Replayed TOTP: {totp_code}")
+                    masked_otp = f"{totp_code[:2]}****" if len(totp_code) >= 2 else "******"
+                    log_warning("Auth", f"Replay attack detected: TOTP code {masked_otp} reused from IP: {client_ip}")
+                    await audit.log_audit_event(db, actor=form_data.username, action="AUTH_2FA_REPLAY_ATTACK", status="FAILURE", actor_ip=client_ip, details=f"Replayed TOTP: {masked_otp}")
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
                         detail="TOTP code has already been used. Please wait for the next code.",
@@ -373,8 +446,8 @@ async def login(
                 curr = redis_client.incr(failed_key)
                 if curr == 1:
                     redis_client.expire(failed_key, 300)
-            except Exception:
-                pass
+            except Exception as e:
+                log_warning("RateLimit", f"Failed to increment login failed attempts in Redis: {e}")
             log_warning("Auth", f"Failed login attempt (bad 2FA TOTP code) from IP: {client_ip}")
             await audit.log_audit_event(db, actor=form_data.username, action="AUTH_2FA_FAILED", status="FAILURE", actor_ip=client_ip, details="Invalid 2FA TOTP code")
             raise HTTPException(
@@ -548,8 +621,8 @@ async def pair_2fa(
                 )
         except HTTPException:
             raise
-        except Exception:
-            pass
+        except Exception as e:
+            log_warning("RateLimit", f"Failed to check 2FA rate limit in Redis: {e}")
 
     if not secrets.compare_digest(payload.username, "admin"):
         if redis_client:
@@ -557,8 +630,8 @@ async def pair_2fa(
                 curr = redis_client.incr(failed_key)
                 if curr == 1:
                     redis_client.expire(failed_key, 300)
-            except Exception:
-                pass
+            except Exception as e:
+                log_warning("RateLimit", f"Failed to increment 2FA failed attempts in Redis: {e}")
         log_warning("Auth", f"Failed 2FA pair attempt for user: {payload.username} from IP: {client_ip}")
         await audit.log_audit_event(
             db,
@@ -580,8 +653,8 @@ async def pair_2fa(
                 curr = redis_client.incr(failed_key)
                 if curr == 1:
                     redis_client.expire(failed_key, 300)
-            except Exception:
-                pass
+            except Exception as e:
+                log_warning("RateLimit", f"Failed to increment 2FA failed attempts in Redis: {e}")
         log_warning("Auth", f"Failed 2FA pair attempt (bad password) from IP: {client_ip}")
         await audit.log_audit_event(
             db,
@@ -782,7 +855,7 @@ async def get_contentai_config(current_admin: CurrentUser = Depends(require_perm
     """Возвращает учетные данные сервиса Content AI для локального sidecar клиента."""
     return schemas.ContentAiConfigResponse(
         username=os.getenv("CONTENTAI_USERNAME", ""),
-        password=os.getenv("CONTENTAI_PASSWORD", ""),
+        password="********",
         api_uri=os.getenv("CONTENT_AI_API_URI", "")
     )
 
@@ -1107,7 +1180,34 @@ async def create_agent_request(
         log_warning("Agent Request", f"Invalid RSA signature from agent {agent_name}")
         raise HTTPException(status_code=403, detail="Invalid RSA signature")
 
-    # 5. Извлекаем все поля заявки строго из верифицированного payload
+    # 5. Защита от Replay-атак (SEC-14): проверка уникальности JTI / Nonce и контроль дрейфа времени
+    jti = verified_payload.get("jti") or verified_payload.get("nonce")
+    iat = verified_payload.get("iat")
+    exp = verified_payload.get("exp")
+    now_ts = int(time.time())
+
+    # Проверка дрейфа времени (если указан iat)
+    if iat is not None:
+        try:
+            iat_val = int(iat)
+            if abs(now_ts - iat_val) > 300:
+                log_warning("Agent Request", f"Timestamp out of acceptable window for {agent_name} (drift={abs(now_ts - iat_val)}s)")
+                raise HTTPException(status_code=400, detail="Request timestamp is outside the allowed ±300s window")
+        except (ValueError, TypeError):
+            pass
+
+    # Атомарная фиксация идентификатора запроса для предотвращения повторного использования (Replay Attack)
+    token_fp = hashlib.sha256(req.token.encode("utf-8")).hexdigest()[:32]
+    replay_id = f"agent_req:{agent_name}:{jti or token_fp}"
+    ttl = max(60, int(exp - now_ts)) if exp else 900
+    if not record_admin_nonce_if_new(replay_id, ttl_seconds=ttl, redis_conn=redis_client):
+        log_warning("Agent Request", f"Replay attack detected: duplicate request from {agent_name} (id={jti or token_fp})")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Replay attack detected: request token identifier '{jti or token_fp}' has already been processed"
+        )
+
+    # 6. Извлекаем все поля заявки строго из верифицированного payload
     verified_agent_name = verified_payload.get("agent_name")
     if verified_agent_name != agent_name:
         log_warning("Agent Request", f"Agent name mismatch between unverified ({agent_name}) and verified ({verified_agent_name}) claims")

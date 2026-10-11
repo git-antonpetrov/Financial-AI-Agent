@@ -19,6 +19,7 @@ try:
     from .cert_validator import (
         resolve_and_validate_client_certificate,
         find_client_cert_in_windows_store,
+        find_certificate_file,
         CertificateMissingError,
         WindowsCertificateStoreError,
         CertificateValidationError,
@@ -28,6 +29,7 @@ except ImportError:
     from cert_validator import (
         resolve_and_validate_client_certificate,
         find_client_cert_in_windows_store,
+        find_certificate_file,
         CertificateMissingError,
         WindowsCertificateStoreError,
         CertificateValidationError,
@@ -433,6 +435,16 @@ class SimulatedTPMBridge:
         self.key_path = key_path
         self.ca_cert_path = ca_cert_path
 
+        # 1. Валидация сертификата (обязателен, должен быть выдан Root CA)
+        self._cert_pem, self._cert_obj = resolve_and_validate_client_certificate(
+            cert_path=cert_path,
+            cert_pem=cert_pem,
+            ca_cert_path=ca_cert_path,
+            ca_cert_pem=ca_cert_pem,
+            expected_public_key=private_key.public_key() if private_key else None
+        )
+
+        # 2. Валидация приватного ключа
         if private_key is not None:
             self._private_key = private_key
         elif key_pem and key_pem.strip():
@@ -443,18 +455,33 @@ class SimulatedTPMBridge:
             with open(key_path, "rb") as f:
                 self._private_key = serialization.load_pem_private_key(f.read(), password=None)
         else:
-            self._private_key = rsa.generate_private_key(
-                public_exponent=65537,
-                key_size=2048
+            # Поиск файла ключа по умолчанию
+            found_key_file = find_certificate_file(
+                custom_path=key_path,
+                env_var="ADMIN_CLIENT_KEY_PATH",
+                default_filenames=("admin_client.key",)
             )
+            if found_key_file:
+                with open(found_key_file, "rb") as f:
+                    self._private_key = serialization.load_pem_private_key(f.read(), password=None)
+            else:
+                raise KeyMissingError(
+                    "SimulatedTPMBridge: закрытый ключ не указан. "
+                    "В строгой Zero-Trust среде генерация эфемерных RSA-ключей в оперативной памяти запрещена. "
+                    "Необходимо явно передать key_pem, key_path или private_key."
+                )
 
-        self._cert_pem, self._cert_obj = resolve_and_validate_client_certificate(
-            cert_path=cert_path,
-            cert_pem=cert_pem,
-            ca_cert_path=ca_cert_path,
-            ca_cert_pem=ca_cert_pem,
-            expected_public_key=self._private_key.public_key()
+        # Проверка соответствия публичного ключа сертификата и приватного ключа
+        cert_pub_bytes = self._cert_obj.public_key().public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
         )
+        priv_pub_bytes = self._private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        if cert_pub_bytes != priv_pub_bytes:
+            raise CertificateValidationError("Публичный ключ сертификата не соответствует приватному ключу TPM")
 
     def get_public_key_pem(self) -> str:
         """Возвращает открытый ключ TPM в формате PEM."""

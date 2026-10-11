@@ -158,11 +158,11 @@ PRODUCT_CONDITIONS = {
 def get_product_terms() -> dict:
     """Возвращает актуальные тарифные условия банка по депозитам и накопительным счетам."""
     return {
-        "key_rate": float(PRODUCT_CONDITIONS["key_rate"]),
+        "key_rate": PRODUCT_CONDITIONS["key_rate"],
         "deposit_rates": {
-            k: float(v) for k, v in PRODUCT_CONDITIONS["deposit_rates"].items()
+            k: v for k, v in PRODUCT_CONDITIONS["deposit_rates"].items()
         },
-        "savings_account_rate": float(PRODUCT_CONDITIONS["savings_account_rate"]),
+        "savings_account_rate": PRODUCT_CONDITIONS["savings_account_rate"],
     }
 
 def calculate_deposit_rate(term_months: Optional[int]) -> Decimal:
@@ -246,7 +246,7 @@ async def open_deposit(
         async with invest_db() as idb:
             interest_rate = calculate_deposit_rate(req.term_months)
             monthly_rate = interest_rate / Decimal("100") / Decimal("12")
-            first_payment = round(req.initial_amount * monthly_rate, 2)
+            first_payment = (req.initial_amount * monthly_rate).quantize(Decimal("0.01"))
             next_pay_date = datetime.now() + relativedelta(months=1)
             account_number = await generate_unique_invest_account_number(idb, Deposit, "4230")
 
@@ -336,7 +336,7 @@ async def open_savings(
         async with invest_db() as idb:
             interest_rate = calculate_savings_rate()
             monthly_rate = interest_rate / Decimal("100") / Decimal("12")
-            first_payment = round(req.initial_amount * monthly_rate, 2)
+            first_payment = (req.initial_amount * monthly_rate).quantize(Decimal("0.01"))
             next_pay_date = datetime.now() + relativedelta(months=1)
             account_number = await generate_unique_invest_account_number(idb, SavingsAccount, "4081")
 

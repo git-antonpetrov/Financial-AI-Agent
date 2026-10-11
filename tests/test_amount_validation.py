@@ -179,6 +179,7 @@ def test_http_endpoints_reject_non_positive_amounts(monkeypatch):
     monkeypatch.setenv("AGENT_BANK_BOOTSTRAP_TOKEN", "bank_tok")
     monkeypatch.setenv("AGENT_INVEST_BOOTSTRAP_TOKEN", "invest_tok")
     monkeypatch.setenv("AGENT_DIGITAL_BOOTSTRAP_TOKEN", "ruble_tok")
+    monkeypatch.setenv("REQUIRE_ENCLAVE_SIGNATURE", "false")
 
     client = TestClient(app)
 

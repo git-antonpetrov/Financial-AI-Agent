@@ -34,8 +34,9 @@ def test_caddyfile_client_auth_configuration():
 
 
 def test_caddyfile_mtls_headers_forwarded():
-    """Проверяет, что проверенные метаданные клиентского сертификата пробрасываются в бэкенд."""
+    """Проверяет, что проверенные метаданные клиентского сертификата пробрасываются в бэкенд и очищаются от подделки."""
     content = load_caddyfile()
+    assert "header_up -X-Client-Cert-*" in content, "Caddyfile должен очищать входящие клиентские заголовки mTLS"
     assert "header_up X-Client-Cert-Verify {tls_client_verified}" in content
     assert "header_up X-Client-Cert-Subject {tls_client_subject}" in content
     assert "header_up X-Client-Cert-Issuer {tls_client_issuer}" in content

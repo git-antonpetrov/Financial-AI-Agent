@@ -2,7 +2,9 @@ import uuid
 from datetime import datetime, date, timezone, timedelta
 from sqlalchemy import Column, String, Numeric, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
+from decimal import Decimal
 from src.simulations.db.invest.db.database import Base
+from src.simulations.core.crypto.at_rest import EncryptedText, EncryptedDecimal
 
 def generate_uuid():
     return str(uuid.uuid4())
@@ -25,8 +27,8 @@ class SavingsAccount(Base):
     __tablename__ = "savings_accounts"
     id = Column(String, primary_key=True, default=generate_uuid)
     client_id = Column(String, nullable=False, index=True)
-    account_number = Column(String, unique=True, nullable=False)
-    balance = Column(Numeric(12, 2), default=0.00)
+    account_number = Column(EncryptedText(deterministic=True), unique=True, nullable=False)
+    balance = Column(EncryptedDecimal, default=Decimal("0.00"))
     interest_rate = Column(Numeric(5, 2), default=0.00)
     status = Column(String, default="active", index=True)  # Возможные значения: active, closed
     next_payment_date = Column(DateTime, nullable=True, index=True)
@@ -37,8 +39,8 @@ class Deposit(Base):
     __tablename__ = "deposits"
     id = Column(String, primary_key=True, default=generate_uuid)
     client_id = Column(String, nullable=False, index=True)
-    account_number = Column(String, unique=True, nullable=False)
-    balance = Column(Numeric(12, 2), default=0.00)
+    account_number = Column(EncryptedText(deterministic=True), unique=True, nullable=False)
+    balance = Column(EncryptedDecimal, default=Decimal("0.00"))
     interest_rate = Column(Numeric(5, 2), default=0.00)
     term_months = Column(Numeric(5, 0), default=12)
     status = Column(String, default="active", index=True)  # Возможные значения: active, closed
@@ -50,12 +52,13 @@ class BrokerAccount(Base):
     __tablename__ = "broker_accounts"
     id = Column(String, primary_key=True, default=generate_uuid)
     client_id = Column(String, nullable=False, index=True)
-    account_number = Column(String, unique=True, nullable=False)
-    balance = Column(Numeric(12, 2), default=0.00)
-    monthly_income = Column(Numeric(12, 2), default=0.00)  # Доход за месяц (для расчета комиссии)
+    account_number = Column(EncryptedText(deterministic=True), unique=True, nullable=False)
+    balance = Column(EncryptedDecimal, default=Decimal("0.00"))
+    monthly_income = Column(EncryptedDecimal, default=Decimal("0.00"))  # Доход за месяц (для расчета комиссии)
     strategy_id = Column(String, ForeignKey("investment_strategies.id"), nullable=True, index=True)
     status = Column(String, default="active", index=True)  # Возможные значения: active, blocked, closed
     next_commission_date = Column(DateTime, nullable=True, index=True)  # Дата списания комиссии
     opened_at = Column(DateTime, default=get_moscow_now)
+
     
     strategy = relationship("InvestmentStrategy", back_populates="broker_accounts")

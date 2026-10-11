@@ -162,8 +162,8 @@ async def check_enclave_or_token_auth(
         log_info("Simulation Auth", f"Успешная верификация подписи Анклава для домена '{domain_name}' (nonce={nonce})")
         return f"enclave:{nonce}"
 
-    # Если включен строгий режим обязательной подписи Анклава
-    if os.getenv("REQUIRE_ENCLAVE_SIGNATURE", "false").lower() == "true":
+    # Строгий режим безопасности: подпись Анклава обязательна по умолчанию (SEC-09)
+    if os.getenv("REQUIRE_ENCLAVE_SIGNATURE", "true").lower() in ("true", "1", "yes"):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Строгий режим безопасности: требуется цифровая подпись Анклава (X-Enclave-Signature)"

@@ -27,6 +27,14 @@ from src.simulations.core.crypto.chain_validator import (
     get_chain_validator,
     reset_chain_validator_for_tests,
 )
+from src.simulations.core.crypto.at_rest import (
+    EncryptedText,
+    EncryptedDecimal,
+    encrypt_data_at_rest,
+    decrypt_data_at_rest,
+    encrypt_text_at_rest,
+    decrypt_text_at_rest,
+)
 
 __all__ = [
     "BankCertificateAuthority",
@@ -46,4 +54,11 @@ __all__ = [
     "X509ChainValidator",
     "get_chain_validator",
     "reset_chain_validator_for_tests",
+    "EncryptedText",
+    "EncryptedDecimal",
+    "encrypt_data_at_rest",
+    "decrypt_data_at_rest",
+    "encrypt_text_at_rest",
+    "decrypt_text_at_rest",
 ]
+

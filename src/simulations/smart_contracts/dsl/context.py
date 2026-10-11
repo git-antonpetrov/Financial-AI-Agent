@@ -28,6 +28,30 @@ class ContractContext:
         self._requested_transfers: List[Dict[str, Any]] = []
         self._is_completed: bool = False
 
+    FORBIDDEN_ATTRS = {
+        "__class__",
+        "__init__",
+        "__globals__",
+        "__subclasses__",
+        "__bases__",
+        "__base__",
+        "__mro__",
+        "__dict__",
+        "__code__",
+        "__func__",
+        "__closure__",
+    }
+
+    def __getattribute__(self, name: str) -> Any:
+        if name in ContractContext.FORBIDDEN_ATTRS:
+            raise AttributeError(
+                f"Доступ к приватному dunder-атрибуту '{name}' объекта ContractContext категорически запрещен (SEC-05)"
+            )
+        return super().__getattribute__(name)
+
+    def __format__(self, format_spec: str) -> str:
+        return "ContractContext"
+
     def get_condition_status(self) -> str:
         """Возвращает статус внешнего условия контракта ('pending', 'fulfilled', 'failed')."""
         return self.condition_status
@@ -71,9 +95,10 @@ class ContractContext:
         self._requested_transfers.append({
             "from": from_wallet,
             "to": to_wallet,
-            "amount": round(num_amount, 2)
+            "amount": num_amount.quantize(Decimal("0.01"))
         })
 
     def complete(self) -> None:
         """Помечает контракт как завершенный (готов к расчету)."""
         self._is_completed = True
+

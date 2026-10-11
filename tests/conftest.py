@@ -133,7 +133,30 @@ _server_pub_pem = _server_key.public_key().public_bytes(
     format=serialization.PublicFormat.SubjectPublicKeyInfo,
 ).decode("utf-8")
 
-# 4. Сохранение сертификатов на диск для строгого Zero-Trust режима (требующего файлы)
+# 4. Выпуск тестовых ключей Анклава и Оракула (SEC-13)
+_enclave_key = rsa.generate_private_key(65537, 2048, default_backend())
+_enclave_key_pem = _enclave_key.private_bytes(
+    encoding=serialization.Encoding.PEM,
+    format=serialization.PrivateFormat.PKCS8,
+    encryption_algorithm=serialization.NoEncryption(),
+).decode("utf-8")
+_enclave_pub_pem = _enclave_key.public_key().public_bytes(
+    encoding=serialization.Encoding.PEM,
+    format=serialization.PublicFormat.SubjectPublicKeyInfo,
+).decode("utf-8")
+
+_oracle_key = rsa.generate_private_key(65537, 2048, default_backend())
+_oracle_key_pem = _oracle_key.private_bytes(
+    encoding=serialization.Encoding.PEM,
+    format=serialization.PrivateFormat.PKCS8,
+    encryption_algorithm=serialization.NoEncryption(),
+).decode("utf-8")
+_oracle_pub_pem = _oracle_key.public_key().public_bytes(
+    encoding=serialization.Encoding.PEM,
+    format=serialization.PublicFormat.SubjectPublicKeyInfo,
+).decode("utf-8")
+
+# 5. Сохранение сертификатов и ключей на диск для строгого Zero-Trust режима (требующего файлы)
 _certs_dir = Path(tempfile.gettempdir()) / "fin_ai_test_pki_certs"
 _certs_dir.mkdir(parents=True, exist_ok=True)
 (_certs_dir / "ca.crt").write_text(_ca_cert_pem, encoding="utf-8")
@@ -142,6 +165,10 @@ _certs_dir.mkdir(parents=True, exist_ok=True)
 (_certs_dir / "bank.key").write_text(_bank_key_pem, encoding="utf-8")
 (_certs_dir / "admin_server.crt").write_text(_server_cert_pem, encoding="utf-8")
 (_certs_dir / "admin_server.key").write_text(_server_key_pem, encoding="utf-8")
+(_certs_dir / "enclave.pub").write_text(_enclave_pub_pem, encoding="utf-8")
+(_certs_dir / "enclave.key").write_text(_enclave_key_pem, encoding="utf-8")
+(_certs_dir / "oracle.pub").write_text(_oracle_pub_pem, encoding="utf-8")
+(_certs_dir / "oracle.key").write_text(_oracle_key_pem, encoding="utf-8")
 
 _DEFAULT_ENV = {
     "ROOT_CA_CERT_PATH": str(_certs_dir / "ca.crt"),
@@ -152,6 +179,14 @@ _DEFAULT_ENV = {
     "JWT_PUBLIC_KEY_PATH": str(_certs_dir / "admin_server.crt"),
     "SERVER_CERT_PATH": str(_certs_dir / "admin_server.crt"),
     "SERVER_KEY_PATH": str(_certs_dir / "admin_server.key"),
+    "ENCLAVE_PUBLIC_KEY_PATH": str(_certs_dir / "enclave.pub"),
+    "ENCLAVE_PRIVATE_KEY_PATH": str(_certs_dir / "enclave.key"),
+    "ENCLAVE_PUBLIC_KEY_PEM": _enclave_pub_pem,
+    "ENCLAVE_PRIVATE_KEY_PEM": _enclave_key_pem,
+    "ORACLE_PUBLIC_KEY_PATH": str(_certs_dir / "oracle.pub"),
+    "ORACLE_PRIVATE_KEY_PATH": str(_certs_dir / "oracle.key"),
+    "ORACLE_PUBLIC_KEY_PEM": _oracle_pub_pem,
+    "ORACLE_PRIVATE_KEY_PEM": _oracle_key_pem,
     "JWT_PRIVATE_KEY": _server_key_pem,
     "JWT_PUBLIC_KEY": _server_pub_pem,
     "SERVER_CERT": _server_cert_pem,
@@ -170,6 +205,7 @@ _DEFAULT_ENV = {
 for k, v in _DEFAULT_ENV.items():
     if k not in os.environ:
         os.environ[k] = v
+
 
 
 def pytest_configure(config):
@@ -197,6 +233,11 @@ def setup_test_crypto_environment():
     try:
         from src.simulations.core.crypto.bank_ca import reset_bank_ca_for_tests
         reset_bank_ca_for_tests()
+    except Exception:
+        pass
+    try:
+        from src.simulations.core.crypto.receipt_signer import reset_receipt_signer_for_tests
+        reset_receipt_signer_for_tests()
     except Exception:
         pass
     try:

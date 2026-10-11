@@ -342,7 +342,14 @@ async def submit_rag_document(
             await anyio.to_thread.run_sync(lambda: minio_client.put_object(**put_kwargs))
             log_success("MinIO", f"Сохранен документ {object_name} в бакет {bucket_name}")
         except Exception as e:
-            log_warning("MinIO", f"Предупреждение: загрузка в MinIO не удалась ({e}), обработка продолжается")
+            log_error("MinIO", f"Ошибка загрузки в MinIO: {e}")
+            if doc_record is not None:
+                try:
+                    await db.delete(doc_record)
+                    await db.commit()
+                except Exception as rollback_err:
+                    log_error("RAG Database", f"Не удалось очистить осиротевшую запись в БД: {rollback_err}")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Storage failure")
 
     # 6. Отправка задачи в очередь Redis для vector-worker
     if redis_client is not None:
@@ -611,7 +618,8 @@ async def submit_rag_documents_delete(
                 lambda: minio_client.put_object(**del_put_kwargs)
             )
         except Exception as e:
-            log_warning("MinIO", f"Предупреждение: загрузка файла удаления в MinIO не удалась ({e})")
+            log_error("MinIO", f"Ошибка сохранения файла удаления в MinIO: {e}")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Storage failure")
 
     # Постановка задачи в очередь Redis
     if redis_client is not None:

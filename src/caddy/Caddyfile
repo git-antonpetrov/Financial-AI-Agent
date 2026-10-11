@@ -31,6 +31,7 @@
 
     # Проксирование запросов к FastAPI Admin Server с mTLS-заголовками и таймаутами для LLM
     reverse_proxy admin-server:8000 {
+        header_up -X-Client-Cert-*
         header_up Host {host}
         header_up X-Real-IP {remote_host}
         header_up X-Forwarded-For {remote_host}
@@ -76,7 +77,12 @@ simulation-api.internal, bank-service.internal {
 
 # 3. Внутренний контур Администратора (Межсетевое TLS-взаимодействие)
 admin-server.internal {
-    tls internal
+    tls internal {
+        client_auth {
+            mode {$CADDY_CLIENT_AUTH_MODE:require_and_verify}
+            trusted_ca_cert_file /etc/caddy/certs/ca.crt
+        }
+    }
 
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains"
@@ -86,10 +92,16 @@ admin-server.internal {
     }
 
     reverse_proxy admin-server:8000 {
+        header_up -X-Client-Cert-*
         header_up Host {host}
         header_up X-Real-IP {remote_host}
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto https
+        header_up X-Client-Cert-Verify {tls_client_verified}
+        header_up X-Client-Cert-Subject {tls_client_subject}
+        header_up X-Client-Cert-Issuer {tls_client_issuer}
+        header_up X-Client-Cert-Serial {tls_client_serial}
+        header_up X-Client-Cert-Fingerprint {tls_client_fingerprint}
 
         transport http {
             response_header_timeout 180s

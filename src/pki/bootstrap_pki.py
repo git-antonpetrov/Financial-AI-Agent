@@ -247,6 +247,62 @@ def bootstrap_pki(
         shutil.copyfile(export_path / "admin_client.crt", export_path / "client.crt")
         shutil.copyfile(export_path / "admin_client.key", export_path / "client.key")
 
+    # 5. Изолированные директории томов PKI (SEC-02 Zero-Trust Volume Isolation)
+    # ca_public: публичный корневой сертификат для рабочих сервисов и шлюза
+    ca_public_dir = export_path / "ca_public"
+    ca_public_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(export_path / "ca.crt", ca_public_dir / "ca.crt")
+
+    # bank_certs: сертификаты банковского сервиса и публичный CA
+    bank_dir = export_path / "bank_certs"
+    bank_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(export_path / "ca.crt", bank_dir / "ca.crt")
+    shutil.copyfile(export_path / "bank.crt", bank_dir / "bank.crt")
+    shutil.copyfile(export_path / "bank.key", bank_dir / "bank.key")
+
+    # admin_certs: сертификаты сервера администратора (БЕЗ admin_client.key!)
+    admin_dir = export_path / "admin_certs"
+    admin_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(export_path / "ca.crt", admin_dir / "ca.crt")
+    shutil.copyfile(export_path / "admin_server.crt", admin_dir / "admin_server.crt")
+    shutil.copyfile(export_path / "admin_server.key", admin_dir / "admin_server.key")
+
+    # admin_client_certs: изолированное хранилище ключей супер-администратора
+    admin_client_dir = export_path / "admin_client_certs"
+    admin_client_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(export_path / "ca.crt", admin_client_dir / "ca.crt")
+    shutil.copyfile(export_path / "admin_client.crt", admin_client_dir / "admin_client.crt")
+    shutil.copyfile(export_path / "admin_client.key", admin_client_dir / "admin_client.key")
+    if (export_path / "client.key").exists():
+        shutil.copyfile(export_path / "client.crt", admin_client_dir / "client.crt")
+        shutil.copyfile(export_path / "client.key", admin_client_dir / "client.key")
+
+    # Копирование в выделенные целевые тома из переменных окружения
+    dedicated_mounts = {
+        "CA_PUBLIC_DIR": (ca_public_dir, ["ca.crt"]),
+        "BANK_CERTS_DIR": (bank_dir, ["ca.crt", "bank.crt", "bank.key"]),
+        "ADMIN_CERTS_DIR": (admin_dir, ["ca.crt", "admin_server.crt", "admin_server.key"]),
+        "ADMIN_CLIENT_CERTS_DIR": (admin_client_dir, ["ca.crt", "admin_client.crt", "admin_client.key"]),
+    }
+    for env_var, (src_d, file_list) in dedicated_mounts.items():
+        dst_path_str = os.getenv(env_var)
+        if dst_path_str:
+            dst_p = Path(dst_path_str).resolve()
+            dst_p.mkdir(parents=True, exist_ok=True)
+            for fname in file_list:
+                shutil.copyfile(src_d / fname, dst_p / fname)
+
+    # Изоляция ключа супер-администратора от общего раздела certs_data в Docker
+    isolate_admin_client = os.getenv("ISOLATE_ADMIN_CLIENT_KEY", "false").lower() in ("true", "1")
+    if isolate_admin_client:
+        for f_to_remove in ["admin_client.key", "client.key"]:
+            target_f = export_path / f_to_remove
+            if target_f.exists():
+                target_f.unlink()
+        if admin_client_dir.exists():
+            shutil.rmtree(admin_client_dir, ignore_errors=True)
+        print("[+] SEC-02: Закрытый ключ admin_client.key и каталог admin_client_certs успешно изолированы от общего тома certs_data.")
+
     print("\n[✓] Инициализация PKI успешно завершена. Все сервисы обеспечены доверенными сертификатами.")
     print("=================================================================\n")
     return manifest
@@ -258,3 +314,4 @@ if __name__ == "__main__":
 
     force_flag = os.getenv("FORCE_REGENERATE", "false").lower() in ("true", "1")
     bootstrap_pki(default_data, default_export, force=force_flag)
+

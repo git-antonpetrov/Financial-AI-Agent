@@ -2,7 +2,9 @@ import uuid
 from datetime import datetime, date, timezone, timedelta
 from sqlalchemy import Column, String, Numeric, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
+from decimal import Decimal
 from src.simulations.db.digital_ruble.db.database import Base
+from src.simulations.core.crypto.at_rest import EncryptedText, EncryptedDecimal
 
 def generate_uuid():
     return str(uuid.uuid4())
@@ -14,9 +16,9 @@ class Wallet(Base):
     __tablename__ = "wallets"
     id = Column(String, primary_key=True, default=generate_uuid)
     client_id = Column(String, unique=True, nullable=False, index=True) # 1 кошелек = 1 гражданин
-    wallet_number = Column(String, unique=True, nullable=False)
-    balance = Column(Numeric(12, 2), default=0.00)
-    frozen_balance = Column(Numeric(12, 2), default=0.00)
+    wallet_number = Column(EncryptedText(deterministic=True), unique=True, nullable=False)
+    balance = Column(EncryptedDecimal, default=Decimal("0.00"))
+    frozen_balance = Column(EncryptedDecimal, default=Decimal("0.00"))
     status = Column(String, default="active", index=True)  # Возможные значения: active, blocked
     opened_at = Column(DateTime, default=get_moscow_now)
 
@@ -31,7 +33,7 @@ class RubleTransaction(Base):
     id = Column(String, primary_key=True, default=generate_uuid)
     sender_wallet_id = Column(String, ForeignKey("wallets.id"), nullable=True, index=True)
     receiver_wallet_id = Column(String, ForeignKey("wallets.id"), nullable=False, index=True)
-    amount = Column(Numeric(12, 2), nullable=False)
+    amount = Column(EncryptedDecimal, nullable=False)
     status = Column(String, default="completed", index=True)  # Возможные значения: completed, failed
     smart_contract_id = Column(String, ForeignKey("smart_contracts.id"), nullable=True, index=True)
     signature = Column(String, nullable=True)
@@ -46,7 +48,8 @@ class SmartContract(Base):
     id = Column(String, primary_key=True, default=generate_uuid)
     creator_wallet_id = Column(String, ForeignKey("wallets.id"), nullable=False, index=True)
     receiver_wallet_id = Column(String, ForeignKey("wallets.id"), nullable=False, index=True)
-    amount = Column(Numeric(12, 2), nullable=False)
+    amount = Column(EncryptedDecimal, nullable=False)
+
     condition_type = Column(String, nullable=False)  # "приемка_квартиры", "наступление_даты"
     contract_code = Column(String, nullable=True)  # Python DSL код контракта
     condition_status = Column(String, default="pending", index=True)  # Возможные значения: pending, fulfilled, failed

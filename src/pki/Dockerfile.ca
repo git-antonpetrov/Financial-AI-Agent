@@ -2,15 +2,21 @@ FROM python:3.12-alpine
 
 WORKDIR /app
 
-RUN apk add --no-cache gcc musl-dev libffi-dev
+RUN apk add --no-cache gcc musl-dev libffi-dev && \
+    addgroup -S appgroup && \
+    adduser -S appuser -G appgroup && \
+    mkdir -p /data/ca /shared_certs /export/ca_public /export/admin_certs /export/bank_certs /export/admin_client_certs /app && \
+    chown -R appuser:appgroup /data/ca /shared_certs /export /app
 
 COPY src/pki/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-COPY src/pki /app
+COPY --chown=appuser:appgroup src/pki /app
 
 ENV ROOT_CA_DATA_DIR=/data/ca \
     SHARED_CERTS_DIR=/shared_certs \
     PYTHONUNBUFFERED=1
+
+USER appuser
 
 ENTRYPOINT ["python", "bootstrap_pki.py"]

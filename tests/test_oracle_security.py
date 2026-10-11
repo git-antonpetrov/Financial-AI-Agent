@@ -13,6 +13,8 @@ def setup_tokens(monkeypatch):
     monkeypatch.setenv("AGENT_DIGITAL_BOOTSTRAP_TOKEN", "digital_secret_token")
     monkeypatch.setenv("AGENT_MAIN_BOOTSTRAP_TOKEN", "orchestrator_secret_token")
     monkeypatch.setenv("ORACLE_BOOTSTRAP_TOKEN", "trusted_oracle_token_999")
+    monkeypatch.setenv("REQUIRE_ORACLE_SIGNATURE", "false")
+    monkeypatch.setenv("REQUIRE_ENCLAVE_SIGNATURE", "false")
 
 
 class DummySmartContract:
@@ -205,3 +207,68 @@ def test_oracle_rejects_missing_contract(monkeypatch):
     response = client.post("/ruble/smart-contracts/non_existent/condition", json=payload, headers=headers)
     assert response.status_code == 404
     assert "не найден" in response.json()["detail"]
+
+
+def test_oracle_endpoint_strict_requires_signature_by_default(monkeypatch):
+    """Проверяет, что по умолчанию (SEC-08) без подписи оракула возвращается HTTP 401."""
+    monkeypatch.delenv("REQUIRE_ORACLE_SIGNATURE", raising=False)
+    contract = DummySmartContract(id="c_strict", status="active", condition_status="pending")
+    mock_cm = create_mock_db_context(contract)
+    monkeypatch.setattr("src.simulations.api.routers.ruble.ruble_db", lambda: mock_cm)
+
+    app = FastAPI()
+    app.include_router(ruble_router, prefix="/ruble")
+    client = TestClient(app)
+
+    headers = {"X-Bootstrap-Token": "trusted_oracle_token_999"}
+    payload = {"status": "fulfilled"}
+
+    # Без подписи оракула запрос отклоняется с 401
+    resp = client.post("/ruble/smart-contracts/c_strict/condition", json=payload, headers=headers)
+    assert resp.status_code == 401
+    assert "Требуется цифровая подпись оракула" in resp.json()["detail"]
+
+
+def test_oracle_endpoint_valid_signature_with_nonce_and_replay_protection(monkeypatch):
+    """Проверяет успешное обновление с подписью оракула и защиту от Replay-атак (SEC-14)."""
+    import time
+    from src.simulations.core.crypto.oracle_verifier import get_oracle_verifier
+
+    monkeypatch.setenv("REQUIRE_ORACLE_SIGNATURE", "true")
+    contract = DummySmartContract(id="c_replay", status="active", condition_status="pending")
+    mock_cm = create_mock_db_context(contract)
+    monkeypatch.setattr("src.simulations.api.routers.ruble.ruble_db", lambda: mock_cm)
+
+    app = FastAPI()
+    app.include_router(ruble_router, prefix="/ruble")
+    client = TestClient(app)
+
+    headers = {"X-Bootstrap-Token": "trusted_oracle_token_999"}
+    verifier = get_oracle_verifier()
+    now_ts = int(time.time())
+    nonce = f"test-replay-nonce-{now_ts}"
+
+    sig = verifier.sign_condition(
+        contract_id="c_replay",
+        status="fulfilled",
+        oracle_name="default_oracle",
+        nonce=nonce,
+        timestamp=now_ts,
+    )
+
+    payload = {
+        "status": "fulfilled",
+        "oracle_name": "default_oracle",
+        "signature": sig,
+        "nonce": nonce,
+        "timestamp": now_ts,
+    }
+
+    # Первый запрос успешен (200)
+    resp1 = client.post("/ruble/smart-contracts/c_replay/condition", json=payload, headers=headers)
+    assert resp1.status_code == 200
+
+    # Второй запрос с тем же nonce отклоняется с 409 (Replay Attack)
+    resp2 = client.post("/ruble/smart-contracts/c_replay/condition", json=payload, headers=headers)
+    assert resp2.status_code == 409
+    assert "Replay-атака" in resp2.json()["detail"] or "уже был использован" in resp2.json()["detail"]

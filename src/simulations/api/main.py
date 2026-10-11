@@ -17,6 +17,39 @@ from src.simulations.api.routers.bank import router as bank_router, pki_router a
 from src.simulations.api.routers.invest import router as invest_router
 from src.simulations.api.routers.ruble import router as ruble_router
 
+from contextlib import asynccontextmanager
+from src.simulations.db.bank.db.client import get_async_engine as get_bank_engine
+from src.simulations.db.invest.db.client import get_async_engine as get_invest_engine
+from src.simulations.db.digital_ruble.db.client import get_async_engine as get_ruble_engine
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Валидация строгого режима безопасности (SEC-10)
+    strict_sec = os.getenv("STRICT_SECURITY", "false").lower() in ("true", "1")
+    if strict_sec:
+        require_enclave = os.getenv("REQUIRE_ENCLAVE_SIGNATURE", "true").lower() in ("true", "1")
+        if not require_enclave:
+            raise RuntimeError("STRICT_SECURITY: REQUIRE_ENCLAVE_SIGNATURE must be true in production")
+        require_oracle = os.getenv("REQUIRE_ORACLE_SIGNATURE", "true").lower() in ("true", "1")
+        if not require_oracle:
+            raise RuntimeError("STRICT_SECURITY: REQUIRE_ORACLE_SIGNATURE must be true in production")
+
+    log_info("Simulation API", "Simulation API запущен и готов к работе")
+    yield
+
+    # Корректное освобождение пулов соединений PostgreSQL (SEC-18)
+    for engine_fn, name in [
+        (get_bank_engine, "Bank DB"),
+        (get_invest_engine, "Invest DB"),
+        (get_ruble_engine, "Digital Ruble DB"),
+    ]:
+        try:
+            engine = engine_fn()
+            await engine.dispose()
+            log_info("Simulation API", f"Пул соединений {name} успешно освобожден (engine.dispose)")
+        except Exception as e:
+            log_error("Simulation API", f"Ошибка при освобождении пула {name}: {e}")
+
 app = FastAPI(
     title="Financial AI Agent - Simulation API",
     description="""
@@ -24,7 +57,8 @@ app = FastAPI(
     с Банком, Инвестициями и Цифровым рублем.
     Обеспечивает кросс-доменные операции и централизованный доступ к изолированным БД.
     """,
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 cors_env = os.getenv("CORS_ALLOWED_ORIGINS", "")

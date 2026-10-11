@@ -29,6 +29,7 @@ def setup_test_env(monkeypatch):
     monkeypatch.setenv("AGENT_INVEST_BOOTSTRAP_TOKEN", "test_invest_token")
     monkeypatch.setenv("AGENT_DIGITAL_BOOTSTRAP_TOKEN", "test_digital_token")
     monkeypatch.setenv("ORACLE_BOOTSTRAP_TOKEN", "test_oracle_token")
+    monkeypatch.setenv("REQUIRE_ENCLAVE_SIGNATURE", "false")
 
 
 # =========================================================================
@@ -367,8 +368,8 @@ def test_oracle_endpoint_with_valid_and_invalid_signature(monkeypatch):
     assert res_valid.headers.get("X-Bank-Signature") is not None
 
     # Верификация полученного от Банка чека
-    is_receipt_valid, _ = get_receipt_signer().verify_receipt(res_data["signed_receipt"])
-    assert is_receipt_valid is True
+    is_receipt_valid, err_msg = get_receipt_signer().verify_receipt(res_data["signed_receipt"])
+    assert is_receipt_valid is True, f"Receipt verification failed: {err_msg}"
 
     # 2. Запрос с недействительной подписью оракула -> 403 Forbidden
     fake_sig = base64.b64encode(b"invalid_oracle_signature_123456").decode("ascii")

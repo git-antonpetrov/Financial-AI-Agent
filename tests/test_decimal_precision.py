@@ -250,3 +250,13 @@ def test_invest_eod_tasks_exact_decimal_calculations():
         assert sav.next_payment_amount == Decimal("1010.00")
 
     asyncio.run(_test())
+
+
+def test_product_terms_returns_decimal():
+    """Проверяет, что get_product_terms() возвращает значения Decimal (SEC-25)."""
+    from src.simulations.api.routers.invest import get_product_terms
+    terms = get_product_terms()
+    assert isinstance(terms["key_rate"], Decimal)
+    assert isinstance(terms["savings_account_rate"], Decimal)
+    for rate in terms["deposit_rates"].values():
+        assert isinstance(rate, Decimal)

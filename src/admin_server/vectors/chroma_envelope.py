@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from core.utils.console_logger import log_warning, log_info
 
 MAGIC_ENVELOPE_V1 = b"ENC1"
+MAGIC_ENVELOPE_V2_PREFIX = b"ENC2:"
 
 # Ключи метаданных, сохраняемые в открытом виде для фильтрации ChromaDB (where={"short_name": ...})
 DEFAULT_PRESERVED_KEYS = {
@@ -81,8 +82,13 @@ def resolve_encryption_key(key: bytes | str | None = None) -> bytes:
         encoded = key.encode("utf-8")
         if len(encoded) == 32:
             return encoded
-        # 4. Деривация через SHA-256
-        return hashlib.sha256(encoded).digest()
+        # 4. Деривация через derive_key / SHA-256
+        try:
+            from security import derive_key
+            derivation_method = os.getenv("KEY_DERIVATION_METHOD", "sha256").lower()
+            return derive_key(encoded, method=derivation_method)
+        except Exception:
+            return hashlib.sha256(encoded).digest()
 
     raise TypeError(f"Неподдерживаемый тип ключа шифрования: {type(key).__name__}")
 
@@ -90,11 +96,12 @@ def resolve_encryption_key(key: bytes | str | None = None) -> bytes:
 def encrypt_chroma_chunk(
     chunk: str,
     key: bytes | str | None = None,
-    aad: bytes | str | None = None
+    aad: bytes | str | None = None,
+    kid: str | None = None
 ) -> str:
     """
     Шифрует текстовый чанк с использованием AES-256-GCM.
-    Возвращает Base64url строку с заголовком ENC1.
+    Возвращает Base64url строку с заголовком ENC2 (при указании kid) или legacy ENC1.
     """
     if not isinstance(chunk, str):
         chunk = str(chunk)
@@ -108,29 +115,25 @@ def encrypt_chroma_chunk(
         aad_bytes = aad.encode("utf-8") if isinstance(aad, str) else bytes(aad)
 
     ciphertext_and_tag = aesgcm.encrypt(nonce, chunk.encode("utf-8"), aad_bytes)
-    raw_payload = MAGIC_ENVELOPE_V1 + nonce + ciphertext_and_tag
+    if kid is not None:
+        raw_payload = MAGIC_ENVELOPE_V2_PREFIX + kid.encode("utf-8") + b":" + nonce + ciphertext_and_tag
+    else:
+        raw_payload = MAGIC_ENVELOPE_V1 + nonce + ciphertext_and_tag
     return base64.urlsafe_b64encode(raw_payload).decode("ascii")
 
 
 _BASE64URL_ALPHABET = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_=")
 _MIN_ENVELOPE_BYTES_LEN = len(MAGIC_ENVELOPE_V1) + 12 + 16  # Magic (4) + Nonce (12) + Tag (16) = 32 байта
 _MIN_ENVELOPE_B64_LEN = 43  # 32 байта в Base64url кодируются в 43 символа без padding (44 с padding)
-_ENVELOPE_B64_PREFIX = "RU5DM"  # b"ENC1" в Base64url: b"ENC" -> "RU5D", b"1" + 2 бита nonce всегда дают "M"
+_ENVELOPE_B64_PREFIX = "RU5DM"  # b"ENC1" и b"ENC2" в Base64url: оба начинаются с "RU5DM"
 
 
 def is_encrypted_chunk(val: Any) -> bool:
     """
-    Строго проверяет, является ли значение строкой зашифрованного пакета ENC1 (Envelope Encryption).
+    Строго проверяет, является ли значение строкой зашифрованного пакета ENC1 или ENC2.
     
     В отличие от примитивной эвристики startswith("RU5D"), данная функция исключает
-    ложные срабатывания (false positives) для обычных строк, случайно начинающихся с 'RU5D'
-    (например, 'RU5D', 'RU5D (Текст документа)', 'RU5D-2026' и т.д.).
-    
-    Критерии:
-    1. Значение должно быть непустой строкой длиной не менее 43 символов.
-    2. Должно начинаться с детерминированного префикса 'RU5DM' (Base64url от b"ENC1").
-    3. Должно состоять строго из алфавита Base64url (без пробелов, переводов строк и спецсимволов).
-    4. Должно успешно декодироваться в Base64url и содержать заголовок b"ENC1" длиной >= 32 байт.
+    ложные срабатывания (false positives) для обычных строк, случайно начинающихся с 'RU5D'.
     """
     if not isinstance(val, str) or len(val) < _MIN_ENVELOPE_B64_LEN:
         return False
@@ -146,6 +149,13 @@ def is_encrypted_chunk(val: Any) -> bool:
     except Exception:
         return False
 
+    if raw_payload.startswith(MAGIC_ENVELOPE_V2_PREFIX):
+        delim_idx = raw_payload.find(b":", len(MAGIC_ENVELOPE_V2_PREFIX))
+        if delim_idx == -1:
+            return False
+        rest = raw_payload[delim_idx + 1:]
+        return len(rest) >= 12 + 16
+
     return (
         len(raw_payload) >= _MIN_ENVELOPE_BYTES_LEN
         and raw_payload.startswith(MAGIC_ENVELOPE_V1)
@@ -159,8 +169,8 @@ def decrypt_chroma_chunk(
     is_encrypted: bool | None = None
 ) -> str:
     """
-    Расшифровывает чанк, сохраненный в ChromaDB.
-    Если строка не является зашифрованным пакетом ENC1 (унаследованные данные),
+    Расшифровывает чанк, сохраненный в ChromaDB (поддерживает форматы ENC2 и legacy ENC1).
+    Если строка не является зашифрованным пакетом (унаследованные данные),
     возвращает её без изменений (обратная совместимость).
     
     Параметр is_encrypted (опционально) позволяет использовать значение флага
@@ -173,7 +183,7 @@ def decrypt_chroma_chunk(
     if is_encrypted is False:
         return val
 
-    # Строгая валидация формата зашифрованного конверта ENC1 вместо наивной эвристики "RU5D"
+    # Строгая валидация формата зашифрованного конверта ENC1/ENC2
     if not is_encrypted_chunk(val):
         if is_encrypted is True:
             raise ValueError("Ошибка расшифровки чанка ChromaDB: нарушена структура зашифрованного пакета ENC1.")
@@ -186,9 +196,28 @@ def decrypt_chroma_chunk(
             raise ValueError("Ошибка расшифровки чанка ChromaDB: невалидная Base64url строка.") from e
         return val
 
-    header_len = len(MAGIC_ENVELOPE_V1)
-    nonce = raw_payload[header_len : header_len + 12]
-    ciphertext_and_tag = raw_payload[header_len + 12 :]
+    if raw_payload.startswith(MAGIC_ENVELOPE_V2_PREFIX):
+        prefix_len = len(MAGIC_ENVELOPE_V2_PREFIX)
+        delim_idx = raw_payload.find(b":", prefix_len)
+        if delim_idx == -1:
+            if is_encrypted is True:
+                raise ValueError("Ошибка расшифровки чанка ChromaDB: нарушена структура зашифрованного пакета ENC2.")
+            return val
+        rest = raw_payload[delim_idx + 1:]
+        if len(rest) < 12 + 16:
+            if is_encrypted is True:
+                raise ValueError("Ошибка расшифровки чанка ChromaDB: нарушена структура зашифрованного пакета ENC2.")
+            return val
+        nonce = rest[:12]
+        ciphertext_and_tag = rest[12:]
+    elif raw_payload.startswith(MAGIC_ENVELOPE_V1):
+        header_len = len(MAGIC_ENVELOPE_V1)
+        nonce = raw_payload[header_len : header_len + 12]
+        ciphertext_and_tag = raw_payload[header_len + 12 :]
+    else:
+        if is_encrypted is True:
+            raise ValueError("Ошибка расшифровки чанка ChromaDB: нарушена структура зашифрованного пакета ENC1.")
+        return val
 
     resolved_key = resolve_encryption_key(key)
     aesgcm = AESGCM(resolved_key)
@@ -207,7 +236,8 @@ def decrypt_chroma_chunk(
 def encrypt_chroma_metadata(
     metadata: dict[str, Any],
     key: bytes | str | None = None,
-    preserve_keys: set[str] | None = None
+    preserve_keys: set[str] | None = None,
+    kid: str | None = None
 ) -> dict[str, Any]:
     """
     Шифрует чувствительные строковые поля в словаре метаданных документа.
@@ -226,7 +256,7 @@ def encrypt_chroma_metadata(
             encrypted_meta[key_str] = v
         elif isinstance(v, str):
             # Шифруем строковые значения метаданных (например, title, description)
-            encrypted_meta[key_str] = encrypt_chroma_chunk(v, key=key)
+            encrypted_meta[key_str] = encrypt_chroma_chunk(v, key=key, kid=kid)
         else:
             # Числовые и логические значения оставляем без изменений
             encrypted_meta[key_str] = v
@@ -270,13 +300,14 @@ def encrypt_batch(
     chunks: list[str],
     metadatas: list[dict[str, Any]],
     key: bytes | str | None = None,
-    preserve_keys: set[str] | None = None
+    preserve_keys: set[str] | None = None,
+    kid: str | None = None
 ) -> tuple[list[str], list[dict[str, Any]]]:
     """
     Шифрует батч чанков и список соответствующих метаданных для сохранения в ChromaDB.
     """
-    encrypted_chunks = [encrypt_chroma_chunk(c, key=key) for c in chunks]
-    encrypted_metadatas = [encrypt_chroma_metadata(m, key=key, preserve_keys=preserve_keys) for m in metadatas]
+    encrypted_chunks = [encrypt_chroma_chunk(c, key=key, kid=kid) for c in chunks]
+    encrypted_metadatas = [encrypt_chroma_metadata(m, key=key, preserve_keys=preserve_keys, kid=kid) for m in metadatas]
     return encrypted_chunks, encrypted_metadatas
 
 

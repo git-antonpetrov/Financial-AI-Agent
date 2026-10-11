@@ -74,7 +74,7 @@ async def process_savings_accounts(session, current_date):
             
         # Считаем сумму следующей выплаты: баланс * (ставка / 100) / 12 месяцев
         monthly_rate = Decimal(str(acc.interest_rate)) / Decimal('100') / Decimal('12')
-        acc.next_payment_amount = round(Decimal(str(acc.balance)) * monthly_rate, 2)
+        acc.next_payment_amount = (Decimal(str(acc.balance)) * monthly_rate).quantize(Decimal("0.01"))
         
         # Сдвигаем дату на 1 месяц вперед
         acc.next_payment_date = acc.next_payment_date + relativedelta(months=1)
@@ -106,7 +106,7 @@ async def process_deposits(session, current_date):
             dep.balance = Decimal(str(dep.balance)) + Decimal(str(dep.next_payment_amount))
             
         monthly_rate = Decimal(str(dep.interest_rate)) / Decimal('100') / Decimal('12')
-        dep.next_payment_amount = round(Decimal(str(dep.balance)) * monthly_rate, 2)
+        dep.next_payment_amount = (Decimal(str(dep.balance)) * monthly_rate).quantize(Decimal("0.01"))
         
         dep.next_payment_date = dep.next_payment_date + relativedelta(months=1)
         processed += 1
@@ -175,7 +175,7 @@ async def process_broker_accounts(session, current_date):
         actual_monthly_yield = base_monthly_yield + noise
         
         # Считаем доход за прошедший месяц
-        income = round(Decimal(str(acc.balance)) * (actual_monthly_yield / Decimal("100")), 2)
+        income = (Decimal(str(acc.balance)) * (actual_monthly_yield / Decimal("100"))).quantize(Decimal("0.01"))
         acc.monthly_income = income
         
         # Применяем доход к балансу (он может быть и отрицательным!)
@@ -183,7 +183,7 @@ async def process_broker_accounts(session, current_date):
         
         # Если месяц закрыт в плюс, берем комиссию за успех (Success Fee)
         if acc.monthly_income > Decimal("0.00"):
-            fee = round(Decimal(str(acc.monthly_income)) * (Decimal(str(strategy.commission_fee)) / Decimal('100')), 2)
+            fee = (Decimal(str(acc.monthly_income)) * (Decimal(str(strategy.commission_fee)) / Decimal('100'))).quantize(Decimal("0.01"))
             acc.balance = Decimal(str(acc.balance)) - fee
             
         # Сдвигаем дату следующего расчета

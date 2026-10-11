@@ -37,14 +37,15 @@ class EncryptedText(TypeDecorator):
         if value is None:
             return None
         val_str = str(value)
-        is_enc1 = False
-        if val_str.startswith("ENC1"):
-            is_enc1 = True
+        is_enc = False
+        if val_str.startswith("ENC1") or val_str.startswith("ENC2"):
+            is_enc = True
         else:
             try:
                 padded = val_str + "=" * (-len(val_str) % 4)
-                if base64.urlsafe_b64decode(padded[:8].encode("ascii")).startswith(b"ENC1"):
-                    is_enc1 = True
+                decoded_prefix = base64.urlsafe_b64decode(padded[:8].encode("ascii"))
+                if decoded_prefix.startswith(b"ENC1") or decoded_prefix.startswith(b"ENC2"):
+                    is_enc = True
             except Exception:
                 pass
 
@@ -58,7 +59,7 @@ class EncryptedText(TypeDecorator):
         try:
             return decrypt_text_at_rest(val_str)
         except Exception as e:
-            if is_enc1:
+            if is_enc:
                 raise ValueError(f"Decryption failed for ENC1 encrypted payload: {e}") from e
             # Обратная совместимость с ранее сохраненным открытым текстом
             return val_str

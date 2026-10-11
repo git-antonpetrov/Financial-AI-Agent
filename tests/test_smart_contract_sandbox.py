@@ -110,13 +110,12 @@ def run(ctx):
 
 
 def test_execution_timeout_and_ops_limit():
-    """Тест прерывания бесконечного цикла по лимиту шагов и таймауту."""
+    """Тест прерывания рекурсии по лимиту шагов и таймауту."""
     code = """
 def execute(ctx):
-    x = 0
-    while True:
-        x += 1
-    return True
+    def loop(n):
+        return loop(n + 1)
+    return loop(0)
 """
     ctx = ContractContext("c-1", "w-1", "w-2", 100.0, "fulfilled")
     success, is_completed, transfers, error = SmartContractSandbox.execute_contract(
@@ -124,3 +123,67 @@ def execute(ctx):
     )
     assert success is False
     assert ("Превышен лимит вычислительной сложности" in error or "Превышено максимальное время выполнения" in error)
+
+
+def test_while_and_for_loops_rejected():
+    """Тест блокировки циклов while и for в коде смарт-контракта (SEC-04)."""
+    code_while = """
+def execute(ctx):
+    while True:
+        pass
+    return True
+"""
+    ctx = ContractContext("c-1", "w-1", "w-2", 100.0, "fulfilled")
+    success, _, _, error = SmartContractSandbox.execute_contract(code_while, ctx)
+    assert success is False
+    assert "Использование циклов (while)" in error
+
+    code_for = """
+def execute(ctx):
+    for i in [1, 2, 3]:
+        pass
+    return True
+"""
+    success, _, _, error = SmartContractSandbox.execute_contract(code_for, ctx)
+    assert success is False
+    assert "Использование циклов (for)" in error
+
+
+def test_top_level_expressions_rejected():
+    """Тест блокировки выражений и логики на верхнем уровне модуля вне функций (SEC-04)."""
+    code = """
+x = 10
+def execute(ctx):
+    return True
+"""
+    ctx = ContractContext("c-1", "w-1", "w-2", 100.0, "fulfilled")
+    success, _, _, error = SmartContractSandbox.execute_contract(code, ctx)
+    assert success is False
+    assert "На верхнем уровне смарт-контракта разрешены только определения функций" in error
+
+
+def test_str_format_methods_blocked():
+    """Тест блокировки вызовов методов format и format_map (SEC-05)."""
+    code = """
+def execute(ctx):
+    s = "{0}".format(ctx)
+    return True
+"""
+    ctx = ContractContext("c-1", "w-1", "w-2", 100.0, "fulfilled")
+    success, _, _, error = SmartContractSandbox.execute_contract(code, ctx)
+    assert success is False
+    assert "Вызов метода 'format' категорически запрещен" in error
+
+
+def test_context_dunder_isolation():
+    """Тест изоляции dunder-атрибутов (__class__, __init__, __globals__) объекта контекста (SEC-05)."""
+    ctx = ContractContext("c-1", "w-1", "w-2", 100.0, "fulfilled")
+    with pytest.raises(AttributeError, match="категорически запрещен"):
+        _ = ctx.__class__
+
+    with pytest.raises(AttributeError, match="категорически запрещен"):
+        _ = ctx.__init__
+
+    with pytest.raises(AttributeError, match="категорически запрещен"):
+        _ = ctx.__globals__
+

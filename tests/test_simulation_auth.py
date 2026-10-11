@@ -17,6 +17,7 @@ def setup_env(monkeypatch):
     monkeypatch.setenv("AGENT_INVEST_BOOTSTRAP_TOKEN", "secret_invest_token_456")
     monkeypatch.setenv("AGENT_DIGITAL_BOOTSTRAP_TOKEN", "secret_digital_token_789")
     monkeypatch.setenv("AGENT_MAIN_BOOTSTRAP_TOKEN", "secret_main_orchestrator_000")
+    monkeypatch.setenv("REQUIRE_ENCLAVE_SIGNATURE", "false")
 
 
 @pytest.fixture
@@ -230,4 +231,59 @@ def test_enclave_signature_with_agent_token_joint_validation(test_app):
     }
     resp_cross = client.get(path, headers=headers_cross)
     assert resp_cross.status_code == 403
+
+
+def test_enclave_signature_strictly_required_by_default(test_app, monkeypatch):
+    """Проверяет, что по умолчанию (SEC-09) без подписи Анклава возвращается HTTP 401 даже при наличии токена."""
+    monkeypatch.delenv("REQUIRE_ENCLAVE_SIGNATURE", raising=False)
+    client = TestClient(test_app)
+
+    # Запрос только с токеном без подписи Анклава отклоняется
+    headers = {"X-Bootstrap-Token": "secret_bank_token_123"}
+    resp = client.get("/bank/test", headers=headers)
+    assert resp.status_code == 401
+    assert "Строгий режим безопасности: требуется цифровая подпись Анклава" in resp.json()["detail"]
+
+
+def test_enclave_signature_strict_passes_with_valid_signature(test_app, monkeypatch):
+    """Проверяет, что при валидной подписи Анклава запрос успешно проходит в строгом режиме."""
+    import time
+    import base64
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+    from src.simulations.core.crypto.enclave_verifier import get_enclave_verifier, EnclaveVerifier
+
+    monkeypatch.setenv("REQUIRE_ENCLAVE_SIGNATURE", "true")
+    client = TestClient(test_app)
+    verifier = get_enclave_verifier()
+    key_mgr = verifier.key_manager
+
+    method = "GET"
+    path = "/bank/test"
+    now_ts = int(time.time())
+    nonce = f"test-strict-enclave-{now_ts}"
+    body = b""
+
+    canonical_digest = EnclaveVerifier.compute_payload_digest(
+        method=method,
+        path=path,
+        timestamp=now_ts,
+        nonce=nonce,
+        body_bytes=body,
+    )
+    raw_sig = key_mgr._dev_private_key.sign(
+        canonical_digest,
+        padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
+        hashes.SHA256(),
+    )
+    sig_b64 = base64.b64encode(raw_sig).decode("ascii")
+
+    headers = {
+        "X-Enclave-Signature": sig_b64,
+        "X-Nonce": nonce,
+        "X-Timestamp": str(now_ts),
+        "X-Bootstrap-Token": "secret_bank_token_123",
+    }
+    resp = client.get(path, headers=headers)
+    assert resp.status_code == 200
 

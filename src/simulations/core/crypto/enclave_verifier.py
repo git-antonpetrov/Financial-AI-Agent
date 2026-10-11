@@ -70,29 +70,75 @@ class NonceStore:
 class EnclaveKeyManager:
     """
     Менеджер открытого ключа Аппаратного Анклава (Enclave_PublicKey).
-    В боевом режиме загружает сохраненный публичный ключ Анклава.
-    В тестовом/dev режиме генерирует валидную пару ключей.
+    В строгом соответствии с моделью Zero-Trust (SEC-13), генерация случайных
+    ключей в оперативной памяти запрещена. Ключи загружаются из настроенных путей/переменных;
+    при их отсутствии выбрасывается RuntimeError.
     """
 
-    def __init__(self, public_key_pem: Optional[str] = None):
+    def __init__(
+        self,
+        public_key_pem: Optional[str] = None,
+        private_key_pem: Optional[str] = None,
+    ):
         self._public_key_pem = public_key_pem or os.getenv("ENCLAVE_PUBLIC_KEY_PEM")
+        self._private_key_pem = private_key_pem or os.getenv("ENCLAVE_PRIVATE_KEY_PEM")
         self._dev_private_key = None
 
         if not self._public_key_pem:
-            # Автоматическая генерация для локальной разработки / тестов
-            key = rsa.generate_private_key(
-                public_exponent=65537,
-                key_size=2048,
-                backend=default_backend(),
+            pub_paths = [
+                os.getenv("ENCLAVE_PUBLIC_KEY_PATH", ""),
+                os.getenv("ENCLAVE_KEY_PATH", ""),
+                "/certs/enclave.pub",
+                "/certs/enclave_public.pem",
+            ]
+            for p in pub_paths:
+                if p and os.path.isfile(p):
+                    try:
+                        with open(p, "r", encoding="utf-8") as f:
+                            self._public_key_pem = f.read()
+                            break
+                    except Exception:
+                        pass
+
+        if not self._public_key_pem:
+            raise RuntimeError(
+                "Публичный ключ анклава не найден (ENCLAVE_PUBLIC_KEY_PEM / ENCLAVE_PUBLIC_KEY_PATH). "
+                "Генерация случайных ключей в оперативной памяти запрещена моделью Zero-Trust."
             )
-            self._dev_private_key = key
-            self._public_key_pem = key.public_key().public_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PublicFormat.SubjectPublicKeyInfo,
-            ).decode("utf-8")
+
+        if not self._private_key_pem:
+            priv_paths = [
+                os.getenv("ENCLAVE_PRIVATE_KEY_PATH", ""),
+                "/certs/enclave.key",
+                "/certs/enclave_private.pem",
+            ]
+            for p in priv_paths:
+                if p and os.path.isfile(p):
+                    try:
+                        with open(p, "r", encoding="utf-8") as f:
+                            self._private_key_pem = f.read()
+                            break
+                    except Exception:
+                        pass
+
+        if self._private_key_pem:
+            try:
+                self._dev_private_key = serialization.load_pem_private_key(
+                    self._private_key_pem.encode("utf-8"),
+                    password=None,
+                    backend=default_backend(),
+                )
+            except Exception:
+                pass
 
     def get_public_key_pem(self) -> str:
         return self._public_key_pem
+
+    def get_dev_private_key(self) -> Optional[rsa.RSAPrivateKey]:
+        return self._dev_private_key
+
+    def get_private_key(self) -> Optional[rsa.RSAPrivateKey]:
+        return self._dev_private_key
 
     def get_dev_private_key_pem(self) -> Optional[str]:
         if self._dev_private_key:
@@ -101,13 +147,14 @@ class EnclaveKeyManager:
                 format=serialization.PrivateFormat.PKCS8,
                 encryption_algorithm=serialization.NoEncryption(),
             ).decode("utf-8")
-        return None
+        return self._private_key_pem
 
     def load_public_key(self):
         return serialization.load_pem_public_key(
             self._public_key_pem.encode("utf-8"),
             backend=default_backend(),
         )
+
 
 
 class EnclaveVerifier:

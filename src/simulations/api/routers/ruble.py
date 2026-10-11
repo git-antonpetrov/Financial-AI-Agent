@@ -1,5 +1,5 @@
 from decimal import Decimal
-from typing import Optional, List
+from typing import Optional, List, Union
 from datetime import datetime, timezone
 import os
 from fastapi import APIRouter, HTTPException, Depends, Request, Response
@@ -60,6 +60,8 @@ class ConditionUpdateRequest(BaseModel):
     oracle_name: Optional[str] = "default_oracle"
     reason: Optional[str] = None
     signature: Optional[str] = None
+    nonce: Optional[str] = None
+    timestamp: Optional[Union[float, int, str]] = None
 
 # --- Вспомогательные функции компенсации (Saga pattern) ---
 
@@ -432,18 +434,24 @@ async def update_contract_condition(
     if req.status not in ['fulfilled', 'failed']:
         raise HTTPException(400, "Неверный статус условия. Разрешены только 'fulfilled' или 'failed'")
 
-    # Криптографическая валидация подписи оракула
+    # Криптографическая валидация подписи оракула (SEC-08, SEC-14)
     if req.signature:
+        nonce = req.nonce or (request.headers.get("X-Nonce") if request else None)
+        timestamp = req.timestamp or (request.headers.get("X-Timestamp") if request else None)
         is_valid, sig_err = get_oracle_verifier().verify_condition_signature(
             contract_id=contract_id,
             status=req.status,
             oracle_name=req.oracle_name,
             signature_b64=req.signature,
+            nonce=nonce,
+            timestamp=timestamp,
         )
         if not is_valid:
             log_error("RubleAPI", f"Недействительная цифровая подпись оракула для контракта {contract_id}: {sig_err}")
+            if "Replay-атака" in sig_err or "уже был использован" in sig_err:
+                raise HTTPException(409, detail=sig_err)
             raise HTTPException(403, detail=f"Недействительная цифровая подпись оракула: {sig_err}")
-    elif os.getenv("REQUIRE_ORACLE_SIGNATURE", "false").lower() == "true":
+    elif os.getenv("REQUIRE_ORACLE_SIGNATURE", "true").lower() in ("true", "1", "yes"):
         raise HTTPException(401, detail="Требуется цифровая подпись оракула")
     
     async with ruble_db() as db:

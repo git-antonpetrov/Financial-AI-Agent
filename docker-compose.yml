@@ -9,14 +9,32 @@ services:
       - ROOT_CA_PASSPHRASE=${ROOT_CA_PASSPHRASE:-}
       - ROOT_CA_DATA_DIR=/data/ca
       - SHARED_CERTS_DIR=/shared_certs
+      - CA_PUBLIC_DIR=/export/ca_public
+      - ADMIN_CERTS_DIR=/export/admin_certs
+      - BANK_CERTS_DIR=/export/bank_certs
+      - ADMIN_CLIENT_CERTS_DIR=/export/admin_client_certs
+      - ISOLATE_ADMIN_CLIENT_KEY=true
       - FORCE_REGENERATE=${FORCE_REGENERATE:-false}
       - STRICT_SECURITY=true
     volumes:
       - root_ca_data:/data/ca
       - certs_data:/shared_certs
+      - ca_public:/export/ca_public
+      - admin_certs:/export/admin_certs
+      - bank_certs:/export/bank_certs
+      - admin_client_certs:/export/admin_client_certs
     networks:
       - pki_net
     restart: "no"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 256M
+          pids: 50
+    mem_limit: 256m
+    cpus: 1.0
+    pids_limit: 50
 
   postgres-db:
     image: postgres:15-alpine
@@ -36,6 +54,15 @@ services:
     networks:
       - data_net
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1024M
+          pids: 200
+    mem_limit: 1024m
+    cpus: 2.0
+    pids_limit: 200
 
   pgadmin:
     image: dpage/pgadmin4
@@ -45,7 +72,7 @@ services:
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
     volumes:
       - pgadmin_data:/var/lib/pgadmin
-      - certs_data:/certs:ro
+      - ca_public:/certs:ro
     depends_on:
       postgres-db:
         condition: service_started
@@ -54,6 +81,15 @@ services:
     networks:
       - data_net
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+          pids: 100
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 100
 
   simulations-seeder:
     profiles:
@@ -74,12 +110,21 @@ services:
       - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
       - SSL_CERT_FILE=/certs/ca.crt
     volumes:
-      - certs_data:/certs:ro
+      - ca_public:/certs:ro
     env_file:
       - .env
     networks:
       - simulation_net
       - data_net
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+          pids: 100
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 100
 
   bank-worker:
     build:
@@ -97,13 +142,22 @@ services:
       - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
       - SSL_CERT_FILE=/certs/ca.crt
     volumes:
-      - certs_data:/certs:ro
+      - bank_certs:/certs:ro
     env_file:
       - .env
     networks:
       - simulation_net
       - data_net
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+          pids: 100
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 100
 
   invest-worker:
     build:
@@ -121,13 +175,22 @@ services:
       - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
       - SSL_CERT_FILE=/certs/ca.crt
     volumes:
-      - certs_data:/certs:ro
+      - ca_public:/certs:ro
     env_file:
       - .env
     networks:
       - simulation_net
       - data_net
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+          pids: 100
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 100
 
   digital-worker:
     build:
@@ -145,13 +208,22 @@ services:
       - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
       - SSL_CERT_FILE=/certs/ca.crt
     volumes:
-      - certs_data:/certs:ro
+      - ca_public:/certs:ro
     env_file:
       - .env
     networks:
       - simulation_net
       - data_net
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+          pids: 100
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 100
 
   simulation-api:
     build:
@@ -171,13 +243,22 @@ services:
       - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
       - SSL_CERT_FILE=/certs/ca.crt
     volumes:
-      - certs_data:/certs:ro
+      - bank_certs:/certs:ro
     env_file:
       - .env
     networks:
       - simulation_net
       - data_net
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+          pids: 100
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 100
 
   minio:
     image: elestio/minio:latest
@@ -196,6 +277,15 @@ services:
     networks:
       - data_net
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+          pids: 150
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 150
     
   redis:
     image: redis:7-alpine
@@ -218,6 +308,15 @@ services:
     networks:
       - admin_backend_net
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+          pids: 100
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 100
 
   admin-server:
     build:
@@ -255,13 +354,22 @@ services:
       - REDIS_SSL_CA_CERTS=/certs/ca.crt
     volumes:
       - ./data:/app/data:ro
-      - certs_data:/certs:ro
+      - admin_certs:/certs:ro
     env_file:
       - .env
     networks:
       - admin_backend_net
       - data_net
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 1024M
+          pids: 150
+    mem_limit: 1024m
+    cpus: 1.5
+    pids_limit: 150
 
   chromadb:
     image: chromadb/chroma:1.5.9
@@ -275,6 +383,15 @@ services:
     networks:
       - data_net
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 1024M
+          pids: 150
+    mem_limit: 1024m
+    cpus: 1.5
+    pids_limit: 150
 
   vector-worker:
     build:
@@ -315,13 +432,22 @@ services:
       - REDIS_SSL_CA_CERTS=/certs/ca.crt
     volumes:
       - ./data:/app/data:ro
-      - certs_data:/certs:ro
+      - ca_public:/certs:ro
     env_file:
       - .env
     networks:
       - admin_backend_net
       - data_net
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+          pids: 100
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 100
 
   caddy:
     image: caddy:2-alpine
@@ -341,7 +467,7 @@ services:
       - ADMIN_LOCAL_DOMAIN=${ADMIN_LOCAL_DOMAIN:-admin.fin-ai-agent.local}
     volumes:
       - ./src/caddy/Caddyfile:/etc/caddy/Caddyfile
-      - certs_data:/etc/caddy/certs:ro
+      - ca_public:/etc/caddy/certs:ro
       - caddy_data:/data
       - caddy_config:/config
     networks:
@@ -357,6 +483,15 @@ services:
           - caddy-sim
           - simulation-api.internal
           - bank-service.internal
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 256M
+          pids: 100
+    mem_limit: 256m
+    cpus: 1.0
+    pids_limit: 100
 
 # -----------------------------------------------------------------------------
 # СЕТЕВАЯ МИКРОСЕГМЕНТАЦИЯ И БЕЗОПАСНОСТЬ (Defense-in-Depth / Zero-Trust)
@@ -389,6 +524,10 @@ networks:
 volumes:
   root_ca_data:
   certs_data:
+  ca_public:
+  admin_certs:
+  bank_certs:
+  admin_client_certs:
   postgres_data:
   pgadmin_data:
   caddy_data:

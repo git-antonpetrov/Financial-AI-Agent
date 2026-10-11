@@ -2,7 +2,9 @@ import uuid
 from datetime import date, datetime, timezone, timedelta
 from sqlalchemy import Column, String, Numeric, Boolean, Date, Time, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
+from decimal import Decimal
 from src.simulations.db.bank.db.database import Base
+from src.simulations.core.crypto.at_rest import EncryptedText, EncryptedDecimal
 
 def generate_uuid():
     return str(uuid.uuid4())
@@ -36,8 +38,8 @@ class Account(Base):
     __tablename__ = "accounts"
     id = Column(String, primary_key=True, default=generate_uuid)
     client_id = Column(String, nullable=False, index=True)
-    account_number = Column(String, unique=True, nullable=False)
-    balance = Column(Numeric(12, 2), default=0.00)
+    account_number = Column(EncryptedText(deterministic=True), unique=True, nullable=False)
+    balance = Column(EncryptedDecimal, default=Decimal("0.00"))
     currency = Column(String, default="RUB")
     tariff_id = Column(String, ForeignKey("tariffs.id"), nullable=False, index=True)
     status = Column(String, default="active", index=True)  # Возможные значения: active, closed
@@ -53,7 +55,7 @@ class Card(Base):
     __tablename__ = "cards"
     id = Column(String, primary_key=True, default=generate_uuid)
     account_id = Column(String, ForeignKey("accounts.id"), nullable=False, index=True)
-    card_number = Column(String, unique=True, nullable=False)
+    card_number = Column(EncryptedText(deterministic=True), unique=True, nullable=False)
     status = Column(String, default="active", index=True)  # Возможные значения: active, blocked, frozen
     created_at = Column(DateTime, default=get_moscow_now)
 
@@ -66,8 +68,8 @@ class Transaction(Base):
     account_id = Column(String, ForeignKey("accounts.id"), nullable=False, index=True)
     category = Column(String, nullable=False)  # Категория операции: 'income', 'expense'
     operation_type = Column(String, nullable=False)  # Тип: 'transfer_sbp', 'transfer_non_sbp', 'purchase', 'top_up', 'salary' и др.
-    amount = Column(Numeric(12, 2), nullable=False)
-    commission = Column(Numeric(12, 2), default=0.00)
+    amount = Column(EncryptedDecimal, nullable=False)
+    commission = Column(EncryptedDecimal, default=Decimal("0.00"))
     description = Column(String)
     status = Column(String, default="completed")  # Статус: 'completed', 'failed', 'pending'
     date = Column(Date, default=get_moscow_date, index=True)
@@ -80,13 +82,14 @@ class AutoPayment(Base):
     __tablename__ = "auto_payments"
     id = Column(String, primary_key=True, default=generate_uuid)
     account_id = Column(String, ForeignKey("accounts.id"), nullable=False, index=True)
-    amount = Column(Numeric(12, 2), nullable=False)
+    amount = Column(EncryptedDecimal, nullable=False)
     recipient = Column(String, nullable=False)
     schedule = Column(String, nullable=False)  # Периодичность: 'monthly', 'weekly'
     next_payment_date = Column(Date, nullable=False, index=True)
     is_active = Column(Boolean, default=True, index=True)
 
     account = relationship("Account", back_populates="auto_payments")
+
 
 
 

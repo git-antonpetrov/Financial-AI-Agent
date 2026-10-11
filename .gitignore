@@ -239,4 +239,8 @@ arch.txt
 
 # PKI Certificates and Private Keys (Strict Only-Docker Mode)
 certs/
-src/simulations/core/crypto/certs/
+src/simulations/core/crypto/certs/
+
+# Autonomous agent teamwork workspaces & temporary audit logs
+.agents/
+ORIGINAL_REQUEST.md

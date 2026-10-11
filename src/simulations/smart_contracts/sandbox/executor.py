@@ -19,12 +19,39 @@ class SecurityASTVisitor(ast.NodeVisitor):
     """
     FORBIDDEN_CALLS = {
         "eval", "exec", "open", "compile", "__import__",
-        "input", "breakpoint", "exit", "quit", "getattr", "setattr", "delattr", "globals", "locals"
+        "input", "breakpoint", "exit", "quit", "getattr", "setattr", "delattr", "globals", "locals",
+        "format", "format_map"
     }
 
     def __init__(self):
         super().__init__()
         self.has_execute_function = False
+
+    def visit_Module(self, node: ast.Module) -> None:
+        for stmt in node.body:
+            if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+                raise SandboxExecutionError("Импорт модулей категорически запрещен в смарт-контрактах")
+            if not isinstance(stmt, ast.FunctionDef):
+                raise SandboxExecutionError(
+                    f"На верхнем уровне смарт-контракта разрешены только определения функций (FunctionDef), обнаружен {type(stmt).__name__}"
+                )
+        self.generic_visit(node)
+
+    def visit_While(self, node: ast.While) -> None:
+        raise SandboxExecutionError("Использование циклов (while) категорически запрещено в смарт-контрактах")
+
+    def visit_For(self, node: ast.For) -> None:
+        raise SandboxExecutionError("Использование циклов (for) категорически запрещено в смарт-контрактах")
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+        raise SandboxExecutionError("Использование циклов (async for) категорически запрещено в смарт-контрактах")
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if isinstance(node.func, ast.Attribute) and node.func.attr in ("format", "format_map"):
+            raise SandboxExecutionError(
+                f"Вызов метода '{node.func.attr}' категорически запрещен в смарт-контрактах"
+            )
+        self.generic_visit(node)
 
     def visit_Import(self, node: ast.Import) -> None:
         raise SandboxExecutionError("Импорт модулей (import) категорически запрещен в смарт-контрактах")
@@ -62,6 +89,7 @@ class SecurityASTVisitor(ast.NodeVisitor):
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
         raise SandboxExecutionError("Асинхронные функции (async def) запрещены в смарт-контрактах")
+
 
 
 class SmartContractSandbox:
@@ -141,15 +169,8 @@ class SmartContractSandbox:
             }
             local_scope: Dict[str, Any] = {}
 
-            # 3. Компиляция и объявление
-            compiled_code = compile(code, filename="<smart_contract>", mode="exec")
-            exec(compiled_code, restricted_globals, local_scope)
-
-            execute_func = local_scope.get("execute")
-            if not callable(execute_func):
-                raise SandboxExecutionError("Объект 'execute' в смарт-контракте не является вызываемой функцией")
-
-            # 4. Мониторинг выполнения с лимитами ресурсов (инструкций и времени)
+            # 3. Мониторинг выполнения с лимитами ресурсов (инструкций и времени)
+            # В соответствии с SEC-04 сторожевой таймер устанавливается ДО вызова exec()!
             start_time = time.time()
             ops_count = 0
 
@@ -168,9 +189,18 @@ class SmartContractSandbox:
 
             sys.settrace(trace_limits)
             try:
+                # 4. Компиляция и объявление
+                compiled_code = compile(code, filename="<smart_contract>", mode="exec")
+                exec(compiled_code, restricted_globals, local_scope)
+
+                execute_func = local_scope.get("execute")
+                if not callable(execute_func):
+                    raise SandboxExecutionError("Объект 'execute' в смарт-контракте не является вызываемой функцией")
+
                 result = execute_func(ctx)
             finally:
                 sys.settrace(None)
+
 
             # Контракт завершен, если функция вернула True или был вызван ctx.complete()
             is_completed = bool(result) or ctx._is_completed

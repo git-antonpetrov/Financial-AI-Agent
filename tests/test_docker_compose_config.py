@@ -67,10 +67,17 @@ def test_docker_compose_zero_trust_in_transit_encryption():
     assert "certs_data:/certs:ro" in minio_svc.get("volumes", [])
     assert "--certs-dir /certs/minio" in minio_svc.get("command", "")
 
-    # 4. Клиентские сервисы
-    for s_name in ["admin-server", "vector-worker", "simulation-api", "bank-worker", "invest-worker", "digital-worker"]:
-        svc = services[s_name]
-        assert "certs_data:/certs:ro" in svc.get("volumes", []), f"{s_name} должен монтировать certs_data:/certs:ro"
+    # 4. Клиентские сервисы с изолированными томами PKI (SEC-02)
+    admin_vols = services["admin-server"].get("volumes", [])
+    assert any("admin_certs:/certs:ro" in v for v in admin_vols), "admin-server должен монтировать admin_certs:/certs:ro"
+
+    for s_name in ["simulation-api", "bank-worker"]:
+        svc_vols = services[s_name].get("volumes", [])
+        assert any("bank_certs:/certs:ro" in v for v in svc_vols), f"{s_name} должен монтировать bank_certs:/certs:ro"
+
+    for s_name in ["vector-worker", "invest-worker", "digital-worker"]:
+        svc_vols = services[s_name].get("volumes", [])
+        assert any("ca_public:/certs:ro" in v for v in svc_vols), f"{s_name} должен монтировать ca_public:/certs:ro"
 
 
 def test_docker_compose_root_ca_service_and_pki_network():
@@ -169,7 +176,10 @@ def test_docker_compose_caddy_and_volumes_configuration():
             assert "edge_net" not in s_nets, f"Сервис {s_name} не должен быть в публичной edge_net"
 
     vols = compose_data.get("volumes", {})
-    for vol in ["root_ca_data", "postgres_data", "redis_data", "chroma_data", "minio_data", "caddy_data", "caddy_config"]:
+    for vol in [
+        "root_ca_data", "postgres_data", "redis_data", "chroma_data", "minio_data",
+        "caddy_data", "caddy_config", "ca_public", "admin_certs", "bank_certs"
+    ]:
         assert vol in vols, f"Том {vol} должен быть объявлен в volumes"
 
 
@@ -220,7 +230,7 @@ def test_docker_compose_root_ca_race_condition_protection():
 
 
 def test_env_example_pki_and_mtls_variables():
-    """Проверяет наличие параметров центрального Root CA и mTLS в .env.example."""
+    """Проверяет наличие параметров центрального Root CA, mTLS, 2FA и нейтрального шлюза в .env.example."""
     env_example_path = Path(__file__).parent.parent / ".env.example"
     assert env_example_path.exists()
 
@@ -232,5 +242,56 @@ def test_env_example_pki_and_mtls_variables():
     assert "ADMIN_DOMAIN=" in env_content
     assert "ADMIN_LOCAL_DOMAIN=" in env_content
     assert "CADDY_CLIENT_AUTH_MODE=require_and_verify" in env_content
+    assert "REQUIRE_MTLS=true" in env_content
+    assert "REQUIRE_2FA=true" in env_content
+    assert "your-worker-subdomain.workers.dev" in env_content
+    assert "est-jennyrobertson.workers.dev" not in env_content
+
+
+def test_docker_compose_admin_client_key_isolation():
+    """
+    SEC-02: Проверяет, что закрытый ключ супер-администратора (admin_client.key)
+    НЕ монтируется в прикладные сервисы платформы.
+    Сервисы simulation-api, workers, seeder получают только ca.crt или свои сервисные сертификаты.
+    """
+    compose_path = Path(__file__).parent.parent / "docker-compose.yml"
+    with open(compose_path, "r", encoding="utf-8") as f:
+        compose_data = yaml.safe_load(f)
+
+    services = compose_data["services"]
+    app_services = [
+        "simulation-api", "bank-worker", "invest-worker", "digital-worker",
+        "simulations-seeder", "admin-server", "vector-worker", "caddy"
+    ]
+    for s_name in app_services:
+        vols = services[s_name].get("volumes", [])
+        for v in vols:
+            assert "admin_client_certs" not in v, f"Сервис {s_name} не должен монтировать закрытый ключ администратора!"
+            assert "certs_data:/certs:ro" not in v, f"Сервис {s_name} не должен монтировать общий неразделенный том certs_data!"
+
+
+def test_docker_compose_resource_limits_sec22():
+    """
+    SEC-22: Проверяет наличие лимитов ресурсов (mem_limit, cpus, pids_limit или deploy.resources.limits)
+    для всех объявленных сервисов.
+    """
+    compose_path = Path(__file__).parent.parent / "docker-compose.yml"
+    with open(compose_path, "r", encoding="utf-8") as f:
+        compose_data = yaml.safe_load(f)
+
+    services = compose_data["services"]
+    for s_name, s_conf in services.items():
+        has_direct_limits = "mem_limit" in s_conf and "cpus" in s_conf
+        has_deploy_limits = False
+        deploy = s_conf.get("deploy", {})
+        if isinstance(deploy, dict):
+            limits = deploy.get("resources", {}).get("limits", {})
+            if "memory" in limits and "cpus" in limits:
+                has_deploy_limits = True
+
+        assert has_direct_limits or has_deploy_limits, (
+            f"Сервис {s_name} должен иметь настроенные лимиты ресурсов (mem_limit, cpus или deploy.resources.limits)!"
+        )
+
 
 
