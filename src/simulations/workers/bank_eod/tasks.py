@@ -34,8 +34,8 @@ async def process_auto_payments(session, current_date):
 
     processed = 0
     for ap in autopayments:
-        # Получаем счет
-        account = await session.get(Account, ap.account_id)
+        # Получаем счет с пессимистической блокировкой строки во избежание гонок
+        account = await session.get(Account, ap.account_id, with_for_update=True)
         if not account or account.status != "active":
             continue
 
@@ -95,7 +95,10 @@ async def process_tariff_fees(session, current_date):
     log_info("Bank EOD", f"Списание абонентской платы по тарифам на {current_date}...")
 
     result = await session.execute(
-        select(Account).options(selectinload(Account.tariff)).where(Account.status == "active")
+        select(Account)
+        .options(selectinload(Account.tariff))
+        .where(Account.status == "active")
+        .with_for_update(of=Account)
     )
     accounts = result.scalars().all()
 
@@ -144,7 +147,7 @@ async def process_salaries(session, current_date):
 
     log_info("Bank EOD", f"Генерация зарплат на {current_date}...")
 
-    result = await session.execute(select(Account).where(Account.status == "active"))
+    result = await session.execute(select(Account).where(Account.status == "active").with_for_update())
     accounts = result.scalars().all()
 
     # Чтобы не начислять зп на все 3 счета одного клиента, будем вести учет, кому уже начислили

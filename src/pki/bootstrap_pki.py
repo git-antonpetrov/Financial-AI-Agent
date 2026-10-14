@@ -307,11 +307,12 @@ def bootstrap_pki(
             target_f = export_path / f_to_remove
             if target_f.exists():
                 target_f.unlink()
-        if admin_client_dir.exists():
-            shutil.rmtree(admin_client_dir, ignore_errors=True)
+        dedicated_client_dir = os.getenv("ADMIN_CLIENT_CERTS_DIR")
+        if dedicated_client_dir and Path(dedicated_client_dir).resolve() != admin_client_dir.resolve():
+            if admin_client_dir.exists():
+                shutil.rmtree(admin_client_dir, ignore_errors=True)
         print(
-            "[+] SEC-02: Закрытый ключ admin_client.key и каталог admin_client_certs "
-            "успешно изолированы от общего тома certs_data."
+            "[+] SEC-02: Закрытый ключ admin_client.key успешно изолирован от общего тома certs_data."
         )
 
     print("\n[✓] Инициализация PKI успешно завершена. Все сервисы обеспечены доверенными сертификатами.")

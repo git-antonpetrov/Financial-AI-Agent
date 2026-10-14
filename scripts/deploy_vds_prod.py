@@ -7,7 +7,6 @@
 - Контроль запуска и проверка здоровья (Healthcheck).
 """
 
-import os
 import sys
 import time
 import shutil
@@ -27,7 +26,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from setup_vds_security_env import setup_vds
+from setup_vds_security_env import setup_vds  # noqa: E402
 
 
 def find_docker_compose_cmd() -> list[str]:
@@ -155,7 +154,10 @@ def run_deployment(skip_build: bool = False, no_docker: bool = False, timeout: i
     if all_running:
         print("[+] Все ключевые сервисы запущены и функционируют!")
     else:
-        print(f"[!] Предупреждение: таймаут ожидания готовности сервисов ({timeout}с). Проверьте 'docker compose logs'.")
+        print(
+            f"[!] Предупреждение: таймаут ожидания готовности сервисов ({timeout}с). "
+            "Проверьте 'docker compose logs'."
+        )
 
     print("\n" + "=" * 78)
     print("    БОЕВОЕ РАЗВЕРТЫВАНИЕ ЗАВЕРШЕНО (ZERO-TRUST ONLY-DOCKER ACTIVE)")
@@ -173,7 +175,11 @@ def run_deployment(skip_build: bool = False, no_docker: bool = False, timeout: i
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Zero-Trust VDS Production Deployment Orchestrator")
     parser.add_argument("--skip-build", action="store_true", help="Пропустить сборку Docker образов")
-    parser.add_argument("--no-docker", action="store_true", help="Только настроить окружение и сертификаты без запуска Docker")
+    parser.add_argument(
+        "--no-docker",
+        action="store_true",
+        help="Только настроить окружение и сертификаты без запуска Docker",
+    )
     parser.add_argument("--timeout", type=int, default=90, help="Таймаут проверки контейнеров в секундах")
 
     args = parser.parse_args()

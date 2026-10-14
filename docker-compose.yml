@@ -50,7 +50,14 @@ services:
       sh -c "mkdir -p /tmp/pg_certs && cp /certs/postgres.key /tmp/pg_certs/postgres.key && chmod 600 /tmp/pg_certs/postgres.key && chown postgres:postgres /tmp/pg_certs/postgres.key && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/certs/postgres.crt -c ssl_key_file=/tmp/pg_certs/postgres.key -c ssl_ca_file=/certs/ca.crt"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./src/simulations/db/init_databases.sql:/docker-entrypoint-initdb.d/init_databases.sql:ro
       - certs_data:/certs:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     networks:
       - data_net
     restart: unless-stopped
@@ -75,7 +82,7 @@ services:
       - ca_public:/certs:ro
     depends_on:
       postgres-db:
-        condition: service_started
+        condition: service_healthy
       root-ca:
         condition: service_completed_successfully
     networks:
@@ -100,7 +107,7 @@ services:
     container_name: simulations-seeder
     depends_on:
       postgres-db:
-        condition: service_started
+        condition: service_healthy
       root-ca:
         condition: service_completed_successfully
     environment:
@@ -133,7 +140,7 @@ services:
     container_name: bank-worker
     depends_on:
       postgres-db:
-        condition: service_started
+        condition: service_healthy
       root-ca:
         condition: service_completed_successfully
     environment:
@@ -166,7 +173,7 @@ services:
     container_name: invest-worker
     depends_on:
       postgres-db:
-        condition: service_started
+        condition: service_healthy
       root-ca:
         condition: service_completed_successfully
     environment:
@@ -199,7 +206,7 @@ services:
     container_name: digital-worker
     depends_on:
       postgres-db:
-        condition: service_started
+        condition: service_healthy
       root-ca:
         condition: service_completed_successfully
     environment:
@@ -232,7 +239,7 @@ services:
     container_name: simulation-api
     depends_on:
       postgres-db:
-        condition: service_started
+        condition: service_healthy
       root-ca:
         condition: service_completed_successfully
     environment:
@@ -276,6 +283,12 @@ services:
     command: server /data --certs-dir /certs/minio --console-address ":9001"
     networks:
       - data_net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -k -f https://localhost:9000/minio/health/live || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     restart: unless-stopped
     deploy:
       resources:
@@ -305,6 +318,12 @@ services:
     volumes:
       - redis_data:/data
       - certs_data:/certs:ro
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --tls --cacert /certs/ca.crt -a $$REDIS_PASSWORD ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
     networks:
       - admin_backend_net
     restart: unless-stopped
@@ -327,11 +346,11 @@ services:
       root-ca:
         condition: service_completed_successfully
       postgres-db:
-        condition: service_started
+        condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
       minio:
-        condition: service_started
+        condition: service_healthy
     environment:
       - STRICT_SECURITY=true
       - MINIO_URL=minio:9000
@@ -402,13 +421,13 @@ services:
       root-ca:
         condition: service_completed_successfully
       redis:
-        condition: service_started
+        condition: service_healthy
       minio:
-        condition: service_started
+        condition: service_healthy
       chromadb:
         condition: service_started
       postgres-db:
-        condition: service_started
+        condition: service_healthy
     environment:
       - STRICT_SECURITY=true
       - REDIS_HOST=redis
@@ -478,11 +497,14 @@ services:
         aliases:
           - caddy-backend
           - admin-server.internal
+          - simulation-api.internal
+          - bank-service.internal
       simulation_net:
         aliases:
           - caddy-sim
           - simulation-api.internal
           - bank-service.internal
+          - admin-server.internal
     deploy:
       resources:
         limits:

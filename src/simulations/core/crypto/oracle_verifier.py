@@ -196,34 +196,17 @@ class OracleVerifier:
 
         try:
             public_key = self.key_manager.load_public_key()
-            # 1. Попытка верификации с nonce и timestamp
             payload = self.get_canonical_payload(contract_id, status, oracle_name, nonce=nonce, timestamp=timestamp)
-            try:
-                public_key.verify(
-                    sig_bytes,
-                    payload,
-                    padding.PSS(
-                        mgf=padding.MGF1(hashes.SHA256()),
-                        salt_length=padding.PSS.MAX_LENGTH,
-                    ),
-                    hashes.SHA256(),
-                )
-                return True, "Подпись оракула валидна"
-            except InvalidSignature:
-                # 2. Резервная проверка с legacy payload без nonce/timestamp (обратная совместимость)
-                if nonce is not None or timestamp is not None:
-                    legacy_payload = self.get_canonical_payload(contract_id, status, oracle_name, None, None)
-                    public_key.verify(
-                        sig_bytes,
-                        legacy_payload,
-                        padding.PSS(
-                            mgf=padding.MGF1(hashes.SHA256()),
-                            salt_length=padding.PSS.MAX_LENGTH,
-                        ),
-                        hashes.SHA256(),
-                    )
-                    return True, "Подпись оракула валидна (legacy payload)"
-                raise
+            public_key.verify(
+                sig_bytes,
+                payload,
+                padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.MAX_LENGTH,
+                ),
+                hashes.SHA256(),
+            )
+            return True, "Подпись оракула валидна"
         except InvalidSignature:
             return False, "Цифровая подпись оракула недействительна"
         except Exception as e:

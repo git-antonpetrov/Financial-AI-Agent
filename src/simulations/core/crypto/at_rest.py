@@ -27,7 +27,9 @@ def resolve_encryption_key(key: bytes | str | None = None) -> bytes:
     """
     raw_key = key or os.getenv("DATA_ENCRYPTION_KEY") or os.getenv("ENCRYPTION_KEY")
     if not raw_key:
-        raw_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        raise RuntimeError(
+            "DATA_ENCRYPTION_KEY должен быть задан в окружении для шифрования Data at Rest."
+        )
 
     if isinstance(raw_key, (bytes, bytearray)):
         if len(raw_key) != 32:
@@ -179,11 +181,9 @@ class EncryptedText(TypeDecorator):
         if value is None:
             return None
         val_str = str(value)
-        try:
+        if val_str.startswith("RU5DMS"):
             return decrypt_text_at_rest(val_str)
-        except Exception:
-            # Обратная совместимость с не зашифрованными данными
-            return val_str
+        return val_str
 
 
 class EncryptedDecimal(TypeDecorator):
@@ -210,11 +210,10 @@ class EncryptedDecimal(TypeDecorator):
         if value is None:
             return None
         val_str = str(value)
-        try:
+        if val_str.startswith("RU5DMS"):
             decrypted = decrypt_text_at_rest(val_str)
             return Decimal(decrypted)
+        try:
+            return Decimal(val_str)
         except Exception:
-            try:
-                return Decimal(val_str)
-            except Exception:
-                return None
+            return None

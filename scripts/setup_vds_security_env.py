@@ -14,7 +14,6 @@ import sys
 import base64
 import secrets
 import subprocess
-from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -238,7 +237,7 @@ def setup_vds(project_dir: str | None = None) -> dict[str, str]:
     if initial_admin_password:
         print("=" * 70)
         print(" [!] ВНИМАНИЕ: Сгенерирован первичный пароль супер-администратора:")
-        print(f"     Логин:  admin")
+        print("     Логин:  admin")
         print(f"     Пароль: {initial_admin_password}")
         print("     ОБЯЗАТЕЛЬНО сохраните эти учетные данные!")
         print("=" * 70)
@@ -248,4 +247,3 @@ def setup_vds(project_dir: str | None = None) -> dict[str, str]:
 
 if __name__ == "__main__":
     setup_vds()
-

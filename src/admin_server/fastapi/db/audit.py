@@ -155,9 +155,6 @@ async def log_audit_event(
         if inspect.isawaitable(refresh_res):
             await refresh_res
     except Exception as e:
-        if "MagicMock" in str(e):
-            log_warning("Audit", f"Mock session detected in unit tests: {e}")
-            return audit_entry
         log_error("Audit", f"Критический сбой сохранения записи аудита: {e}")
         try:
             rb_res = db.rollback()

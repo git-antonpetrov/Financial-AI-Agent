@@ -331,6 +331,7 @@ async def submit_rag_document(
     client_orig_hash = doc_req.metadata.get("file_hash")
     client_orig_filename = doc_req.metadata.get("filename")
 
+    doc_record = None
     try:
         doc_record = await crud.update_checking_to_processing(
             db=db,
@@ -345,6 +346,10 @@ async def submit_rag_document(
         )
     except Exception as e:
         log_error("RAG Database", f"Ошибка сохранения/обновления документа в БД: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error while saving document state: {e}",
+        )
 
     # 5. Загрузка в MinIO (с SSE при включении)
     minio_client, _ = _get_external_services()

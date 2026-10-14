@@ -183,7 +183,7 @@ while true; do
                 "redis")
                     STATUS=$($DOCKER_BIN inspect --format='{{.State.Status}}' "redis-server" 2>/dev/null || echo "not_found")
                     ;;
-                "caddy-ingress")
+                "caddy-server")
                     STATUS=$($DOCKER_BIN inspect --format='{{.State.Status}}' "caddy-server" 2>/dev/null || echo "not_found")
                     ;;
             esac
@@ -194,8 +194,8 @@ while true; do
     done
 
     if [[ $RUNNING_COUNT -eq ${#CRITICAL_SERVICES[@]} ]]; then
-        # Проверяем health endpoint Admin Server через локальный порт
-        if curl -skf "http://127.0.0.1:8001/health" &> /dev/null || curl -skf "http://127.0.0.1:8000/health" &> /dev/null || curl -skf "https://127.0.0.1/health" &> /dev/null; then
+        # Проверяем health endpoint через защищенный Caddy Ingress (Host Process Isolation)
+        if curl -skf "https://127.0.0.1/health" &> /dev/null || curl -skf "http://127.0.0.1/health" &> /dev/null; then
             ALL_READY=true
             break
         fi
@@ -221,12 +221,10 @@ echo "    БОЕВОЕ РАЗВЕРТЫВАНИЕ УСПЕШНО ЗАВЕРШЕ�
 echo "=============================================================================="
 echo -e "${COLOR_RESET}"
 
-echo -e "Доступные точки подключения:"
+echo -e "Точки подключения (Host Process Isolation — открыты только 80/443 Caddy):"
 echo -e "  • Публичный Ingress (Caddy Edge):        ${COLOR_CYAN}https://admin.fin-ai-agent.ru${COLOR_RESET} (или https://<IP_СЕРВЕРА>)"
 echo -e "  • Документация API Admin Server:         ${COLOR_CYAN}https://admin.fin-ai-agent.ru/docs${COLOR_RESET}"
-echo -e "  • Внутренний API симуляций:             ${COLOR_CYAN}http://127.0.0.1:8002${COLOR_RESET} (доступен локально/через SSH туннель)"
-echo -e "  • S3 Объектное хранилище (MinIO):        ${COLOR_CYAN}https://127.0.0.1:9001${COLOR_RESET} (HTTPS с внутренним сертификатом)"
-echo -e "  • База данных pgAdmin4:                 ${COLOR_CYAN}http://127.0.0.1:5050${COLOR_RESET}"
+echo -e "  • Внутренние сервисы (DB, Redis, MinIO): ${COLOR_CYAN}Изолированы в Docker подсетях data_net / admin_backend_net${COLOR_RESET}"
 echo ""
 echo -e "Статус безопасности контура:"
 echo -e "  [✓] Zero-Trust Root CA & PKI:            Изолирован в Docker Volume certs_data / root_ca_data"
@@ -240,7 +238,7 @@ echo -e "Следующие рекомендуемые действия:"
 echo -e "  1. Настройте двухфакторную аутентификацию (2FA TOTP):"
 echo -e "     ${COLOR_YELLOW}$PYTHON_CMD scripts/setup_2fa.py${COLOR_RESET}"
 echo -e "  2. Для принудительного включения mTLS переключите в .env:"
-echo -e "     ${COLOR_YELLOW}REQUIRE_MTLS=true${COLOR_RESET} и ${COLOR_YELLOW}CADDY_CLIENT_AUTH_MODE=require${COLOR_RESET}"
+echo -e "     ${COLOR_YELLOW}REQUIRE_MTLS=true${COLOR_RESET} и ${COLOR_YELLOW}CADDY_CLIENT_AUTH_MODE=require_and_verify${COLOR_RESET}"
 echo -e "  3. Просмотр журналов работы в реальном времени:"
-echo -e "     ${COLOR_YELLOW}$DOCKER_COMPOSE_CMD logs -f admin-server caddy-ingress${COLOR_RESET}"
+echo -e "     ${COLOR_YELLOW}$DOCKER_COMPOSE_CMD logs -f admin-server caddy${COLOR_RESET}"
 echo "=============================================================================="

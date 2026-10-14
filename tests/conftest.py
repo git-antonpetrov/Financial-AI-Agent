@@ -248,3 +248,113 @@ def setup_test_crypto_environment():
         pass
     yield
 
+
+@pytest.fixture(autouse=True)
+def setup_test_fastapi_db():
+    """Обеспечивает валидную асинхронную сессию БД для тестов эндпоинтов FastAPI."""
+    import sys
+    from pathlib import Path
+    from unittest.mock import MagicMock
+    repo_root = Path(__file__).resolve().parent.parent
+    p1 = str(repo_root / "src" / "admin_server")
+    p2 = str(repo_root / "src" / "admin_server" / "fastapi")
+    if p1 not in sys.path:
+        sys.path.insert(0, p1)
+    if p2 not in sys.path:
+        sys.path.insert(0, p2)
+
+    apps = []
+    overridden_deps = []
+    try:
+        try:
+            import server
+            if hasattr(server, "app") and server.app not in apps:
+                apps.append(server.app)
+        except Exception:
+            pass
+        try:
+            from src.admin_server.fastapi import server as srv_pkg
+            if hasattr(srv_pkg, "app") and srv_pkg.app not in apps:
+                apps.append(srv_pkg.app)
+        except Exception:
+            pass
+
+        all_get_dbs = set()
+        for mod_name in [
+            "db.database",
+            "src.admin_server.fastapi.db.database",
+            "server",
+            "src.admin_server.fastapi.server",
+            "routers.rag_documents",
+            "src.admin_server.fastapi.routers.rag_documents",
+        ]:
+            try:
+                mod = sys.modules.get(mod_name)
+                if mod is None:
+                    __import__(mod_name)
+                    mod = sys.modules.get(mod_name)
+                if mod and hasattr(mod, "get_db"):
+                    all_get_dbs.add(getattr(mod, "get_db"))
+            except Exception:
+                pass
+
+        class InMemoryTestSession:
+            def __init__(self):
+                self.logs = []
+
+            def get_bind(self):
+                return None
+
+            def add(self, obj):
+                if not hasattr(obj, "id") or obj.id is None:
+                    obj.id = len(self.logs) + 1
+                self.logs.append(obj)
+
+            async def commit(self):
+                pass
+
+            async def refresh(self, obj):
+                pass
+
+            async def rollback(self):
+                pass
+
+            async def delete(self, obj):
+                if obj in self.logs:
+                    self.logs.remove(obj)
+
+            async def execute(self, q, *args, **kwargs):
+                m = MagicMock()
+                m.scalar_one_or_none.return_value = None
+                m.scalars.return_value.first.return_value = self.logs[-1] if self.logs else None
+                m.scalars.return_value.all.return_value = self.logs
+                return m
+
+        test_sess = InMemoryTestSession()
+
+        def _override_routes(target_app, routes):
+            for route in routes:
+                if hasattr(route, "dependant") and hasattr(route.dependant, "dependencies"):
+                    for dep in route.dependant.dependencies:
+                        if getattr(dep.call, "__name__", "") == "get_db":
+                            target_app.dependency_overrides[dep.call] = lambda: test_sess
+                            overridden_deps.append((target_app, dep.call))
+                            all_get_dbs.add(dep.call)
+                if hasattr(route, "routes"):
+                    _override_routes(target_app, route.routes)
+
+        for target_app in apps:
+            _override_routes(target_app, target_app.routes)
+            for gdb in all_get_dbs:
+                target_app.dependency_overrides[gdb] = lambda: test_sess
+                overridden_deps.append((target_app, gdb))
+
+    except Exception:
+        pass
+    yield
+    try:
+        for target_app, dep in overridden_deps:
+            target_app.dependency_overrides.pop(dep, None)
+    except Exception:
+        pass
+

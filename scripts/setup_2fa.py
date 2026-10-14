@@ -3,7 +3,8 @@
 Скрипт первоначальной настройки и привязки двухфакторной аутентификации 2FA (RFC 6238 TOTP).
 Позволяет:
 - Сгенерировать новый секретный ключ или отобразить QR-код для уже настроенного ключа из .env;
-- Вывести QR-код прямо в терминал для сканирования мобильным приложением (Google Authenticator, Apple Passwords, YubiKey);
+- Вывести QR-код прямо в терминал для сканирования мобильным приложением (Google Authenticator,
+  Apple Passwords, YubiKey);
 - Сохранить автономный HTML-файл с векторным SVG QR-кодом для открытия в браузере;
 - В интерактивном режиме проверить 6-значный код из аутентификатора;
 - Автоматически сохранить или обновить переменную ADMIN_TOTP_SECRET в .env.
@@ -37,7 +38,6 @@ try:
         get_totp_uri,
         verify_totp_code,
         generate_qr_svg,
-        settings,
     )
 except ImportError:
     # Автономный fallback при запуске вне окружения проекта
@@ -48,10 +48,16 @@ except ImportError:
         import urllib.parse
         enc_issuer = urllib.parse.quote(issuer)
         enc_user = urllib.parse.quote(username)
-        return f"otpauth://totp/{enc_issuer}:{enc_user}?secret={secret}&issuer={enc_issuer}&algorithm=SHA1&digits=6&period=30"
+        return (
+            f"otpauth://totp/{enc_issuer}:{enc_user}?secret={secret}"
+            f"&issuer={enc_issuer}&algorithm=SHA1&digits=6&period=30"
+        )
 
     def verify_totp_code(secret: str, code: str, window: int = 1) -> bool:
-        import time, hmac, hashlib, struct
+        import time
+        import hmac
+        import hashlib
+        import struct
         code = (code or "").strip()
         if len(code) != 6 or not code.isdigit():
             return False
@@ -70,7 +76,8 @@ except ImportError:
 
     def generate_qr_svg(uri: str) -> str:
         try:
-            import qrcode, qrcode.image.svg
+            import qrcode
+            import qrcode.image.svg
             img = qrcode.make(uri, image_factory=qrcode.image.svg.SvgPathImage)
             s = io.BytesIO()
             img.save(s)
@@ -185,7 +192,8 @@ def save_html_qr(uri: str, secret: str, output_path: str = "admin_2fa_qr.html"):
 <body>
     <div class="card">
         <h1>Двухфакторная аутентификация</h1>
-        <p>Отсканируйте QR-код в приложении аутентификатора (Google Authenticator, Apple Passwords, YubiKey, 1Password).</p>
+        <p>Отсканируйте QR-код в приложении аутентификатора
+           (Google Authenticator, Apple Passwords, YubiKey, 1Password).</p>
         <div class="qr-box">
             {svg_data}
         </div>
@@ -271,7 +279,7 @@ def main():
         secret = generate_totp_secret()
         print("[*] Сгенерирован новый 160-битный TOTP секрет.")
     else:
-        print(f"[*] Обнаружен настроенный секрет в конфигурации (.env).")
+        print("[*] Обнаружен настроенный секрет в конфигурации (.env).")
         secret = env_secret
 
     uri = get_totp_uri(secret, username="admin", issuer="Financial-AI-Agent")
@@ -289,7 +297,7 @@ def main():
     print(f"   --> {uri}")
 
     html_file = save_html_qr(uri, secret, os.path.join(project_root, args.html))
-    print(f"\n4. Создан HTML-файл с QR-кодом для открытия в браузере:")
+    print("\n4. Создан HTML-файл с QR-кодом для открытия в браузере:")
     print(f"   --> {html_file}")
 
     print("\n" + "-" * 60)
@@ -297,7 +305,8 @@ def main():
     # Интерактивная проверка
     if sys.stdin.isatty():
         try:
-            user_code = input("Введите 6-значный код из аутентификатора для проверки (или Enter для пропуска): ").strip()
+            prompt_msg = "Введите 6-значный код из аутентификатора для проверки (или Enter для пропуска): "
+            user_code = input(prompt_msg).strip()
             if user_code:
                 if verify_totp_code(secret, user_code):
                     print("\n[+] УСПЕХ: 6-значный код подтвержден! Аутентификатор настроен корректно.")

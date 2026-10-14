@@ -1601,9 +1601,10 @@ def record_admin_nonce_if_new(nonce: str, ttl_seconds: int = 300, redis_conn=Non
         try:
             key = f"admin:nonce:{nonce}"
             success = client.set(key, "1", ex=ttl_seconds, nx=True)
-            if type(success).__name__ in ("MagicMock", "Mock", "NonCallableMagicMock"):
-                raise NotImplementedError("Mocked redis set returned MagicMock")
-            return bool(success in (True, 1, "OK", b"OK"))
+            if success in (True, 1, "OK", b"OK"):
+                return True
+            if success in (False, None):
+                return False
         except Exception as e:
             log_warning(
                 "ReplayProtection",

@@ -30,10 +30,10 @@ async def create_document(
     filename: str,
     agent_name: str,
     status: str,
-    system_name: str = None,
-    short_name: str = None,
-    message: str = None,
-    raw_content: str = None,
+    system_name: str | None = None,
+    short_name: str | None = None,
+    message: str | None = None,
+    raw_content: str | None = None,
 ) -> models.Document:
     """Создает новую запись о документе в базе данных."""
     doc = models.Document(
@@ -203,9 +203,9 @@ async def mark_document_error(
     file_hash: str,
     filename: str,
     agent_name: str,
-    system_name: str = None,
-    short_name: str = None,
-    error_message: str = None,
+    system_name: str | None = None,
+    short_name: str | None = None,
+    error_message: str | None = None,
 ) -> models.Document:
     """
     Переводит существующую запись в статусе checking/processing в статус error

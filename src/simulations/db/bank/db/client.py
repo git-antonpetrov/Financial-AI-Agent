@@ -32,19 +32,20 @@ def get_async_session_maker():
     return async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False, autoflush=False)
 
 
-async def init_db():
+async def init_db(reset: bool = False):
     """
-    Создает все таблицы в базе данных bank_db. (Для симуляции)
-    Для симуляции мы каждый раз пересоздаем таблицы для чистоты эксперимента.
+    Создает таблицы в базе данных bank_db.
+    Удаление существующих таблиц выполняется только при явном флаге reset=True
+    или переменной окружения DROP_EXISTING_TABLES=true.
     """
-    log_warning("Database", "Внимание: Выполняется удаление всех таблиц базы данных!")
+    should_drop = reset or os.getenv("DROP_EXISTING_TABLES", "false").lower() in ("true", "1")
     engine = get_async_engine()
     try:
         async with engine.begin() as conn:
-            # Импортируем модели локально, чтобы Base.metadata узнала о них до создания таблиц
-
-            await conn.run_sync(Base.metadata.drop_all)
+            if should_drop:
+                log_warning("Database", "Внимание: Выполняется пересоздание всех таблиц базы данных!")
+                await conn.run_sync(Base.metadata.drop_all)
             await conn.run_sync(Base.metadata.create_all)
-        log_info("Bank DB", "Таблицы успешно созданы.")
+        log_info("Bank DB", "Таблицы успешно инициализированы.")
     except Exception as e:
         log_error("Bank DB", f"Ошибка инициализации БД: {e}")
