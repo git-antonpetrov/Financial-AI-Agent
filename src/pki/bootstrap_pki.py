@@ -92,6 +92,21 @@ def bootstrap_pki(
 
     # Спецификация сертификатов узлов платформы
     specs = [
+        # 0. Промежуточный УЦ анклава (Enclave Intermediate CA - 3-уровневая иерархия X.509)
+        {
+            "name": "enclave-ca",
+            "cert_filename": "enclave_ca.crt",
+            "key_filename": "enclave_ca.key",
+            "cn": "enclave-intermediate-ca",
+            "role": "Enclave Intermediate CA",
+            "san_dns": ["enclave-ca.internal", "localhost"],
+            "san_ip": ["127.0.0.1"],
+            "is_server": True,
+            "is_client": True,
+            "is_ca": True,
+            "key_size": 4096,
+            "validity_days": 90,
+        },
         # 1. Банковский шлюз (Simulation API)
         {
             "name": "bank",
@@ -212,9 +227,10 @@ def bootstrap_pki(
             san_dns_names=spec.get("san_dns"),
             san_ip_addresses=spec.get("san_ip"),
             validity_days=spec["validity_days"],
-            key_size=2048,
+            key_size=spec.get("key_size", 2048),
             is_server=spec["is_server"],
             is_client=spec["is_client"],
+            is_ca=spec.get("is_ca", False),
         )
 
         issuer.save_cert_and_key(cert, key, cert_file, key_file)

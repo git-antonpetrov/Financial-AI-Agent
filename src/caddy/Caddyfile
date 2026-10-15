@@ -33,6 +33,12 @@
     # Проксирование запросов к FastAPI Admin Server с mTLS-заголовками и таймаутами для LLM
     reverse_proxy admin-server:8000 {
         header_up -X-Client-Cert-*
+        header_up -X-Client-Cert-Verify
+        header_up -X-Client-Cert-Subject
+        header_up -X-Client-Cert-Issuer
+        header_up -X-Client-Cert-Serial
+        header_up -X-Client-Cert-Fingerprint
+        header_up -X-Client-Cert-Pem
         header_up Host {host}
         header_up X-Real-IP {remote_host}
         header_up X-Forwarded-For {remote_host}
@@ -42,6 +48,7 @@
         header_up X-Client-Cert-Issuer {tls_client_issuer}
         header_up X-Client-Cert-Serial {tls_client_serial}
         header_up X-Client-Cert-Fingerprint {tls_client_fingerprint}
+        header_up X-Client-Cert-Pem {http.request.tls.client.certificate_pem}
 
         transport http {
             response_header_timeout 180s
@@ -63,7 +70,11 @@ simulation-api.internal, bank-service.internal {
     }
 
     reverse_proxy simulation-api:8002 {
-        header_up -X-Client-Cert-*
+        header_up -X-Client-Cert-Verify
+        header_up -X-Client-Cert-Subject
+        header_up -X-Client-Cert-Issuer
+        header_up -X-Client-Cert-Serial
+        header_up -X-Client-Cert-Fingerprint
         header_up Host {host}
         header_up X-Real-IP {remote_host}
         header_up X-Forwarded-For {remote_host}
@@ -95,6 +106,12 @@ admin-server.internal {
 
     reverse_proxy admin-server:8000 {
         header_up -X-Client-Cert-*
+        header_up -X-Client-Cert-Verify
+        header_up -X-Client-Cert-Subject
+        header_up -X-Client-Cert-Issuer
+        header_up -X-Client-Cert-Serial
+        header_up -X-Client-Cert-Fingerprint
+        header_up -X-Client-Cert-Pem
         header_up Host {host}
         header_up X-Real-IP {remote_host}
         header_up X-Forwarded-For {remote_host}
@@ -104,12 +121,23 @@ admin-server.internal {
         header_up X-Client-Cert-Issuer {tls_client_issuer}
         header_up X-Client-Cert-Serial {tls_client_serial}
         header_up X-Client-Cert-Fingerprint {tls_client_fingerprint}
+        header_up X-Client-Cert-Pem {http.request.tls.client.certificate_pem}
 
         transport http {
             response_header_timeout 180s
             read_timeout 180s
             write_timeout 180s
         }
+    }
+}
+
+# 4. Локальный Healthcheck для проверок с хоста (loopback, без требования mTLS)
+http://127.0.0.1:80, http://localhost:80 {
+    handle /health {
+        respond "OK" 200
+    }
+    handle {
+        respond "Not Found" 404
     }
 }
 

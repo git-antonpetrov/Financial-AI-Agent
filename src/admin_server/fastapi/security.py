@@ -79,6 +79,19 @@ class Settings:
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15"))  # 15 минут вместо 12 часов
     REFRESH_TOKEN_EXPIRE_DAYS: int = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))  # 7 дней для refresh-токена
     ADMIN_PASSWORD_HASH: str = os.getenv("ADMIN_PASSWORD_HASH", "")
+    OPERATOR_PASSWORD_HASH: str = os.getenv("OPERATOR_PASSWORD_HASH", "")
+    AUDITOR_PASSWORD_HASH: str = os.getenv("AUDITOR_PASSWORD_HASH", "")
+
+    def get_password_hash_for_user(self, username: str) -> str:
+        """Возвращает хэш пароля для конкретного пользователя с изоляцией учетных записей."""
+        uname = (username or "").strip().lower()
+        if uname == "admin":
+            return self.ADMIN_PASSWORD_HASH
+        elif uname == "operator":
+            return self.OPERATOR_PASSWORD_HASH or self.ADMIN_PASSWORD_HASH
+        elif uname == "auditor":
+            return self.AUDITOR_PASSWORD_HASH or self.ADMIN_PASSWORD_HASH
+        return ""
     ADMIN_TOTP_SECRET: str = os.getenv("ADMIN_TOTP_SECRET", "").strip()
     REQUIRE_2FA: bool = os.getenv("REQUIRE_2FA", "false").lower() in (
         "true",
@@ -752,7 +765,28 @@ async def get_current_user(
             role=role_enum,
             permissions=perms,
         )
-    return CurrentUser(username=str(current_admin), role=Role.SUPERADMIN)
+    if isinstance(current_admin, str):
+        uname = current_admin.strip().lower()
+        if uname == "admin":
+            role_enum = Role.SUPERADMIN
+        elif uname == "operator":
+            role_enum = Role.OPERATOR
+        elif uname == "auditor":
+            role_enum = Role.AUDITOR
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid username or unrecognized role",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        perms = ROLE_PERMISSIONS.get(role_enum, set()).copy()
+        return CurrentUser(username=uname, role=role_enum, permissions=perms)
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 def require_role(*required_roles: Role | str) -> Callable:
@@ -2048,6 +2082,34 @@ def validate_x509_certificate_chain(
                     f"не совпадает с Root CA ({root_ca.subject.rfc4514_string()})"
                 ),
             )
+
+        # Валидация X.509 расширений промежуточного CA Анклава (RFC 5280)
+        try:
+            bc_ext = enclave_cert.extensions.get_extension_for_oid(x509.ExtensionOID.BASIC_CONSTRAINTS)
+            if not bc_ext.value.ca:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Промежуточный сертификат Анклава обязан иметь расширение BasicConstraints с флагом CA=True",
+                )
+        except x509.ExtensionNotFound:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Промежуточный сертификат Анклава не содержит обязательного расширения BasicConstraints",
+            )
+
+        try:
+            ku_ext = enclave_cert.extensions.get_extension_for_oid(x509.ExtensionOID.KEY_USAGE)
+            if not ku_ext.value.key_cert_sign:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail=(
+                        "Сертификат Анклава не обладает полномочиями подписи "
+                        "сертификатов (KeyUsage: key_cert_sign=False)"
+                    ),
+                )
+        except x509.ExtensionNotFound:
+            pass
+
         try:
             verify_certificate_signature(enclave_cert, root_ca.public_key())
         except Exception as e:
@@ -2103,6 +2165,41 @@ def validate_x509_certificate_chain(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail=f"Клиентский сертификат не прошел верификацию подписи доверенным Root CA: {e}",
             )
+
+    # 5.1 Валидация X.509 расширений конечного сертификата клиента (leaf_cert)
+    try:
+        leaf_bc = leaf_cert.extensions.get_extension_for_oid(x509.ExtensionOID.BASIC_CONSTRAINTS)
+        if leaf_bc.value.ca:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=(
+                    "Клиентский сертификат конечного узла (leaf) не может "
+                    "являться центром сертификации (CA=True запрещен)"
+                ),
+            )
+    except x509.ExtensionNotFound:
+        pass
+
+    try:
+        leaf_ku = leaf_cert.extensions.get_extension_for_oid(x509.ExtensionOID.KEY_USAGE)
+        if leaf_ku.value.key_cert_sign:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=(
+                    "Клиентский сертификат не может обладать полномочиями подписи "
+                    "сертификатов (key_cert_sign=True запрещен)"
+                ),
+            )
+        if not leaf_ku.value.digital_signature:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=(
+                    "Клиентский сертификат должен иметь право создания цифровой "
+                    "подписи (KeyUsage: digital_signature=True)"
+                ),
+            )
+    except x509.ExtensionNotFound:
+        pass
 
     # 6. Проверка отзыва клиентского сертификата в Redis
     serial_dec = str(leaf_cert.serial_number)

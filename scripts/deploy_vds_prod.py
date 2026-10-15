@@ -98,13 +98,13 @@ def run_deployment(skip_build: bool = False, no_docker: bool = False, timeout: i
     print("\n[3/3] Ожидание готовности сервисов...")
     start_time = time.time()
     critical_services = [
-        "postgres-db",
-        "redis",
+        "financial-postgres",
+        "redis-server",
         "minio-server",
         "chromadb-server",
         "admin-server",
         "simulation-api",
-        "caddy-ingress",
+        "caddy-server",
     ]
 
     all_running = False
@@ -124,19 +124,30 @@ def run_deployment(skip_build: bool = False, no_docker: bool = False, timeout: i
 
             if status != "running":
                 alias_map = {
-                    "postgres-db": "financial-postgres",
-                    "redis": "redis-server",
-                    "caddy-ingress": "caddy-server",
+                    "financial-postgres": "postgres-db",
+                    "redis-server": "redis",
+                    "minio-server": "minio",
+                    "chromadb-server": "chromadb",
+                    "admin-server": "admin-server",
+                    "simulation-api": "simulation-api",
+                    "caddy-server": "caddy",
                 }
                 alt = alias_map.get(svc)
                 if alt:
                     try:
-                        insp = subprocess.run(
-                            ["docker", "inspect", "--format={{.State.Status}}", alt],
+                        cid = subprocess.run(
+                            ["docker", "compose", "ps", "-q", alt],
                             capture_output=True,
                             text=True,
-                        )
-                        status = insp.stdout.strip()
+                            cwd=str(PROJECT_ROOT),
+                        ).stdout.strip()
+                        if cid:
+                            insp = subprocess.run(
+                                ["docker", "inspect", "--format={{.State.Status}}", cid],
+                                capture_output=True,
+                                text=True,
+                            )
+                            status = insp.stdout.strip()
                     except Exception:
                         pass
 

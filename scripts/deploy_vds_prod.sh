@@ -122,6 +122,9 @@ if [[ -d "${PROJECT_ROOT}/certs" ]]; then
     rm -rf "${PROJECT_ROOT}/certs"
 fi
 
+# Обеспечиваем наличие каталога data/ для безопасного монтирования томов
+mkdir -p "${PROJECT_ROOT}/data"
+
 # ------------------------------------------------------------------------------
 # 3. ВАЛИДАЦИЯ КОНФИГУРАЦИИ DOCKER COMPOSE И ТОМОВ ZERO-TRUST PKI
 # ------------------------------------------------------------------------------
@@ -150,13 +153,13 @@ START_TIME=$(date +%s)
 ALL_READY=false
 
 CRITICAL_SERVICES=(
-    "postgres-db"
-    "redis"
+    "financial-postgres"
+    "redis-server"
     "minio-server"
     "chromadb-server"
     "admin-server"
     "simulation-api"
-    "caddy-ingress"
+    "caddy-server"
 )
 
 while true; do
@@ -170,23 +173,19 @@ while true; do
     for svc in "${CRITICAL_SERVICES[@]}"; do
         STATUS=$($DOCKER_BIN inspect --format='{{.State.Status}}' "$svc" 2>/dev/null || echo "not_found")
         if [[ "$STATUS" != "running" ]]; then
-            CID=$($DOCKER_COMPOSE_CMD ps -q "$svc" 2>/dev/null || true)
+            CID=""
+            case "$svc" in
+                "financial-postgres") CID=$($DOCKER_COMPOSE_CMD ps -q postgres-db 2>/dev/null || true) ;;
+                "redis-server")       CID=$($DOCKER_COMPOSE_CMD ps -q redis 2>/dev/null || true) ;;
+                "minio-server")       CID=$($DOCKER_COMPOSE_CMD ps -q minio 2>/dev/null || true) ;;
+                "chromadb-server")    CID=$($DOCKER_COMPOSE_CMD ps -q chromadb 2>/dev/null || true) ;;
+                "admin-server")       CID=$($DOCKER_COMPOSE_CMD ps -q admin-server 2>/dev/null || true) ;;
+                "simulation-api")     CID=$($DOCKER_COMPOSE_CMD ps -q simulation-api 2>/dev/null || true) ;;
+                "caddy-server" | "caddy-ingress") CID=$($DOCKER_COMPOSE_CMD ps -q caddy 2>/dev/null || true) ;;
+            esac
             if [[ -n "$CID" ]]; then
                 STATUS=$($DOCKER_BIN inspect --format='{{.State.Status}}' "$CID" 2>/dev/null || echo "not_found")
             fi
-        fi
-        if [[ "$STATUS" != "running" ]]; then
-            case "$svc" in
-                "postgres-db")
-                    STATUS=$($DOCKER_BIN inspect --format='{{.State.Status}}' "financial-postgres" 2>/dev/null || echo "not_found")
-                    ;;
-                "redis")
-                    STATUS=$($DOCKER_BIN inspect --format='{{.State.Status}}' "redis-server" 2>/dev/null || echo "not_found")
-                    ;;
-                "caddy-server")
-                    STATUS=$($DOCKER_BIN inspect --format='{{.State.Status}}' "caddy-server" 2>/dev/null || echo "not_found")
-                    ;;
-            esac
         fi
         if [[ "$STATUS" == "running" ]]; then
             RUNNING_COUNT=$((RUNNING_COUNT + 1))

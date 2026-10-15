@@ -21,6 +21,5 @@ ENV PYTHONPATH=/app
 
 USER appuser
 
-# В реальном проде здесь стоял бы cron, celery или apscheduler.
-# Пока что контейнер просто выполнит EOD и завершится (или его можно запускать по расписанию в docker-compose)
+# Запуск фонового планировщика EOD задач (AsyncIOScheduler)
 CMD ["python", "src/simulations/workers/bank_eod/main.py"]

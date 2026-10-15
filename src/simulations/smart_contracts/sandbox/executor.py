@@ -60,6 +60,22 @@ class SecurityASTVisitor(ast.NodeVisitor):
     def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
         raise SandboxExecutionError("Использование циклов (async for) категорически запрещено в смарт-контрактах")
 
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        raise SandboxExecutionError(
+            "Использование списковых включений (list comprehensions) запрещено в смарт-контрактах"
+        )
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        raise SandboxExecutionError("Использование set comprehensions запрещено в смарт-контрактах")
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        raise SandboxExecutionError("Использование dict comprehensions запрещено в смарт-контрактах")
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        raise SandboxExecutionError(
+            "Использование генераторных выражений (generator expressions) запрещено в смарт-контрактах"
+        )
+
     def visit_Call(self, node: ast.Call) -> None:
         if isinstance(node.func, ast.Attribute) and node.func.attr in (
             "format",

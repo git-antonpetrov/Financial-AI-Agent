@@ -6,7 +6,7 @@
 set -euo pipefail
 
 VOLUME_NAME=${1:-"fin_agent_secure_data"}
-MOUNT_POINT=${2:-"/var/lib/docker/volumes/financial_secure_data/_data"}
+MOUNT_POINT=${2:-"/var/lib/docker/volumes"}
 KEYFILE=${3:-"/etc/security/luks_keys/fin_agent.key"}
 SIZE_GB=${4:-20}
 STORAGE_DIR="/var/lib/secure_volumes"

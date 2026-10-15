@@ -87,7 +87,7 @@ class Transaction(Base):
     )  # Тип: 'transfer_sbp', 'transfer_non_sbp', 'purchase', 'top_up', 'salary' и др.
     amount = Column(EncryptedDecimal, nullable=False)
     commission = Column(EncryptedDecimal, default=Decimal("0.00"))
-    description = Column(String)
+    description = Column(EncryptedText)
     status = Column(String, default="completed")  # Статус: 'completed', 'failed', 'pending'
     date = Column(Date, default=get_moscow_date, index=True)
     time = Column(Time, default=get_moscow_time)
@@ -100,7 +100,7 @@ class AutoPayment(Base):
     id = Column(String, primary_key=True, default=generate_uuid)
     account_id = Column(String, ForeignKey("accounts.id"), nullable=False, index=True)
     amount = Column(EncryptedDecimal, nullable=False)
-    recipient = Column(String, nullable=False)
+    recipient = Column(EncryptedText, nullable=False)
     schedule = Column(String, nullable=False)  # Периодичность: 'monthly', 'weekly'
     next_payment_date = Column(Date, nullable=False, index=True)
     is_active = Column(Boolean, default=True, index=True)

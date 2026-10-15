@@ -89,7 +89,7 @@ async def _compensate_bank_transfer(
     amount: Decimal,
     reason: str,
     op_type: str = "transfer_in_compensation",
-):
+) -> None:
     """
     Компенсационная транзакция: возвращает списанные средства на банковский счет в случае сбоя целевой системы.
     """
@@ -118,7 +118,7 @@ async def _compensate_bank_transfer(
         )
 
 
-async def _compensate_close_deposit(deposit_id: str, amount: Decimal):
+async def _compensate_close_deposit(deposit_id: str, amount: Decimal) -> None:
     """
     Компенсационная транзакция: восстанавливает статус и баланс вклада при сбое зачисления в банк.
     """
@@ -140,7 +140,7 @@ async def _compensate_close_deposit(deposit_id: str, amount: Decimal):
         )
 
 
-async def _compensate_close_savings(savings_id: str, amount: Decimal):
+async def _compensate_close_savings(savings_id: str, amount: Decimal) -> None:
     """
     Компенсационная транзакция: восстанавливает статус и баланс накопительного счета при сбое зачисления в банк.
     """
@@ -258,6 +258,12 @@ async def open_deposit(
         acc = await bdb.scalar(select(Account).where(Account.id == req.from_bank_account_id).with_for_update())
         if not acc:
             raise HTTPException(404, "Банковский счет не найден")
+        if acc.client_id and req.client_id and str(acc.client_id) != str(req.client_id):
+            raise HTTPException(403, "Банковский счет списания не принадлежит указанному клиенту")
+        if acc.status and acc.status != "active":
+            raise HTTPException(400, f"Банковский счет списания недоступен (статус: {acc.status})")
+        if acc.currency and acc.currency != "RUB":
+            raise HTTPException(400, "Открытие вклада возможно только со счета в валюте RUB")
 
         acc_balance = Decimal(str(acc.balance))
         if acc_balance < req.initial_amount:
@@ -358,6 +364,12 @@ async def open_savings(
         acc = await bdb.scalar(select(Account).where(Account.id == req.from_bank_account_id).with_for_update())
         if not acc:
             raise HTTPException(404, "Банковский счет не найден")
+        if acc.client_id and req.client_id and str(acc.client_id) != str(req.client_id):
+            raise HTTPException(403, "Банковский счет списания не принадлежит указанному клиенту")
+        if acc.status and acc.status != "active":
+            raise HTTPException(400, f"Банковский счет списания недоступен (статус: {acc.status})")
+        if acc.currency and acc.currency != "RUB":
+            raise HTTPException(400, "Открытие накопительного счета возможно только со счета в валюте RUB")
 
         acc_balance = Decimal(str(acc.balance))
         if acc_balance < req.initial_amount:
@@ -448,6 +460,12 @@ async def open_broker_account(
         acc = await bdb.scalar(select(Account).where(Account.id == req.from_bank_account_id).with_for_update())
         if not acc:
             raise HTTPException(404, "Банковский счет не найден")
+        if acc.client_id and req.client_id and str(acc.client_id) != str(req.client_id):
+            raise HTTPException(403, "Банковский счет списания не принадлежит указанному клиенту")
+        if acc.status and acc.status != "active":
+            raise HTTPException(400, f"Банковский счет списания недоступен (статус: {acc.status})")
+        if acc.currency and acc.currency != "RUB":
+            raise HTTPException(400, "Пополнение брокерского счета возможно только со счета в валюте RUB")
 
         acc_balance = Decimal(str(acc.balance))
         if acc_balance < req.initial_amount:
@@ -549,6 +567,12 @@ async def close_deposit(
             acc = await bdb.scalar(select(Account).where(Account.id == req.to_bank_account_id).with_for_update())
             if not acc:
                 raise HTTPException(404, "Банковский счет не найден")
+            if acc.client_id and dep.client_id and str(acc.client_id) != str(dep.client_id):
+                raise HTTPException(403, "Банковский счет зачисления не принадлежит владельцу вклада")
+            if acc.status and acc.status != "active":
+                raise HTTPException(400, f"Банковский счет зачисления недоступен (статус: {acc.status})")
+            if acc.currency and acc.currency != "RUB":
+                raise HTTPException(400, "Возврат средств по вкладу возможен только на счет в валюте RUB")
 
             acc.balance = Decimal(str(acc.balance)) + amount_to_return
             tx = Transaction(
@@ -627,6 +651,12 @@ async def close_savings(
             acc = await bdb.scalar(select(Account).where(Account.id == req.to_bank_account_id).with_for_update())
             if not acc:
                 raise HTTPException(404, "Банковский счет не найден")
+            if acc.client_id and sav.client_id and str(acc.client_id) != str(sav.client_id):
+                raise HTTPException(403, "Банковский счет зачисления не принадлежит владельцу накопительного счета")
+            if acc.status and acc.status != "active":
+                raise HTTPException(400, f"Банковский счет зачисления недоступен (статус: {acc.status})")
+            if acc.currency and acc.currency != "RUB":
+                raise HTTPException(400, "Возврат средств по накопительному счету возможен только на счет в валюте RUB")
 
             acc.balance = Decimal(str(acc.balance)) + amount_to_return
             tx = Transaction(

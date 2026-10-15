@@ -1,8 +1,13 @@
+import hashlib
 import os
 import secrets
+import time
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.x509.oid import NameOID
 from fastapi import Header, HTTPException, Request, status
 
+from src.simulations.core.crypto.chain_validator import get_chain_validator
 from src.simulations.core.crypto.enclave_verifier import get_enclave_verifier
 from src.simulations.core.utils.console_logger import log_error, log_info, log_warning
 
@@ -113,17 +118,173 @@ async def check_enclave_or_token_auth(
 ) -> str:
     """
     Комплексная проверка аутентификации (Блок 5 схемы arch.txt):
-    1. Если переданы заголовки цифровой подписи Анклава (X-Enclave-Signature),
+    1. Если переданы заголовки X.509 сертификатов (X-Agent-Cert / X-Cert) и цифровая подпись:
+       валидирует цепочку сертификатов (Root CA -> [Enclave CA] -> Leaf Cert) через X509ChainValidator,
+       проверяет nonce на Replay Attack, допустимый дрейф времени (±300с) и цифровую подпись запроса.
+    2. Если передана подпись Анклава (X-Enclave-Signature),
        проверяет nonce, timestamp и подпись по открытому ключу Enclave_PublicKey.
-    2. В остальных случаях проверяет Bootstrap токен агента.
+    3. В остальных случаях проверяет Bootstrap токен агента.
     """
-    enclave_sig = request.headers.get("X-Enclave-Signature")
+    agent_cert = request.headers.get("X-Agent-Cert") or request.headers.get("X-Cert")
+    enclave_cert = request.headers.get("X-Enclave-Cert")
+    signature = request.headers.get("X-Signature") or request.headers.get("X-Enclave-Signature")
     nonce = request.headers.get("X-Nonce")
     timestamp = request.headers.get("X-Timestamp")
 
-    # Если присутствуют заголовки Анклава
-    if enclave_sig or nonce or timestamp:
-        if not (enclave_sig and nonce and timestamp):
+    # Сценарий 1: Аутентификация по X.509 PKI сертификату агента
+    if agent_cert:
+        if not (signature and nonce and timestamp):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Для аутентификации по сертификату X.509 требуются заголовки: X-Signature, X-Nonce, X-Timestamp",
+            )
+
+        verifier = get_enclave_verifier()
+        if not verifier.nonce_cache.record_nonce_if_new(nonce):
+            log_warning("Simulation Auth", f"Replay attack на '{domain_name}': nonce '{nonce}' уже использован")
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Обнаружена повторная атака (Replay Attack): nonce '{nonce}' уже был использован",
+            )
+
+        now = time.time()
+        try:
+            req_ts = float(timestamp)
+        except (ValueError, TypeError):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Некорректный формат метки времени X-Timestamp",
+            )
+        if abs(now - req_ts) > 300:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Метка времени запроса устарела (дрейф превышает 300с)",
+            )
+
+        chain_val = get_chain_validator()
+        leaf_cert = chain_val.parse_certificate(agent_cert)
+        if not leaf_cert:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Некорректный формат клиентского сертификата X-Agent-Cert",
+            )
+
+        if enclave_cert:
+            enc_cert = chain_val.parse_certificate(enclave_cert)
+            if not enc_cert:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Некорректный формат сертификата Анклава X-Enclave-Cert",
+                )
+            is_enc_valid, enc_err = chain_val.validate_certificate_chain(enc_cert)
+            if not is_enc_valid:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail=f"Промежуточный сертификат Анклава не прошел валидацию: {enc_err}",
+                )
+            is_leaf_valid, leaf_err = chain_val.validate_certificate_chain(leaf_cert, issuer_ca_input=enc_cert)
+            if not is_leaf_valid:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail=f"Сертификат агента не прошел валидацию Анклавом: {leaf_err}",
+                )
+        else:
+            is_leaf_valid, leaf_err = chain_val.validate_certificate_chain(leaf_cert)
+            if not is_leaf_valid:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail=f"Сертификат агента не прошел валидацию Root CA: {leaf_err}",
+                )
+
+        # Проверка 5 (Zero-Trust Pipeline): Проверка отзыва сертификата и агента в Redis CRL
+        serial_str = str(leaf_cert.serial_number)
+        fp_str = f"sha256:{hashlib.sha256(leaf_cert.public_bytes(serialization.Encoding.DER)).hexdigest()}"
+        cn_str = None
+        for attr in leaf_cert.subject:
+            if attr.oid == NameOID.COMMON_NAME:
+                cn_str = str(attr.value)
+                break
+
+        redis_cli = getattr(verifier.nonce_store, "redis_client", None)
+        if redis_cli is not None:
+            try:
+                if (
+                    redis_cli.exists(f"revoked:cert:serial:{serial_str}")
+                    or redis_cli.exists(f"revoked:cert:fp:{fp_str}")
+                    or (cn_str and redis_cli.exists(f"revoked:agent:{cn_str}"))
+                ):
+                    log_warning("Simulation Auth", f"Доступ заблокирован: агент {cn_str} или сертификат отозван")
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Доступ заблокирован: агент или сертификат отозван (Certificate has been revoked)",
+                    )
+            except HTTPException:
+                raise
+            except Exception as e:
+                log_warning("Simulation Auth", f"Ошибка проверки отзыва в Redis: {e}")
+
+        # Проверка 6 (Zero-Trust Pipeline): Проверка роли субъекта (OU / Role validation)
+        ou_values = [str(attr.value) for attr in leaf_cert.subject if attr.oid == NameOID.ORGANIZATIONAL_UNIT_NAME]
+        valid_roles = {
+            "AI Autonomous Financial Agent",
+            "bank_operator",
+            "Security Operations",
+            "bank_service",
+            "admin_operator",
+            "infrastructure",
+            "agent",
+        }
+        if ou_values and not any(role in valid_roles for role in ou_values):
+            log_warning("Simulation Auth", f"Недопустимая роль сертификата: {ou_values}")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Недопустимая роль в сертификате (OU={ou_values}) для доступа к банковским операциям",
+            )
+
+        body = await request.body()
+        canonical_data = chain_val.compute_canonical_digest(
+            timestamp=req_ts,
+            nonce=nonce,
+            body_bytes=body,
+            method=request.method,
+            path=request.url.path,
+        )
+        is_sig_valid, sig_err = chain_val.verify_signature(
+            payload_bytes=canonical_data,
+            signature_b64=signature,
+            leaf_cert_input=leaf_cert,
+            verify_chain=False,
+        )
+        if not is_sig_valid:
+            canonical_data_compat = chain_val.compute_canonical_digest(
+                timestamp=req_ts,
+                nonce=nonce,
+                body_bytes=body,
+            )
+            is_sig_valid, sig_err = chain_val.verify_signature(
+                payload_bytes=canonical_data_compat,
+                signature_b64=signature,
+                leaf_cert_input=leaf_cert,
+                verify_chain=False,
+            )
+
+        if not is_sig_valid:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"Недействительная цифровая подпись запроса агента: {sig_err}",
+            )
+
+        request.state.enclave_nonce = nonce
+        request.state.authenticated_entity = "pki_agent"
+        log_info(
+            "Simulation Auth",
+            f"Успешная X.509 PKI аутентификация для домена '{domain_name}' (nonce={nonce})",
+        )
+        return f"pki_agent:{nonce}"
+
+    # Сценарий 2: Аутентификация по цифровой подписи Анклава (X-Enclave-Signature)
+    if signature or nonce or timestamp:
+        if not (signature and nonce and timestamp):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Для аутентификации Анклава требуются все заголовки: X-Enclave-Signature, X-Nonce, X-Timestamp",
@@ -139,7 +300,7 @@ async def check_enclave_or_token_auth(
             timestamp_val=timestamp,
             nonce=nonce,
             body_bytes=body,
-            signature_b64=enclave_sig,
+            signature_b64=signature,
         )
 
         if not is_valid:
@@ -175,11 +336,14 @@ async def check_enclave_or_token_auth(
         )
         return f"enclave:{nonce}"
 
-    # Строгий режим безопасности: подпись Анклава обязательна по умолчанию (SEC-09)
+    # Строгий режим безопасности: подпись Анклава или X.509 сертификат обязательны по умолчанию (SEC-09)
     if os.getenv("REQUIRE_ENCLAVE_SIGNATURE", "true").lower() in ("true", "1", "yes"):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Строгий режим безопасности: требуется цифровая подпись Анклава (X-Enclave-Signature)",
+            detail=(
+                "Строгий режим безопасности: требуется цифровая подпись Анклава "
+                "(X-Enclave-Signature) или X.509 сертификат"
+            ),
         )
 
     # Иначе стандартная проверка Bootstrap токена

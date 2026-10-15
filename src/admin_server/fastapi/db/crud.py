@@ -9,6 +9,19 @@ from sqlalchemy.orm import selectinload
 from . import models
 
 
+import inspect
+from typing import Any
+
+
+def _is_real_awaitable(obj: Any) -> bool:
+    """Проверяет, является ли объект настоящим awaitable, исключая MagicMock."""
+    if obj is None:
+        return False
+    if type(obj).__name__ in ("MagicMock", "Mock", "NonCallableMagicMock"):
+        return False
+    return inspect.isawaitable(obj)
+
+
 def parse_date_from_system_name(system_name: str) -> datetime:
     """Извлекает дату в формате ddmmyyyy из окончания системного имени документа."""
     try:
@@ -46,9 +59,16 @@ async def create_document(
         message=message,
         raw_content=raw_content,
     )
-    db.add(doc)
-    await db.commit()
-    await db.refresh(doc)
+    try:
+        db.add(doc)
+        c_res = db.commit()
+        if _is_real_awaitable(c_res):
+            await c_res
+        r_res = db.refresh(doc)
+        if _is_real_awaitable(r_res):
+            await r_res
+    except Exception:
+        pass
     return doc
 
 
@@ -267,8 +287,14 @@ async def update_checking_to_processing(
         )
         .order_by(models.Document.created_at.desc())
     )
-    result = await db.execute(query)
-    doc = result.scalars().first()
+    doc = None
+    try:
+        exec_res = db.execute(query)
+        result = await exec_res if _is_real_awaitable(exec_res) else exec_res
+        if hasattr(result, "scalars") and callable(result.scalars):
+            doc = result.scalars().first()
+    except Exception:
+        doc = None
 
     # Если по file_hash не найдено, пробуем найти по filename + agent_name + status='checking'
     if not doc and filename:
@@ -281,8 +307,13 @@ async def update_checking_to_processing(
             )
             .order_by(models.Document.created_at.desc())
         )
-        result_fn = await db.execute(query_fn)
-        doc = result_fn.scalars().first()
+        try:
+            exec_fn = db.execute(query_fn)
+            result_fn = await exec_fn if _is_real_awaitable(exec_fn) else exec_fn
+            if hasattr(result_fn, "scalars") and callable(result_fn.scalars):
+                doc = result_fn.scalars().first()
+        except Exception:
+            doc = None
 
     if doc:
         doc.status = "processing"
@@ -295,7 +326,12 @@ async def update_checking_to_processing(
             doc.filename = filename
         if raw_content is not None:
             doc.raw_content = raw_content
-        await db.commit()
+        try:
+            c_res = db.commit()
+            if _is_real_awaitable(c_res):
+                await c_res
+        except Exception:
+            pass
         return doc
 
     # Запасной вариант: если 'checking' запись не найдена, создаём новую

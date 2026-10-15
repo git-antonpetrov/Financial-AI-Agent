@@ -11,6 +11,7 @@ import sys
 import tempfile
 import datetime
 import pytest
+import fastapi
 from pathlib import Path
 from cryptography import x509
 from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
@@ -199,6 +200,7 @@ _DEFAULT_ENV = {
     "ADMIN_PASSWORD": "TestAdminPassword123!",
     "ADMIN_TOTP_SECRET": "JBSWY3DPEHPK3PXP",
     "POSTGRES_PASSWORD": "test_postgres_secret",
+    "FINANCIAL_AGENT_CERTS_CACHE_DIR": str(_certs_dir),
 }
 
 # Экспортируем в os.environ сразу при импорте conftest (до импорта любого теста)
@@ -246,6 +248,16 @@ def setup_test_crypto_environment():
         clear_admin_nonces_cache()
     except Exception:
         pass
+    try:
+        from src.simulations.core.crypto.enclave_verifier import reset_enclave_verifier_for_tests
+        reset_enclave_verifier_for_tests()
+    except Exception:
+        pass
+    try:
+        from src.simulations.core.crypto.oracle_verifier import reset_oracle_verifier_for_tests
+        reset_oracle_verifier_for_tests()
+    except Exception:
+        pass
     yield
 
 
@@ -266,6 +278,10 @@ def setup_test_fastapi_db():
     apps = []
     overridden_deps = []
     try:
+        for mod in ["redis", "minio", "litellm", "asyncpg"]:
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+
         try:
             import server
             if hasattr(server, "app") and server.app not in apps:
@@ -331,6 +347,32 @@ def setup_test_fastapi_db():
                 return m
 
         test_sess = InMemoryTestSession()
+
+        from contextlib import asynccontextmanager
+        from unittest.mock import AsyncMock
+
+        @asynccontextmanager
+        async def _mock_engine_begin(*args, **kwargs):
+            mock_conn = AsyncMock()
+            mock_conn.run_sync = AsyncMock()
+            yield mock_conn
+
+        @asynccontextmanager
+        async def _mock_async_session(*args, **kwargs):
+            yield test_sess
+
+        async def _mock_revocation_listener(*args, **kwargs):
+            return
+
+        for mod_name in ["server", "src.admin_server.fastapi.server", "db.database", "src.admin_server.fastapi.db.database"]:
+            mod = sys.modules.get(mod_name)
+            if mod:
+                if hasattr(mod, "engine"):
+                    mod.engine.begin = _mock_engine_begin
+                if hasattr(mod, "async_session"):
+                    setattr(mod, "async_session", _mock_async_session)
+                if hasattr(mod, "run_revocation_listener"):
+                    setattr(mod, "run_revocation_listener", _mock_revocation_listener)
 
         def _override_routes(target_app, routes):
             for route in routes:

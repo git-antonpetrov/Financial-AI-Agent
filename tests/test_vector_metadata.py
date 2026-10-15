@@ -2,9 +2,9 @@ import os
 import sys
 import yaml
 
-# Мокирует внешние зависимости перед импортом vector_worker
+# Мокирует внешние сетевые сервисы перед импортом vector_worker
 from unittest.mock import MagicMock
-for mod in ["redis", "minio", "chromadb", "chromadb.config", "litellm", "langchain_text_splitters", "psycopg2", "psycopg2.pool"]:
+for mod in ["redis", "minio", "chromadb", "chromadb.config", "litellm", "psycopg2", "psycopg2.pool"]:
     sys.modules[mod] = MagicMock()
 
 os.environ["POSTGRES_PASSWORD"] = "test"

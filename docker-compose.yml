@@ -72,8 +72,10 @@ services:
     pids_limit: 200
 
   pgadmin:
-    image: dpage/pgadmin4
+    image: dpage/pgadmin4:8.14
     container_name: pgadmin4_container
+    profiles:
+      - tools
     environment:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
@@ -116,10 +118,9 @@ services:
       - RUBLE_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/digital_db
       - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
       - SSL_CERT_FILE=/certs/ca.crt
+      - DATA_ENCRYPTION_KEY=${DATA_ENCRYPTION_KEY}
     volumes:
       - ca_public:/certs:ro
-    env_file:
-      - .env
     networks:
       - simulation_net
       - data_net
@@ -148,10 +149,9 @@ services:
       - TZ=Europe/Moscow
       - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
       - SSL_CERT_FILE=/certs/ca.crt
+      - DATA_ENCRYPTION_KEY=${DATA_ENCRYPTION_KEY}
     volumes:
       - bank_certs:/certs:ro
-    env_file:
-      - .env
     networks:
       - simulation_net
       - data_net
@@ -181,10 +181,9 @@ services:
       - TZ=Europe/Moscow
       - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
       - SSL_CERT_FILE=/certs/ca.crt
+      - DATA_ENCRYPTION_KEY=${DATA_ENCRYPTION_KEY}
     volumes:
       - ca_public:/certs:ro
-    env_file:
-      - .env
     networks:
       - simulation_net
       - data_net
@@ -214,10 +213,9 @@ services:
       - TZ=Europe/Moscow
       - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
       - SSL_CERT_FILE=/certs/ca.crt
+      - DATA_ENCRYPTION_KEY=${DATA_ENCRYPTION_KEY}
     volumes:
       - ca_public:/certs:ro
-    env_file:
-      - .env
     networks:
       - simulation_net
       - data_net
@@ -249,10 +247,22 @@ services:
       - RUBLE_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/digital_db
       - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
       - SSL_CERT_FILE=/certs/ca.crt
+      - DATA_ENCRYPTION_KEY=${DATA_ENCRYPTION_KEY}
+      - AGENT_BANK_BOOTSTRAP_TOKEN=${AGENT_BANK_BOOTSTRAP_TOKEN}
+      - AGENT_INVEST_BOOTSTRAP_TOKEN=${AGENT_INVEST_BOOTSTRAP_TOKEN}
+      - AGENT_DIGITAL_BOOTSTRAP_TOKEN=${AGENT_DIGITAL_BOOTSTRAP_TOKEN}
+      - AGENT_MAIN_BOOTSTRAP_TOKEN=${AGENT_MAIN_BOOTSTRAP_TOKEN}
+      - ORACLE_BOOTSTRAP_TOKEN=${ORACLE_BOOTSTRAP_TOKEN}
+      - AGENT_ORACLE_BOOTSTRAP_TOKEN=${AGENT_ORACLE_BOOTSTRAP_TOKEN}
+      - REQUIRE_ENCLAVE_SIGNATURE=${REQUIRE_ENCLAVE_SIGNATURE:-true}
     volumes:
       - bank_certs:/certs:ro
-    env_file:
-      - .env
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     networks:
       - simulation_net
       - data_net
@@ -376,6 +386,12 @@ services:
       - admin_certs:/certs:ro
     env_file:
       - .env
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     networks:
       - admin_backend_net
       - data_net
@@ -399,6 +415,12 @@ services:
       - CHROMA_AUTH_TOKEN_TRANSPORT_HEADER=Authorization
     volumes:
       - chroma_data:/chroma/chroma
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/heartbeat')\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     networks:
       - data_net
     restart: unless-stopped
@@ -425,7 +447,7 @@ services:
       minio:
         condition: service_healthy
       chromadb:
-        condition: service_started
+        condition: service_healthy
       postgres-db:
         condition: service_healthy
     environment:
@@ -476,7 +498,7 @@ services:
       root-ca:
         condition: service_completed_successfully
       admin-server:
-        condition: service_started
+        condition: service_healthy
     ports:
       - "80:80"
       - "443:443"
@@ -485,10 +507,16 @@ services:
       - ADMIN_DOMAIN=${ADMIN_DOMAIN:-admin.fin-ai-agent.ru}
       - ADMIN_LOCAL_DOMAIN=${ADMIN_LOCAL_DOMAIN:-admin.fin-ai-agent.local}
     volumes:
-      - ./src/caddy/Caddyfile:/etc/caddy/Caddyfile
+      - ./src/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - ca_public:/etc/caddy/certs:ro
       - caddy_data:/data
       - caddy_config:/config
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:80 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     networks:
       edge_net:
         aliases:

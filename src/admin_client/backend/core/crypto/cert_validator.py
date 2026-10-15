@@ -298,13 +298,21 @@ def export_windows_cert_to_cache(pem_data: str, filename: str) -> str:
     Сохраняет PEM-сертификат в защищенную локальную директорию кэша (%LOCALAPPDATA%/FinancialAgent/certs/).
     Возвращает абсолютный путь к файлу сертификата на диске для requests / caddy.
     """
-    if sys.platform == "win32":
+    custom_cache = os.getenv("FINANCIAL_AGENT_CERTS_CACHE_DIR")
+    if custom_cache:
+        cache_dir = custom_cache
+    elif sys.platform == "win32":
         base_dir = os.getenv("LOCALAPPDATA") or os.getenv("APPDATA") or tempfile.gettempdir()
+        cache_dir = os.path.join(base_dir, "FinancialAgent", "certs")
     else:
         base_dir = os.path.expanduser("~/.financial_agent")
+        cache_dir = os.path.join(base_dir, "FinancialAgent", "certs")
 
-    cache_dir = os.path.join(base_dir, "FinancialAgent", "certs")
-    os.makedirs(cache_dir, exist_ok=True)
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+    except OSError:
+        cache_dir = os.path.join(tempfile.gettempdir(), "FinancialAgent", "certs")
+        os.makedirs(cache_dir, exist_ok=True)
 
     target_path = os.path.join(cache_dir, filename)
     with open(target_path, "w", encoding="utf-8") as f:

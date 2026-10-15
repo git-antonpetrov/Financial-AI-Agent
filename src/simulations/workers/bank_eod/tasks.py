@@ -3,6 +3,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 from dateutil.relativedelta import relativedelta
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
@@ -18,7 +19,7 @@ from src.simulations.db.bank.db.models import (
 )
 
 
-async def process_auto_payments(session, current_date):
+async def process_auto_payments(session: AsyncSession, current_date: date) -> None:
     """
     Обработка автоплатежей, у которых наступила дата платежа.
     """
@@ -85,7 +86,7 @@ async def process_auto_payments(session, current_date):
     log_info("Bank EOD", f"Успешно обработано автоплатежей: {processed}")
 
 
-async def process_tariff_fees(session, current_date):
+async def process_tariff_fees(session: AsyncSession, current_date: date) -> None:
     """
     Списание платы за обслуживание тарифа 1-го числа каждого месяца.
     """
@@ -138,7 +139,7 @@ async def process_tariff_fees(session, current_date):
     log_info("Bank EOD", f"Списана абонентская плата по {processed} счетам")
 
 
-async def process_salaries(session, current_date):
+async def process_salaries(session: AsyncSession, current_date: date) -> None:
     """
     Начисление кастомной зарплаты 10-го и 25-го числа для конкретных клиентов.
     """
@@ -147,7 +148,12 @@ async def process_salaries(session, current_date):
 
     log_info("Bank EOD", f"Генерация зарплат на {current_date}...")
 
-    result = await session.execute(select(Account).where(Account.status == "active").with_for_update())
+    result = await session.execute(
+        select(Account)
+        .options(selectinload(Account.tariff))
+        .where(Account.status == "active")
+        .with_for_update(of=Account)
+    )
     accounts = result.scalars().all()
 
     # Чтобы не начислять зп на все 3 счета одного клиента, будем вести учет, кому уже начислили
@@ -165,6 +171,8 @@ async def process_salaries(session, current_date):
             salary_amount = random.randint(150000, 200000)
         elif acc.client_id == "33333333-3333-3333-3333-333333333333":  # Васильков (Вася)
             salary_amount = random.randint(200000, 250000)
+        elif acc.tariff and acc.tariff.name == "Зарплатный":
+            salary_amount = random.randint(50000, 120000)
         else:
             continue
 
@@ -188,7 +196,7 @@ async def process_salaries(session, current_date):
     log_info("Bank EOD", f"Начислена зарплата {processed} клиентам")
 
 
-async def run_bank_eod():
+async def run_bank_eod() -> None:
     """
     Запускает весь цикл EOD (End of Day) по реальному системному времени.
     """

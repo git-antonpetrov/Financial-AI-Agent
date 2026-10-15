@@ -5,7 +5,6 @@ import os
 import re
 import sys
 import time
-
 import chromadb
 
 # pyrefly: ignore [missing-import]
@@ -157,40 +156,61 @@ minio_client = Minio(
     secure=MINIO_SECURE,
 )
 
-# Подключаемся к запущенному контейнеру Chroma с поддержкой версий 1.x и 0.4.x
-if hasattr(chromadb, "auth") and hasattr(chromadb.auth, "token_authn"):
-    auth_provider = "chromadb.auth.token_authn.TokenAuthClientProvider"
-else:
-    auth_provider = "chromadb.auth.token.TokenAuthClientProvider"
 
-chroma_client = chromadb.HttpClient(
-    host=CHROMA_HOST,
-    port=CHROMA_PORT,
-    settings=chromadb.config.Settings(
-        chroma_client_auth_provider=auth_provider,
-        chroma_client_auth_credentials=CHROMA_AUTH_TOKEN,
-        chroma_auth_token_transport_header="Authorization",
-    ),
-)
+def get_chroma_client():
+    """Возвращает или инициализирует клиент ChromaDB."""
+    global chroma_client
+    if chroma_client is not None:
+        return chroma_client
 
+    if hasattr(chromadb, "auth") and hasattr(chromadb.auth, "token_authn"):
+        auth_provider = "chromadb.auth.token_authn.TokenAuthClientProvider"
+    else:
+        auth_provider = "chromadb.auth.token.TokenAuthClientProvider"
 
-# Ожидание готовности ChromaDB
-log_info("Инициализация воркера", "Ожидание ChromaDB...")
-for attempt in range(30):
     try:
-        chroma_client.heartbeat()
-        log_success("Инициализация воркера", "ChromaDB доступна.")
-        break
-    except Exception:
-        time.sleep(2)
-else:
-    log_error(
-        "Инициализация воркера",
-        "ChromaDB не отвечает после 30 попыток. Завершение работы.",
-    )
-    sys.exit(1)
+        chroma_client = chromadb.HttpClient(
+            host=CHROMA_HOST,
+            port=CHROMA_PORT,
+            settings=chromadb.config.Settings(
+                chroma_client_auth_provider=auth_provider,
+                chroma_client_auth_credentials=CHROMA_AUTH_TOKEN,
+                chroma_auth_token_transport_header="Authorization",
+            ),
+        )
+    except Exception as e:
+        log_error("ChromaDB", f"Не удалось подключиться к ChromaDB: {e}")
+        raise
+    return chroma_client
 
+
+chroma_client = None
 try:
+    if hasattr(chromadb, "auth") and hasattr(chromadb.auth, "token_authn"):
+        auth_provider = "chromadb.auth.token_authn.TokenAuthClientProvider"
+    else:
+        auth_provider = "chromadb.auth.token.TokenAuthClientProvider"
+    chroma_client = chromadb.HttpClient(
+        host=CHROMA_HOST,
+        port=CHROMA_PORT,
+        settings=chromadb.config.Settings(
+            chroma_client_auth_provider=auth_provider,
+            chroma_client_auth_credentials=CHROMA_AUTH_TOKEN,
+            chroma_auth_token_transport_header="Authorization",
+        ),
+    )
+except Exception as e:
+    log_warning("ChromaDB", f"Отложенная инициализация клиента ChromaDB: {e}")
+
+db_pool: SimpleConnectionPool | None = None
+
+
+def get_db_pool() -> SimpleConnectionPool:
+    """Возвращает или лениво инициализирует пул соединений PostgreSQL."""
+    global db_pool
+    if db_pool is not None:
+        return db_pool
+
     pool_kwargs = {
         "minconn": 1,
         "maxconn": 10,
@@ -205,20 +225,44 @@ try:
         if os.path.exists(ca_cert_path):
             pool_kwargs["sslrootcert"] = ca_cert_path
     db_pool = SimpleConnectionPool(**pool_kwargs)
-except Exception as e:
-    log_error(
-        "Инициализация воркера",
-        f"Не удалось инициализировать пул соединений с базой данных: {e}",
-    )
-    sys.exit(1)
+    return db_pool
+
+
+def init_resources(max_attempts: int = 30) -> None:
+    """Ожидает готовности ChromaDB и инициализирует пул соединений при запуске процесса воркера."""
+    log_info("Инициализация воркера", "Ожидание ChromaDB...")
+    client = get_chroma_client()
+    for attempt in range(max_attempts):
+        try:
+            client.heartbeat()
+            log_success("Инициализация воркера", "ChromaDB доступна.")
+            break
+        except Exception:
+            time.sleep(2)
+    else:
+        log_error(
+            "Инициализация воркера",
+            f"ChromaDB не отвечает после {max_attempts} попыток. Завершение работы.",
+        )
+        sys.exit(1)
+
+    try:
+        get_db_pool()
+    except Exception as e:
+        log_error(
+            "Инициализация воркера",
+            f"Не удалось инициализировать пул соединений с базой данных: {e}",
+        )
+        sys.exit(1)
 
 
 def update_document_status(file_hash: str, agent_name: str, new_status: str, message: str = ""):
     """Обновляет статус документа в Postgres через пул соединений."""
     if not file_hash or not agent_name:
         return
+    pool = get_db_pool()
     try:
-        conn = db_pool.getconn()
+        conn = pool.getconn()
         cur = conn.cursor()
         cur.execute(
             """
@@ -230,7 +274,7 @@ def update_document_status(file_hash: str, agent_name: str, new_status: str, mes
         )
         conn.commit()
         cur.close()
-        db_pool.putconn(conn)
+        pool.putconn(conn)
         log_info(
             "Обновление БД",
             f"Статус документа {file_hash} ({agent_name}) изменен на '{new_status}'",
@@ -238,15 +282,16 @@ def update_document_status(file_hash: str, agent_name: str, new_status: str, mes
     except Exception as e:
         log_error("Обновление БД", f"Не удалось обновить статус документа в БД: {e}")
         if "conn" in locals():
-            db_pool.putconn(conn, close=True)
+            pool.putconn(conn, close=True)
 
 
 def mark_document_repealed(short_name: str, agent_name: str, message: str = ""):
     """Переводит отмененный документ в статус 'repealed' в таблице documents Postgres."""
     if not short_name or not agent_name:
         return
+    pool = get_db_pool()
     try:
-        conn = db_pool.getconn()
+        conn = pool.getconn()
         cur = conn.cursor()
         cur.execute(
             """
@@ -259,7 +304,7 @@ def mark_document_repealed(short_name: str, agent_name: str, message: str = ""):
         updated_rows = cur.rowcount
         conn.commit()
         cur.close()
-        db_pool.putconn(conn)
+        pool.putconn(conn)
         if updated_rows > 0:
             log_info(
                 "Обновление БД",
@@ -271,7 +316,7 @@ def mark_document_repealed(short_name: str, agent_name: str, message: str = ""):
             f"Ошибка обновления статуса 'repealed' для {short_name}: {e}",
         )
         if "conn" in locals():
-            db_pool.putconn(conn, close=True)
+            pool.putconn(conn, close=True)
 
 
 def get_embeddings_google(texts: list[str]) -> list[list[float]]:
@@ -411,7 +456,8 @@ def process_task(task: dict):
 
         # Получаем/создаем коллекцию для конкретного агента
         collection_name = f"knowledge-{agent}"
-        collection = chroma_client.get_or_create_collection(name=collection_name)
+        client = get_chroma_client()
+        collection = client.get_or_create_collection(name=collection_name)
 
         if action == "delete":
             # Для action=delete ожидаем файл, где каждая строка - это short_name документа для удаления
@@ -494,8 +540,13 @@ def process_task(task: dict):
 
             splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
             chunks = splitter.split_text(clean_text)
+            if not isinstance(chunks, list) or len(chunks) == 0:
+                if clean_text and clean_text.strip():
+                    chunks = [clean_text.strip()]
+                else:
+                    chunks = []
             log_info("Разбивка текста", f"Текст разбит на {len(chunks)} чанков.")
-            if not chunks:
+            if not chunks or len(chunks) == 0:
                 log_warning(
                     "Векторизация",
                     f"Документ '{short_name}' не содержит текстовых чанков для векторизации.",
@@ -625,6 +676,7 @@ def fetch_task_reliable(timeout: int = 5) -> str | None:
 
 def main():
     """Запускает основной цикл воркера обработки документов."""
+    init_resources()
     log_success("Запуск воркера", f"Воркер запущен и слушает Redis ({QUEUE_NAME})...")
     recover_abandoned_tasks()
 

@@ -38,7 +38,7 @@ class SavingsAccount(Base):
     interest_rate = Column(Numeric(5, 2), default=0.00)
     status = Column(String, default="active", index=True)  # Возможные значения: active, closed
     next_payment_date = Column(DateTime, nullable=True, index=True)
-    next_payment_amount = Column(Numeric(12, 2), default=0.00)
+    next_payment_amount = Column(EncryptedDecimal, default=Decimal("0.00"))
     opened_at = Column(DateTime, default=get_moscow_now)
 
 
@@ -52,7 +52,7 @@ class Deposit(Base):
     term_months = Column(Numeric(5, 0), default=12)
     status = Column(String, default="active", index=True)  # Возможные значения: active, closed
     next_payment_date = Column(DateTime, nullable=True, index=True)
-    next_payment_amount = Column(Numeric(12, 2), default=0.00)
+    next_payment_amount = Column(EncryptedDecimal, default=Decimal("0.00"))
     opened_at = Column(DateTime, default=get_moscow_now)
 
 

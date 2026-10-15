@@ -5,6 +5,7 @@ from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from src.simulations.api.core.auth import verify_bank_token
@@ -153,7 +154,15 @@ async def get_autopayments(account_id: str) -> list[AutoPaymentResponse]:
         return [AutoPaymentResponse.model_validate(ap) for ap in result.scalars().all()]
 
 
-async def generate_unique_card_number(db, max_attempts: int = 10) -> str:
+def mask_card_number(card: str) -> str:
+    """Маскирует номер банковской карты по стандарту PCI DSS."""
+    card_str = str(card)
+    if len(card_str) >= 8:
+        return f"{card_str[:4]}********{card_str[-4:]}"
+    return "****"
+
+
+async def generate_unique_card_number(db: AsyncSession, max_attempts: int = 10) -> str:
     """Генерирует уникальный 16-значный номер карты с валидацией коллизий в базе данных."""
     for _ in range(max_attempts):
         candidate = f"4276{random.randint(100000000000, 999999999999)}"
@@ -185,7 +194,7 @@ async def issue_card(account_id: str) -> CardResponse:
         await db.refresh(new_card)
         log_success(
             "BankAPI",
-            f"Успешно выпущена карта {new_card.card_number} для счета {account_id}",
+            f"Успешно выпущена карта {mask_card_number(new_card.card_number)} для счета {account_id}",
         )
         return CardResponse.model_validate(new_card)
 
@@ -243,7 +252,7 @@ async def reissue_card(card_id: str) -> CardResponse:
         await db.refresh(new_card)
         log_success(
             "BankAPI",
-            f"Карта {card_id} перевыпущена. Новый номер: {new_card.card_number}",
+            f"Карта {card_id} перевыпущена. Новый номер: {mask_card_number(new_card.card_number)}",
         )
         return CardResponse.model_validate(new_card)
 
@@ -401,6 +410,13 @@ async def transfer_money(
             raise HTTPException(
                 400,
                 f"Счет получателя недоступен для перевода (статус: {receiver.status})",
+            )
+
+        if sender.currency != receiver.currency:
+            raise HTTPException(
+                400,
+                f"Межвалютные переводы без конвертации не поддерживаются "
+                f"(отправитель: {sender.currency}, получатель: {receiver.currency})",
             )
 
         sender_balance = Decimal(str(sender.balance))

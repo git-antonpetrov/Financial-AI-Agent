@@ -405,7 +405,7 @@ def test_upload_document_passes_minio_sse():
     with patch.object(rag_mod, "get_minio_sse", return_value=mock_sse_obj):
         client = TestClient(app)
         response = client.post("/api/v1/rag/documents", content=body_bytes, headers=headers)
-        assert response.status_code == 201
+        assert response.status_code == 201, f"Failed with {response.status_code}: {response.text}"
         minio_client.put_object.assert_called_once()
         _, kwargs = minio_client.put_object.call_args
         assert kwargs.get("sse") == mock_sse_obj

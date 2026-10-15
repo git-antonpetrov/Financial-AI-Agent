@@ -3,6 +3,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from dateutil.relativedelta import relativedelta
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
@@ -34,7 +35,11 @@ async def return_deposit_to_bank(client_id: str, deposit_number: str, amount: De
         async with bank_session_maker() as b_session:
             acc = await b_session.scalar(
                 select(Account)
-                .where(Account.client_id == client_id, Account.status == "active")
+                .where(
+                    Account.client_id == client_id,
+                    Account.status == "active",
+                    (Account.currency == "RUB") | (Account.currency.is_(None)),
+                )
                 .order_by(Account.created_at)
                 .with_for_update()
             )
@@ -69,7 +74,7 @@ async def return_deposit_to_bank(client_id: str, deposit_number: str, amount: De
         return False
 
 
-async def process_savings_accounts(session, current_date):
+async def process_savings_accounts(session: AsyncSession, current_date: date) -> None:
     """
     Выплата процентов по накопительным счетам.
     """
@@ -77,12 +82,14 @@ async def process_savings_accounts(session, current_date):
 
     current_datetime = datetime.combine(current_date, datetime.max.time())
 
-    # Берем только АКТИВНЫЕ счета, у которых наступила дата выплаты
+    # Берем только АКТИВНЫЕ счета, у которых наступила дата выплаты (с блокировкой строки для исключения гонок)
     result = await session.execute(
-        select(SavingsAccount).where(
+        select(SavingsAccount)
+        .where(
             SavingsAccount.status == "active",
             SavingsAccount.next_payment_date <= current_datetime,
         )
+        .with_for_update()
     )
     accounts = result.scalars().all()
 
@@ -104,7 +111,7 @@ async def process_savings_accounts(session, current_date):
     log_info("Invest EOD", f"Успешно обработано накопительных счетов: {processed}")
 
 
-async def process_deposits(session, current_date):
+async def process_deposits(session: AsyncSession, current_date: date) -> None:
     """
     Выплата процентов по вкладам и их закрытие по истечению срока с возвратом средств в банк.
     """
@@ -113,7 +120,9 @@ async def process_deposits(session, current_date):
     current_datetime = datetime.combine(current_date, datetime.max.time())
 
     result = await session.execute(
-        select(Deposit).where(Deposit.status == "active", Deposit.next_payment_date <= current_datetime)
+        select(Deposit)
+        .where(Deposit.status == "active", Deposit.next_payment_date <= current_datetime)
+        .with_for_update()
     )
     deposits = result.scalars().all()
 
@@ -125,9 +134,6 @@ async def process_deposits(session, current_date):
 
         monthly_rate = Decimal(str(dep.interest_rate)) / Decimal(100) / Decimal(12)
         dep.next_payment_amount = (Decimal(str(dep.balance)) * monthly_rate).quantize(Decimal("0.01"))
-
-        dep.next_payment_date = dep.next_payment_date + relativedelta(months=1)
-        processed += 1
 
         # Проверяем не истек ли срок вклада
         if dep.opened_at:
@@ -151,6 +157,9 @@ async def process_deposits(session, current_date):
                     "Invest EOD",
                     f"Закрытие вклада {dep.account_number} отложено: не удалось перевести средства на банковский счет",
                 )
+        else:
+            dep.next_payment_date = dep.next_payment_date + relativedelta(months=1)
+        processed += 1
 
     await session.commit()
     log_info(
@@ -159,7 +168,7 @@ async def process_deposits(session, current_date):
     )
 
 
-async def process_broker_accounts(session, current_date):
+async def process_broker_accounts(session: AsyncSession, current_date: date) -> None:
     """
     Генерация рыночной доходности и списание Success Fee (комиссии) по брокерским счетам.
     """
@@ -174,6 +183,7 @@ async def process_broker_accounts(session, current_date):
             BrokerAccount.status == "active",
             BrokerAccount.next_commission_date <= current_datetime,
         )
+        .with_for_update()
     )
     accounts = result.scalars().all()
 
@@ -220,7 +230,7 @@ async def process_broker_accounts(session, current_date):
     log_info("Invest EOD", f"Обработано брокерских счетов (по стратегиям): {processed}")
 
 
-async def run_invest_eod():
+async def run_invest_eod() -> None:
     """
     Запускает весь цикл EOD для инвестиций по реальному системному времени.
     """

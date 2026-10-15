@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from src.simulations.db.digital_ruble.db.client import get_async_session_maker
@@ -23,21 +24,26 @@ def get_moscow_now() -> datetime:
     return datetime.now(timezone(timedelta(hours=3))).replace(tzinfo=None)
 
 
-async def process_single_contract(session, contract: SmartContract) -> str:
+async def process_single_contract(session: AsyncSession, contract: SmartContract) -> str:
     """
     Обрабатывает один смарт-контракт в изолированном savepoint.
     Возвращает статус: 'executed', 'failed', 'pending', 'skipped'.
     """
     contract_amount = Decimal(str(contract.amount))
 
-    # Блокируем строки кошельков участников от параллельных изменений
-    creator_res = await session.execute(select(Wallet).where(Wallet.id == contract.creator_wallet_id).with_for_update())
-    creator = creator_res.scalars().first()
+    # Блокируем строки кошельков участников в строго детерминированном (отсортированном) порядке для исключения deadlock
+    first_id, second_id = sorted([contract.creator_wallet_id, contract.receiver_wallet_id])
+    first_res = await session.execute(select(Wallet).where(Wallet.id == first_id).with_for_update())
+    w1 = first_res.scalars().first()
 
-    receiver_res = await session.execute(
-        select(Wallet).where(Wallet.id == contract.receiver_wallet_id).with_for_update()
-    )
-    receiver = receiver_res.scalars().first()
+    if first_id != second_id:
+        second_res = await session.execute(select(Wallet).where(Wallet.id == second_id).with_for_update())
+        w2 = second_res.scalars().first()
+    else:
+        w2 = w1
+
+    creator = w1 if contract.creator_wallet_id == first_id else w2
+    receiver = w2 if contract.receiver_wallet_id == second_id else w1
 
     if not creator or not receiver:
         contract.status = "failed"
@@ -139,7 +145,7 @@ async def process_single_contract(session, contract: SmartContract) -> str:
         return "pending"
 
 
-async def process_smart_contracts(session):
+async def process_smart_contracts(session: AsyncSession) -> None:
     """
     Извлекает активные смарт-контракты и исполняет каждый в отдельном savepoint.
     """
@@ -172,6 +178,18 @@ async def process_smart_contracts(session):
             )
             contract.status = "failed"
             contract.error_message = f"Внутренний сбой обработчика: {e}"
+            # Гарантированный возврат замороженного депозита создателю контракта
+            try:
+                creator = await session.get(Wallet, contract.creator_wallet_id)
+                if creator:
+                    c_frozen = Decimal(str(creator.frozen_balance))
+                    c_bal = Decimal(str(creator.balance))
+                    c_amount = Decimal(str(contract.amount))
+                    refund = min(c_frozen, c_amount)
+                    creator.frozen_balance = c_frozen - refund
+                    creator.balance = c_bal + refund
+            except Exception as refund_err:
+                log_error("Ruble EOD", f"Не удалось разблокировать средства контракта {contract.id}: {refund_err}")
 
     await session.commit()
     log_info(
@@ -180,7 +198,7 @@ async def process_smart_contracts(session):
     )
 
 
-async def run_ruble_eod():
+async def run_ruble_eod() -> None:
     """
     Точка входа запуска ночного цикла расчетов цифрового рубля.
     """

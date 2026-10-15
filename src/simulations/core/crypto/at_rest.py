@@ -159,6 +159,23 @@ def decrypt_text_at_rest(
     return decrypted_bytes.decode("utf-8")
 
 
+def is_encrypted_text(val_str: str) -> bool:
+    """
+    Проверяет, является ли строка зашифрованным пакетом Base64url (AES-256-GCM v1).
+    Конверт содержит сигнатуру 'ENC1' (в base64 первые 5 символов всегда 'RU5DM').
+    """
+    if not isinstance(val_str, str) or len(val_str) < 44:
+        return False
+    if not val_str.startswith("RU5DM"):
+        return False
+    try:
+        padded = val_str[:8] + "=" * (-len(val_str[:8]) % 4)
+        prefix = base64.urlsafe_b64decode(padded.encode("ascii"))
+        return prefix.startswith(MAGIC_ENCRYPTION_V1)
+    except Exception:
+        return False
+
+
 class EncryptedText(TypeDecorator):
     """
     SQLAlchemy тип для прозрачного шифрования строковых данных (номера счетов, карт, кошельков)
@@ -181,7 +198,7 @@ class EncryptedText(TypeDecorator):
         if value is None:
             return None
         val_str = str(value)
-        if val_str.startswith("RU5DMS"):
+        if is_encrypted_text(val_str):
             return decrypt_text_at_rest(val_str)
         return val_str
 
@@ -210,7 +227,7 @@ class EncryptedDecimal(TypeDecorator):
         if value is None:
             return None
         val_str = str(value)
-        if val_str.startswith("RU5DMS"):
+        if is_encrypted_text(val_str):
             decrypted = decrypt_text_at_rest(val_str)
             return Decimal(decrypted)
         try:

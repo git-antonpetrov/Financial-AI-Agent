@@ -29,15 +29,6 @@ def random_date_past_months(months=6):
     return start_date + timedelta(days=random_days)
 
 
-def random_date_late_2026():
-    # Возвращает дату в ноябре-декабре 2026 года
-    start_date = datetime(2026, 11, 1)
-    end_date = datetime(2026, 12, 31)
-    delta = end_date - start_date
-    random_days = random.randrange(delta.days)
-    return start_date + timedelta(days=random_days)
-
-
 from src.simulations.core.utils.db_utils import validate_db_name
 
 
@@ -54,9 +45,18 @@ async def create_database_if_not_exists():
     sys_url = url.replace(f"/{raw_db_name}", "/postgres")
     sys_url_asyncpg = sys_url.replace("postgresql+asyncpg://", "postgres://")
 
+    ssl_mode = os.getenv("POSTGRES_SSLMODE", "").strip()
+    conn_kwargs = {}
+    if ssl_mode and ssl_mode not in ("disable", "allow"):
+        if os.path.exists("/certs/ca.crt"):
+            import ssl
+            conn_kwargs["ssl"] = ssl.create_default_context(cafile="/certs/ca.crt")
+        else:
+            conn_kwargs["ssl"] = True
+
     try:
         print(f"Подключаемся к {sys_url_asyncpg} для создания БД {db_name}...")
-        conn = await asyncpg.connect(sys_url_asyncpg)
+        conn = await asyncpg.connect(sys_url_asyncpg, **conn_kwargs)
         await conn.execute(f'CREATE DATABASE "{db_name}"')
         await conn.close()
         print(f"База данных {db_name} успешно создана.")
@@ -114,9 +114,9 @@ async def seed_data():
             "наступление_даты",
         ]
 
-        dummy_code = """
+        template_contract_code = """
 def execute(ctx):
-    # Тестовая заглушка: проверяем статус условия из контекста
+    # Базовый шаблон смарт-контракта: проверка статуса внешнего условия из контекста
     if ctx.get_condition_status() == 'fulfilled':
         ctx.transfer(ctx.creator_id, ctx.receiver_id, ctx.amount)
         return True
@@ -137,7 +137,7 @@ def execute(ctx):
                 receiver_wallet_id=receiver.id,
                 amount=amount,
                 condition_type=random.choice(conditions),
-                contract_code=dummy_code.strip(),
+                contract_code=template_contract_code.strip(),
                 condition_status="pending",
                 status="active",
                 error_message=None,

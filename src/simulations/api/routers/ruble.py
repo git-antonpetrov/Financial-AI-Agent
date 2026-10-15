@@ -93,7 +93,7 @@ async def _compensate_bank_transfer(
     amount: Decimal,
     reason: str,
     op_type: str = "transfer_in_compensation",
-):
+) -> None:
     """
     Компенсационная транзакция: возвращает средства на банковский счет при сбое в кошельке цифрового рубля.
     """
@@ -122,7 +122,7 @@ async def _compensate_bank_transfer(
         )
 
 
-async def _compensate_wallet_withdraw(wallet_id: str, amount: Decimal, reason: str):
+async def _compensate_wallet_withdraw(wallet_id: str, amount: Decimal, reason: str) -> None:
     """
     Компенсационная транзакция: возвращает средства в кошелек цифрового рубля при сбое зачисления на банковский счет.
     """
@@ -191,6 +191,10 @@ async def fund_wallet(
         acc = await bdb.scalar(select(Account).where(Account.id == req.bank_account_id).with_for_update())
         if not acc:
             raise HTTPException(404, "Банковский счет не найден")
+        if acc.status and acc.status != "active":
+            raise HTTPException(400, f"Банковский счет недоступен (статус: {acc.status})")
+        if acc.currency and acc.currency != "RUB":
+            raise HTTPException(400, "Пополнение кошелька цифрового рубля возможно только с рублевого счета")
 
         acc_balance = Decimal(str(acc.balance))
         if acc_balance < req.amount:
@@ -213,6 +217,10 @@ async def fund_wallet(
             wallet = await rdb.scalar(select(Wallet).where(Wallet.id == wallet_id).with_for_update())
             if not wallet:
                 raise HTTPException(404, "Кошелек не найден")
+            if wallet.status and wallet.status != "active":
+                raise HTTPException(400, f"Кошелек недоступен (статус: {wallet.status})")
+            if acc.client_id and wallet.client_id and str(acc.client_id) != str(wallet.client_id):
+                raise HTTPException(403, "Банковский счет и кошелек принадлежат разным клиентам")
 
             wallet.balance = Decimal(str(wallet.balance)) + req.amount
             await rdb.commit()
@@ -274,6 +282,8 @@ async def withdraw_wallet(
         wallet = await rdb.scalar(select(Wallet).where(Wallet.id == wallet_id).with_for_update())
         if not wallet:
             raise HTTPException(404, "Кошелек не найден")
+        if wallet.status and wallet.status != "active":
+            raise HTTPException(400, f"Кошелек недоступен (статус: {wallet.status})")
 
         wallet_balance = Decimal(str(wallet.balance))
         if wallet_balance < req.amount:
@@ -288,6 +298,12 @@ async def withdraw_wallet(
             acc = await bdb.scalar(select(Account).where(Account.id == req.bank_account_id).with_for_update())
             if not acc:
                 raise HTTPException(404, "Банковский счет не найден")
+            if acc.status and acc.status != "active":
+                raise HTTPException(400, f"Банковский счет недоступен (статус: {acc.status})")
+            if acc.currency and acc.currency != "RUB":
+                raise HTTPException(400, "Вывод цифрового рубля возможен только на рублевый банковский счет")
+            if acc.client_id and wallet.client_id and str(acc.client_id) != str(wallet.client_id):
+                raise HTTPException(403, "Банковский счет и кошелек принадлежат разным клиентам")
 
             acc.balance = Decimal(str(acc.balance)) + req.amount
             tx = Transaction(
@@ -488,6 +504,12 @@ async def update_contract_condition(
     if req.signature:
         nonce = req.nonce or (request.headers.get("X-Nonce") if request else None)
         timestamp = req.timestamp or (request.headers.get("X-Timestamp") if request else None)
+        require_nonce_ts = os.getenv("REQUIRE_ORACLE_NONCE_TIMESTAMP", "false").lower() in ("true", "1")
+        if require_nonce_ts and (not nonce or not timestamp):
+            raise HTTPException(
+                400,
+                detail="Для проверки подписи оракула обязательны заголовок/поле X-Nonce и X-Timestamp",
+            )
         is_valid, sig_err = get_oracle_verifier().verify_condition_signature(
             contract_id=contract_id,
             status=req.status,

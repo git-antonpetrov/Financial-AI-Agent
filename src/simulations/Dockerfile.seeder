@@ -21,6 +21,5 @@ ENV PYTHONPATH=/app
 
 USER appuser
 
-# Ждем 60 секунд (чтобы Postgres гарантированно проинициализировался)
-# Затем по очереди запускаем сидеры
-CMD ["sh", "-c", "sleep 60 && python src/simulations/db/bank/scripts/seed_db.py && python src/simulations/db/invest/scripts/seed_db.py && python src/simulations/db/digital_ruble/scripts/seed_db.py"]
+# Запуск сидеров наполнения начальными данными
+CMD ["sh", "-c", "python src/simulations/db/bank/scripts/seed_db.py && python src/simulations/db/invest/scripts/seed_db.py && python src/simulations/db/digital_ruble/scripts/seed_db.py"]

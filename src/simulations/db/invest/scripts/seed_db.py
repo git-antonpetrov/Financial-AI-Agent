@@ -54,9 +54,18 @@ async def create_database_if_not_exists():
     sys_url = url.replace(f"/{raw_db_name}", "/postgres")
     sys_url_asyncpg = sys_url.replace("postgresql+asyncpg://", "postgres://")
 
+    ssl_mode = os.getenv("POSTGRES_SSLMODE", "").strip()
+    conn_kwargs = {}
+    if ssl_mode and ssl_mode not in ("disable", "allow"):
+        if os.path.exists("/certs/ca.crt"):
+            import ssl
+            conn_kwargs["ssl"] = ssl.create_default_context(cafile="/certs/ca.crt")
+        else:
+            conn_kwargs["ssl"] = True
+
     try:
         print(f"Подключаемся к {sys_url_asyncpg} для создания БД {db_name}...")
-        conn = await asyncpg.connect(sys_url_asyncpg)
+        conn = await asyncpg.connect(sys_url_asyncpg, **conn_kwargs)
         await conn.execute(f'CREATE DATABASE "{db_name}"')
         await conn.close()
         print(f"База данных {db_name} успешно создана.")

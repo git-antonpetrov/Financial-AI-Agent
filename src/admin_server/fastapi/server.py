@@ -23,6 +23,7 @@ from security import (
     CurrentUser,
     Permission,
     Role,
+    VALID_ADMIN_USERS,
     calculate_key_fingerprint,
     clear_pending_totp_secret,
     create_access_token,
@@ -110,6 +111,12 @@ if settings.REDIS_SSL and os.path.exists(REDIS_SSL_CA):
     redis_kwargs["ssl_cert_reqs"] = "required"
 
 redis_client = redis.Redis(**redis_kwargs)
+
+USER_ROLE_MAPPING: dict[str, Role] = {
+    "admin": Role.SUPERADMIN,
+    "operator": Role.OPERATOR,
+    "auditor": Role.AUDITOR,
+}
 
 
 # --- НАСТРОЙКА LLM (через централизованный LLMClient) ---
@@ -416,7 +423,11 @@ async def login(
     except Exception as e:
         log_warning("Auth", f"Failed to check failed attempts in Redis: {e}")
 
-    if not secrets.compare_digest(form_data.username, "admin"):
+    matched_user = next(
+        (u for u in VALID_ADMIN_USERS if secrets.compare_digest(form_data.username, u)),
+        None,
+    )
+    if not matched_user:
         try:
             curr = redis_client.incr(failed_key)
             if curr == 1:
@@ -437,11 +448,12 @@ async def login(
         )
         raise HTTPException(status_code=400, detail="Incorrect username or password")
 
-    if not settings.ADMIN_PASSWORD_HASH:
-        log_error("Auth", "Server not configured: ADMIN_PASSWORD_HASH missing")
-        raise HTTPException(status_code=500, detail="Server not configured: ADMIN_PASSWORD_HASH missing")
+    expected_hash = settings.get_password_hash_for_user(matched_user)
+    if not expected_hash:
+        log_error("Auth", f"Server not configured: password hash missing for user {matched_user}")
+        raise HTTPException(status_code=500, detail="Server not configured: password hash missing")
 
-    if not verify_password(form_data.password, settings.ADMIN_PASSWORD_HASH):
+    if not verify_password(form_data.password, expected_hash):
         try:
             curr = redis_client.incr(failed_key)
             if curr == 1:
@@ -576,8 +588,8 @@ async def login(
     except Exception:
         pass
 
-    # Для модели «1 сервер — 1 админ» токен администратора всегда выпускается с ролью SUPERADMIN
-    user_role = Role.SUPERADMIN
+    # Определение роли пользователя согласно ролевой матрице RBAC
+    user_role = USER_ROLE_MAPPING.get(form_data.username, Role.OPERATOR)
 
     access_token = create_access_token(data={"sub": form_data.username}, role=user_role)
     refresh_token = create_refresh_token(data={"sub": form_data.username}, role=user_role)
@@ -627,44 +639,46 @@ async def get_role_matrix(current_user: CurrentUser = Depends(get_current_user))
     return schemas.RoleMatrixResponse(roles=roles_info, all_permissions=sorted([p.value for p in Permission]))
 
 
-async def check_totp_enrolled(db: AsyncSession) -> bool:
+async def check_totp_enrolled(db: AsyncSession, username: str = "admin") -> bool:
     """Проверяет, завершена ли первичная привязка 2FA хотя бы одним успешным входом."""
     if redis_client:
         try:
-            val = redis_client.get("auth:totp_enrolled:admin")
+            val = redis_client.get(f"auth:totp_enrolled:{username}")
             if val is not None:
                 return str(val) == "1"
         except Exception:
             pass
     try:
-        db_secret = await crud.get_system_setting(db, "ADMIN_TOTP_SECRET")
+        setting_key = "ADMIN_TOTP_SECRET" if username == "admin" else f"ADMIN_TOTP_SECRET_{username.upper()}"
+        db_secret = await crud.get_system_setting(db, setting_key)
         if db_secret:
             if redis_client:
                 try:
-                    redis_client.set("auth:totp_enrolled:admin", "1")
+                    redis_client.set(f"auth:totp_enrolled:{username}", "1")
                 except Exception:
                     pass
             return True
     except Exception:
         pass
-    try:
-        from db.models import AuditLog
-        from sqlalchemy import select
+    if username == "admin":
+        try:
+            from db.models import AuditLog
+            from sqlalchemy import select
 
-        res = await db.execute(
-            select(AuditLog.id)
-            .where(AuditLog.action.in_(["AUTH_LOGIN_SUCCESS", "AUTH_2FA_ONBOARDED_PERSISTED"]))
-            .limit(1)
-        )
-        has_login = res.scalar_one_or_none() is not None
-        if has_login and redis_client:
-            try:
-                redis_client.set("auth:totp_enrolled:admin", "1")
-            except Exception:
-                pass
-        return has_login
-    except Exception:
-        pass
+            res = await db.execute(
+                select(AuditLog.id)
+                .where(AuditLog.action.in_(["AUTH_LOGIN_SUCCESS", "AUTH_2FA_ONBOARDED_PERSISTED"]))
+                .limit(1)
+            )
+            has_login = res.scalar_one_or_none() is not None
+            if has_login and redis_client:
+                try:
+                    redis_client.set("auth:totp_enrolled:admin", "1")
+                except Exception:
+                    pass
+            return has_login
+        except Exception:
+            pass
     return False
 
 
@@ -720,7 +734,11 @@ async def pair_2fa(
         except Exception as e:
             log_warning("RateLimit", f"Failed to check 2FA rate limit in Redis: {e}")
 
-    if not secrets.compare_digest(payload.username, "admin"):
+    matched_user = next(
+        (u for u in VALID_ADMIN_USERS if secrets.compare_digest(payload.username, u)),
+        None,
+    )
+    if not matched_user:
         if redis_client:
             try:
                 curr = redis_client.incr(failed_key)
@@ -771,7 +789,7 @@ async def pair_2fa(
         )
         raise HTTPException(status_code=400, detail="Incorrect username or password")
 
-    is_enrolled = await check_totp_enrolled(db)
+    is_enrolled = await check_totp_enrolled(db, username=payload.username)
 
     # Проверка recovery / bootstrap токена администратора (полная изоляция от токенов агентов)
     expected_setup_token = os.getenv("ADMIN_SETUP_TOKEN", "").strip()
@@ -1477,26 +1495,26 @@ async def llm_analyze(
     current_admin: CurrentUser = Depends(require_permission(Permission.DOCUMENTS_WRITE)),
 ):
     system_prompt = """
-    ТЕБЕ НУЖНО ПРОАНАЛИЗИРОВАТЬ ТЕКСТ ДОКУМЕНТА И ИЗВЛЕЧЬ ДВА ПАРАМЕТРА: system_name И short_name.
-    ИНСТРУКЦИЯ СТРОГАЯ, КАК ДЛЯ РЕБЕНКА (ОБЪЯСНЯЮ ПО ШАГАМ, ВЫПОЛНЯЙ В ТОЧНОСТИ):
+    Проанализируй текст нормативного документа и извлеки параметры: system_name и short_name.
+    Требования к формату:
 
-    1. Что такое system_name:
-       - Это уникальное системное имя документа.
-       - Оно должно содержать ТОЛЬКО латинские буквы (a-z), цифры (0-9) и символ подчеркивания (_).
-       - НИКАКИХ ПРОБЕЛОВ! НИКАКИХ СЛЕШЕЙ (/) ИЛИ ТОЧЕК (.)! НИКАКИХ РУССКИХ БУКВ!
-       - Если видишь русские буквы - делай строгий транслит на английский.
-       - Формат всегда такой: [тип_документа]_[номер_документа]_[дата_без_разделителей_ddmmyyyy]
-       - Примеры как НАДО делать:
-         - Если это "Федеральный Закон №115 от 01.01.2024", то system_name = "fz_115_01012024"
-         - Если это "Письмо Банка России №123-И от 15.08.2023", то system_name = "pismo_br_123_i_15082023"
-         - Если это "Приказ №1 от 05.02.2025", то system_name = "prikaz_1_05022025"
+    1. system_name:
+       - Уникальное системное имя документа.
+       - Должно содержать исключительно латинские буквы (a-z), цифры (0-9) и знак подчеркивания (_).
+       - Запрещены пробелы, слеши (/), точки (.) и символы кириллицы.
+       - При наличии кириллических символов использовать строгую транслитерацию на английский.
+       - Формат: [тип_документа]_[номер_документа]_[дата_без_разделителей_ddmmyyyy]
+       - Примеры:
+         - "Федеральный Закон №115 от 01.01.2024" -> "fz_115_01012024"
+         - "Письмо Банка России №123-И от 15.08.2023" -> "pismo_br_123_i_15082023"
+         - "Приказ №1 от 05.02.2025" -> "prikaz_1_05022025"
 
-    2. Что такое short_name:
-       - Это короткое имя документа (БЕЗ ДАТЫ на конце).
-       - То есть ты берешь system_name и просто отрезаешь от него дату.
-       - Примеры как НАДО делать:
-         - Для "fz_115_01012024" -> short_name = "fz_115"
-         - Для "pismo_br_123_i_15082023" -> short_name = "pismo_br_123_i"
+    2. short_name:
+       - Краткое наименование документа без даты на конце.
+       - Формируется на основе system_name с отсечением суффикса даты.
+       - Примеры:
+         - "fz_115_01012024" -> "fz_115"
+         - "pismo_br_123_i_15082023" -> "pismo_br_123_i"
     """
 
     prompt = system_prompt + "\n\nТЕКСТ ДЛЯ АНАЛИЗА:\n" + req.text[:15000]
@@ -1615,38 +1633,6 @@ async def reject_agent_requests(
         details={"request_ids": req.request_ids, "count": len(req.request_ids)},
     )
     return schemas.BatchActionResponse(status="ok")
-
-
-@app.post("/api/agent-requests/bootstrap", response_model=schemas.AgentRequestResponse)
-async def create_agent_request_endpoint(
-    req: schemas.AgentRequestCreate,
-    db: AsyncSession = Depends(get_db),
-    authorization: str = Header(...),
-):
-    """Создает заявку от имени агента с валидацией его bootstrap-токена."""
-    expected_token = settings.get_bootstrap_token(req.agent_name)
-    expected_auth = f"Bearer {expected_token}" if expected_token else ""
-    if not expected_token or not secrets.compare_digest(authorization, expected_auth):
-        log_warning("API", f"Invalid bootstrap token for agent {req.agent_name}")
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-    created_req = await crud.create_agent_request(
-        db,
-        req.agent_name,
-        req.document_name_ru,
-        req.document_name_en,
-        req.justification_ru,
-        req.justification_en,
-    )
-    await audit.log_audit_event(
-        db,
-        actor=f"agent:{req.agent_name}",
-        action="REQUEST_CREATED",
-        status="SUCCESS",
-        resource=f"request:{created_req.id}",
-        details={"document_name_ru": req.document_name_ru, "agent": req.agent_name},
-    )
-    return created_req
 
 
 # --- МАРШРУТЫ: ЗАЩИЩЕННЫЙ ЖУРНАЛ АУДИТА (TAMPER-EVIDENT AUDIT TRAIL) ---

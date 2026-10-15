@@ -25,7 +25,7 @@ class OracleKeyManager:
     ):
         self._public_key_pem = public_key_pem or os.getenv("ORACLE_PUBLIC_KEY_PEM")
         self._private_key_pem = private_key_pem or os.getenv("ORACLE_PRIVATE_KEY_PEM")
-        self._dev_private_key = None
+        self._private_key = None
 
         if not self._public_key_pem:
             pub_paths = [
@@ -67,7 +67,7 @@ class OracleKeyManager:
 
         if self._private_key_pem:
             try:
-                self._dev_private_key = serialization.load_pem_private_key(
+                self._private_key = serialization.load_pem_private_key(
                     self._private_key_pem.encode("utf-8"),
                     password=None,
                     backend=default_backend(),
@@ -78,11 +78,16 @@ class OracleKeyManager:
     def get_public_key_pem(self) -> str:
         return self._public_key_pem
 
+    @property
+    def _dev_private_key(self) -> rsa.RSAPrivateKey | None:
+        """Свойство для обратной совместимости с тестами."""
+        return self._private_key
+
     def get_dev_private_key(self) -> rsa.RSAPrivateKey | None:
-        return self._dev_private_key
+        return self._private_key
 
     def get_private_key(self) -> rsa.RSAPrivateKey | None:
-        return self._dev_private_key
+        return self._private_key
 
     def load_public_key(self) -> rsa.RSAPublicKey:
         return serialization.load_pem_public_key(
@@ -167,6 +172,11 @@ class OracleVerifier:
         if not signature_b64 or not signature_b64.strip():
             return False, "Подпись оракула отсутствует"
 
+        # SEC-14: Если включен строгий режим проверки nonce и timestamp для оракула
+        require_nonce_ts = os.getenv("REQUIRE_ORACLE_NONCE_TIMESTAMP", "false").lower() in ("true", "1")
+        if require_nonce_ts and (timestamp is None or nonce is None):
+            return False, "Для верификации подписи оракула обязательны параметры timestamp и nonce (SEC-14)"
+
         # SEC-14: Проверка дрейфа времени (Timestamp Skew)
         if timestamp is not None:
             try:
@@ -222,3 +232,9 @@ def get_oracle_verifier() -> OracleVerifier:
     if _ORACLE_VERIFIER_INSTANCE is None:
         _ORACLE_VERIFIER_INSTANCE = OracleVerifier()
     return _ORACLE_VERIFIER_INSTANCE
+
+
+def reset_oracle_verifier_for_tests() -> None:
+    """Сбрасывает синглтон верификатора оракула для изоляции тестов."""
+    global _ORACLE_VERIFIER_INSTANCE
+    _ORACLE_VERIFIER_INSTANCE = None

@@ -4,7 +4,7 @@
 - Генерация 2048-битной RSA-пары для асимметричной подписи JWT (RS256);
 - Генерация 256-битного мастер-ключа шифрования Data at Rest (DATA_ENCRYPTION_KEY);
 - Генерация секрета 2FA TOTP (ADMIN_TOTP_SECRET);
-- Генерация криптостойких паролей для БД, Redis, MinIO и ChromaDB (если заданы заглушки);
+- Генерация криптостойких паролей для БД, Redis, MinIO и ChromaDB (при отсутствии или небезопасных значениях);
 - Настройка параметров сквозного Zero-Trust шифрования (POSTGRES_SSLMODE=require, REDIS_SSL=true, MINIO_SECURE=true);
 - Настройка параметров Caddy и mTLS.
 """
@@ -95,6 +95,8 @@ def setup_vds(project_dir: str | None = None) -> dict[str, str]:
 
     env_path = os.path.join(project_dir, ".env")
     example_path = os.path.join(project_dir, ".env.example")
+    data_dir = os.path.join(project_dir, "data")
+    os.makedirs(data_dir, exist_ok=True)
 
     env_lines: list[str] = []
     if os.path.exists(env_path):

@@ -69,6 +69,25 @@ from security import (
 )
 from src.admin_client.backend.core.remote_client import RemoteAdminClient
 from src.admin_client.backend import main
+import contextlib
+
+
+@contextlib.contextmanager
+def patch_rag_external_services():
+    """Мокирует _get_external_services по всем возможным алиасам модуля в sys.modules."""
+    patches = []
+    for mod_name in ["routers.rag_documents", "src.admin_server.fastapi.routers.rag_documents"]:
+        try:
+            p = patch(f"{mod_name}._get_external_services", return_value=(None, None))
+            p.start()
+            patches.append(p)
+        except Exception:
+            pass
+    try:
+        yield
+    finally:
+        for p in patches:
+            p.stop()
 
 
 @pytest.fixture
@@ -505,7 +524,7 @@ def test_rag_documents_endpoint_returns_server_cert_header_and_body(pki_setup):
             "X-Client-Cert-Subject": "CN=superadmin-workstation,OU=admin_operator"
         }
 
-        with patch("src.admin_server.fastapi.routers.rag_documents._get_external_services", return_value=(None, None)):
+        with patch_rag_external_services():
             res = client.post("/api/v1/rag/documents", content=body_bytes, headers=headers)
 
         assert res.status_code == 201
@@ -631,7 +650,7 @@ def test_rag_documents_and_delete_unauthorized_role_rejected(pki_setup):
         "Content-Type": "application/json",
     }
 
-    with patch("src.admin_server.fastapi.routers.rag_documents._get_external_services", return_value=(None, None)):
+    with patch_rag_external_services():
         # 1. Загрузка должна вернуть HTTP 403 Forbidden
         res_upload = client.post("/api/v1/rag/documents", content=body_bytes, headers=headers)
         assert res_upload.status_code == 403
@@ -819,7 +838,7 @@ def test_rag_documents_delete_endpoint_and_x_agent_cert(pki_setup):
             "X-Client-Cert-Subject": "CN=superadmin-workstation,OU=admin_operator"
         }
 
-        with patch("src.admin_server.fastapi.routers.rag_documents._get_external_services", return_value=(None, None)):
+        with patch_rag_external_services():
             res = client.post("/api/v1/rag/documents/delete", content=body_bytes, headers=headers)
 
         assert res.status_code == 200, res.text
