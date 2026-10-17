@@ -42,11 +42,13 @@ from src.simulations.core.utils.db_utils import validate_db_name
 
 
 async def create_database_if_not_exists():
-    DATABASE_URL = os.getenv(
-        "INVEST_DATABASE_URL",
-        "postgresql+asyncpg://agent_user:agent_password@localhost:15432/invest_db",
-    )
-    url = DATABASE_URL
+    url = os.getenv("INVEST_DATABASE_URL")
+    if not url or not url.strip():
+        raise ValueError(
+            "Критическая ошибка конфигурации: переменная окружения INVEST_DATABASE_URL "
+            "обязательна, но не задана. Использование значений по умолчанию запрещено."
+        )
+    url = url.strip()
     parsed = urlparse(url.replace("postgresql+asyncpg://", "postgresql://"))
     raw_db_name = parsed.path.lstrip("/")
     db_name = validate_db_name(raw_db_name)
@@ -63,24 +65,27 @@ async def create_database_if_not_exists():
         else:
             conn_kwargs["ssl"] = True
 
+    from src.simulations.core.utils.console_logger import log_info, log_warning
+
     try:
-        print(f"Подключаемся к {sys_url_asyncpg} для создания БД {db_name}...")
+        log_info("Invest DB", f"Подключение к {sys_url_asyncpg} для создания БД {db_name}...")
         conn = await asyncpg.connect(sys_url_asyncpg, **conn_kwargs)
         await conn.execute(f'CREATE DATABASE "{db_name}"')
         await conn.close()
-        print(f"База данных {db_name} успешно создана.")
+        log_info("Invest DB", f"База данных {db_name} успешно создана.")
     except asyncpg.exceptions.DuplicateDatabaseError:
-        print(f"База данных {db_name} уже существует.")
+        log_info("Invest DB", f"База данных {db_name} уже существует.")
     except Exception as e:
-        print(f"Ошибка при создании БД: {e}")
+        log_warning("Invest DB", f"Ошибка при создании БД: {e}")
 
 
 async def seed_data():
-    print("Создаем таблицы...")
+    from src.simulations.core.utils.console_logger import log_info
+    log_info("Invest DB", "Создание таблиц базы данных инвестиций...")
     await init_db()
 
     async with AsyncSessionLocal() as session:
-        print("Создаем инвестиционные стратегии (20 шт)...")
+        log_info("Invest DB", "Создание инвестиционных стратегий...")
         strategies = []
         templates = [
             ("Ультра-консервативная", 8.0, "Low", "ОФЗ, Гособлигации"),
@@ -180,7 +185,7 @@ async def seed_data():
                 session.add(brk)
 
         await session.commit()
-        print("База инвестиций успешно заполнена тестовыми данными!")
+        log_info("Invest DB", "База инвестиций успешно заполнена тестовыми данными!")
 
 
 async def main():

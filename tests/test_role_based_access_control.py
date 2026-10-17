@@ -9,7 +9,7 @@ FastAPI-зависимости require_role и require_permission,
 import os
 import sys
 import pytest
-from unittest.mock import MagicMock, AsyncMock, patch
+from unittest.mock import MagicMock
 from fastapi import HTTPException, status
 from fastapi.testclient import TestClient
 
@@ -31,19 +31,65 @@ from security import (
     create_refresh_token,
     decode_access_token,
     verify_and_rotate_refresh_token,
-    get_current_admin,
-    get_current_user,
     require_role,
     require_permission,
 )
 from rbac import (
     Role,
     Permission,
-    ROLE_PERMISSIONS,
-    ROLE_DESCRIPTIONS,
     CurrentUser,
     get_permissions_for_role,
 )
+
+
+class MockAuditSession:
+    """Имитатор асинхронной сессии БД для изолированного аудита."""
+    def __init__(self):
+        self.logs = []
+
+    def get_bind(self):
+        return None
+
+    def add(self, entry):
+        if not hasattr(entry, "id") or entry.id is None:
+            entry.id = len(self.logs) + 1
+        if entry not in self.logs:
+            self.logs.append(entry)
+
+    async def commit(self):
+        pass
+
+    async def refresh(self, entry):
+        pass
+
+    async def rollback(self):
+        pass
+
+    async def delete(self, entry):
+        if entry in self.logs:
+            self.logs.remove(entry)
+
+    async def execute(self, statement):
+        class ScalarResult:
+            def __init__(self, res_list):
+                self._list = res_list
+            def scalars(self):
+                return self
+            def all(self):
+                return list(self._list)
+            def first(self):
+                return self._list[0] if self._list else None
+        return ScalarResult(list(self.logs))
+
+
+@pytest.fixture(autouse=True)
+def setup_mock_db():
+    from server import app
+    from db.database import get_db
+    mock_session = MockAuditSession()
+    app.dependency_overrides[get_db] = lambda: mock_session
+    yield mock_session
+    app.dependency_overrides.pop(get_db, None)
 
 
 # --- 1. ТЕСТЫ СТРУКТУРЫ RBAC И КЛАССА CurrentUser ---
@@ -90,7 +136,7 @@ def test_role_and_permission_definitions():
 def test_current_user_compatibility():
     """Проверяет обратную совместимость CurrentUser со строковым типом."""
     user = CurrentUser(username="admin", role=Role.SUPERADMIN)
-    
+
     # 100% совместимость с str
     assert isinstance(user, str)
     assert user == "admin"

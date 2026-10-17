@@ -21,10 +21,10 @@ class InvestmentStrategy(Base):
     __tablename__ = "investment_strategies"
     id = Column(String, primary_key=True, default=generate_uuid)
     name = Column(String, nullable=False)
-    expected_yield = Column(Numeric(5, 2), default=0.00)  # %
+    expected_yield = Column(Numeric(5, 2), default=Decimal("0.00"))  # %
     risk_level = Column(String, nullable=False)  # Уровень риска: Low, Medium, High
     instruments = Column(String, nullable=False)
-    commission_fee = Column(Numeric(5, 2), default=0.00)  # % комиссии (от 5 до 25)
+    commission_fee = Column(Numeric(5, 2), default=Decimal("0.00"))  # % комиссии (от 5 до 25)
 
     broker_accounts = relationship("BrokerAccount", back_populates="strategy")
 
@@ -35,7 +35,7 @@ class SavingsAccount(Base):
     client_id = Column(String, nullable=False, index=True)
     account_number = Column(EncryptedText(deterministic=True), unique=True, nullable=False)
     balance = Column(EncryptedDecimal, default=Decimal("0.00"))
-    interest_rate = Column(Numeric(5, 2), default=0.00)
+    interest_rate = Column(Numeric(5, 2), default=Decimal("0.00"))
     status = Column(String, default="active", index=True)  # Возможные значения: active, closed
     next_payment_date = Column(DateTime, nullable=True, index=True)
     next_payment_amount = Column(EncryptedDecimal, default=Decimal("0.00"))
@@ -48,7 +48,7 @@ class Deposit(Base):
     client_id = Column(String, nullable=False, index=True)
     account_number = Column(EncryptedText(deterministic=True), unique=True, nullable=False)
     balance = Column(EncryptedDecimal, default=Decimal("0.00"))
-    interest_rate = Column(Numeric(5, 2), default=0.00)
+    interest_rate = Column(Numeric(5, 2), default=Decimal("0.00"))
     term_months = Column(Numeric(5, 0), default=12)
     status = Column(String, default="active", index=True)  # Возможные значения: active, closed
     next_payment_date = Column(DateTime, nullable=True, index=True)

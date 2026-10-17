@@ -1,17 +1,15 @@
-import os
 import time
 import base64
-import json
 import pytest
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 from fastapi.testclient import TestClient
-from cryptography.hazmat.primitives.asymmetric import rsa, padding
-from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives import hashes
 
 from src.simulations.api.main import app
-from src.simulations.core.crypto.bank_ca import BankCertificateAuthority, get_bank_ca
-from src.simulations.core.crypto.receipt_signer import ReceiptSigner, get_receipt_signer
+from src.simulations.core.crypto.bank_ca import BankCertificateAuthority, reset_bank_ca_for_tests
+from src.simulations.core.crypto.receipt_signer import ReceiptSigner, get_receipt_signer, reset_receipt_signer_for_tests
 from src.simulations.core.crypto.enclave_verifier import (
     NonceStore,
     EnclaveKeyManager,
@@ -19,7 +17,7 @@ from src.simulations.core.crypto.enclave_verifier import (
     get_enclave_verifier,
 )
 from src.simulations.core.crypto.oracle_verifier import OracleVerifier, get_oracle_verifier
-from src.simulations.core.crypto.platform_signer import DigitalPlatformSigner, get_digital_platform_signer
+from src.simulations.core.crypto.platform_signer import DigitalPlatformSigner
 from src.simulations.db.digital_ruble.db.models import SmartContract
 
 
@@ -115,6 +113,8 @@ def test_receipt_signing_and_verification():
     tampered_sig["signature"] = fake_sig
     is_valid, err = signer.verify_receipt(tampered_sig)
     assert is_valid is False
+    reset_receipt_signer_for_tests()
+    reset_bank_ca_for_tests()
 
 
 # =========================================================================
@@ -160,7 +160,7 @@ def test_enclave_verifier_request_validation():
     )
 
     # Подписываем приватным ключом Анклава (RSA-PSS)
-    dev_priv_key = key_mgr._dev_private_key
+    dev_priv_key = key_mgr.get_private_key()
     raw_sig = dev_priv_key.sign(
         canonical_data,
         padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
@@ -216,11 +216,15 @@ def test_oracle_verifier_signature():
     contract_id = "contract-oracle-777"
     status = "fulfilled"
     oracle_name = "trusted_rate_oracle"
+    now_ts = int(time.time())
+    nonce = f"test-oracle-nonce-{now_ts}"
 
     sig = verifier.sign_condition(
         contract_id=contract_id,
         status=status,
         oracle_name=oracle_name,
+        nonce=nonce,
+        timestamp=now_ts,
     )
     assert len(sig) > 0
 
@@ -230,6 +234,8 @@ def test_oracle_verifier_signature():
         status=status,
         oracle_name=oracle_name,
         signature_b64=sig,
+        nonce=nonce,
+        timestamp=now_ts,
     )
     assert is_valid is True
     assert "валидна" in msg
@@ -240,6 +246,8 @@ def test_oracle_verifier_signature():
         status="failed",
         oracle_name=oracle_name,
         signature_b64=sig,
+        nonce=f"{nonce}-fake",
+        timestamp=now_ts,
     )
     assert is_valid_fake is False
     assert "недействительна" in err_fake.lower()
@@ -344,11 +352,15 @@ def test_oracle_endpoint_with_valid_and_invalid_signature(monkeypatch):
 
     monkeypatch.setattr("src.simulations.api.routers.ruble.ruble_db", lambda: mock_cm)
 
-    # Формируем валидную подпись оракула
+    # Формируем валидную подпись оракула с nonce и timestamp (SEC-14)
+    now_ts = int(time.time())
+    nonce = f"oracle-endpoint-nonce-{now_ts}"
     sig = get_oracle_verifier().sign_condition(
         contract_id="contract-sec-1",
         status="fulfilled",
         oracle_name="rate_oracle",
+        nonce=nonce,
+        timestamp=now_ts,
     )
 
     # 1. Запрос с валидной подписью оракула
@@ -359,6 +371,8 @@ def test_oracle_endpoint_with_valid_and_invalid_signature(monkeypatch):
             "status": "fulfilled",
             "oracle_name": "rate_oracle",
             "signature": sig,
+            "nonce": nonce,
+            "timestamp": now_ts,
         },
     )
     assert res_valid.status_code == 200
@@ -380,6 +394,8 @@ def test_oracle_endpoint_with_valid_and_invalid_signature(monkeypatch):
             "status": "fulfilled",
             "oracle_name": "rate_oracle",
             "signature": fake_sig,
+            "nonce": f"{nonce}-invalid",
+            "timestamp": now_ts,
         },
     )
     assert res_invalid.status_code == 403
@@ -398,7 +414,7 @@ def test_enclave_signed_request_and_replay_protection():
     client = TestClient(app)
 
     verifier = get_enclave_verifier()
-    dev_priv_key = verifier.key_manager._dev_private_key
+    priv_key = verifier.key_manager.get_private_key()
 
     method = "GET"
     path = "/invest/products/terms"
@@ -414,7 +430,7 @@ def test_enclave_signed_request_and_replay_protection():
         body_bytes=body,
     )
 
-    raw_sig = dev_priv_key.sign(
+    raw_sig = priv_key.sign(
         canonical_data,
         padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
         hashes.SHA256(),

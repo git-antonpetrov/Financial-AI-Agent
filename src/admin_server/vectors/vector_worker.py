@@ -38,20 +38,12 @@ except ImportError:
             is_envelope_encryption_enabled,
         )
 
-try:
-    from fastapi.security import get_minio_sse
-except ImportError:
-    try:
-        from src.admin_server.fastapi.security import get_minio_sse
-    except ImportError:
-        get_minio_sse = None
-
-# --- Настройки окружения ---
+_strict_sec = os.getenv("STRICT_SECURITY", "false").lower() in ("true", "1")
 # Redis
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
-REDIS_SSL = os.getenv("REDIS_SSL", "false").lower() in ("true", "1", "yes")
+REDIS_SSL = os.getenv("REDIS_SSL", "true" if _strict_sec else "false").lower() in ("true", "1", "yes")
 QUEUE_NAME = "document_tasks"
 PROCESSING_QUEUE_NAME = "document_tasks_processing"
 
@@ -59,7 +51,7 @@ PROCESSING_QUEUE_NAME = "document_tasks_processing"
 MINIO_URL = os.getenv("MINIO_URL", "minio:9000")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "")
-MINIO_SECURE = os.getenv("MINIO_SECURE", "false").lower() in ("true", "1", "yes")
+MINIO_SECURE = os.getenv("MINIO_SECURE", "true" if _strict_sec else "false").lower() in ("true", "1", "yes")
 MINIO_SSE_C_KEY = os.getenv("MINIO_SSE_C_KEY", "")
 
 
@@ -149,11 +141,25 @@ if REDIS_SSL and os.path.exists(REDIS_SSL_CA):
 redis_client = redis.Redis(**redis_kwargs)
 
 
+minio_http_client = None
+MINIO_SSL_CA = os.getenv("MINIO_SSL_CA_CERTS", "/certs/ca.crt")
+if MINIO_SECURE and os.path.exists(MINIO_SSL_CA):
+    try:
+        import urllib3
+
+        minio_http_client = urllib3.PoolManager(
+            ca_certs=MINIO_SSL_CA,
+            cert_reqs="CERT_REQUIRED",
+        )
+    except Exception as ce:
+        log_warning("MinIO", f"Не удалось инициализировать PoolManager с CA: {ce}")
+
 minio_client = Minio(
     MINIO_URL,
     access_key=MINIO_ACCESS_KEY,
     secret_key=MINIO_SECRET_KEY,
     secure=MINIO_SECURE,
+    http_client=minio_http_client,
 )
 
 
@@ -401,8 +407,8 @@ def process_task(task: dict):
         markdown_text = None
         try:
             get_kwargs = {"bucket_name": bucket, "object_name": file_path}
-            if (os.getenv("MINIO_SSE_TYPE") or "").lower().strip() == "ssec" and get_minio_sse:
-                ssec_obj = get_minio_sse(sse_type="ssec")
+            if (os.getenv("MINIO_SSE_TYPE") or "").lower().strip() == "ssec":
+                ssec_obj = get_minio_ssec()
                 if ssec_obj is not None:
                     get_kwargs["ssec"] = ssec_obj
             response = minio_client.get_object(**get_kwargs)
@@ -410,11 +416,8 @@ def process_task(task: dict):
         except Exception as e:
             log_error("MinIO", f"Ошибка скачивания файла {file_path} из MinIO: {e}")
             if task.get("content"):
-                log_info(
-                    "MinIO",
-                    "Использование содержимого документа из полезной нагрузки задачи (fallback)",
-                )
-                markdown_text = task["content"]
+                markdown_text = task.get("content")
+                log_info("Fallback", f"Использован резервный content из задачи для файла {file_path}")
             else:
                 update_document_status(file_hash, agent, "error", f"MinIO error: {e}")
                 return

@@ -2,7 +2,6 @@
 Модуль тестирования наличия индексов у ключевых колонок ORM-моделей симуляции.
 """
 
-import pytest
 from src.simulations.db.bank.db.models import Account, Card, Transaction, AutoPayment
 from src.simulations.db.invest.db.models import SavingsAccount, Deposit, BrokerAccount
 from src.simulations.db.digital_ruble.db.models import Wallet, RubleTransaction, SmartContract

@@ -14,8 +14,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 # Предварительный импорт fastapi до модификаций sys.path
-import fastapi
-from fastapi import Depends, HTTPException, status
 
 # Настройка путей для импорта
 sys.path.insert(0, os.path.abspath("src/admin_server"))
@@ -30,15 +28,12 @@ for k in list(sys.modules.keys()):
     if k == "minio" or k.startswith("minio."):
         if isinstance(sys.modules[k], MagicMock):
             del sys.modules[k]
-import minio
-import minio.sse
 
 # Изоляция зависимостей окружения
 for mod in ["redis", "litellm", "asyncpg", "psycopg2", "psycopg2.pool", "chromadb", "chromadb.config", "langchain_text_splitters"]:
     if mod not in sys.modules:
         sys.modules[mod] = MagicMock()
 
-import security
 from security import (
     MAGIC_ENCRYPTION_V1,
     Settings,
@@ -231,7 +226,6 @@ def test_minio_sse_configuration_modes():
         if k == "minio" or k.startswith("minio."):
             if isinstance(sys.modules[k], MagicMock):
                 del sys.modules[k]
-    import minio.sse
     from minio.sse import SseS3, SseCustomerKey
 
     # 1. Принудительный режим SSE-S3
@@ -297,7 +291,7 @@ def test_docker_compose_encryption_configuration():
 def test_validate_production_env_requires_data_encryption_key():
     """Проверяет, что validate_production_env() требует DATA_ENCRYPTION_KEY для прома."""
     settings = Settings()
-    
+
     # Сохраняем исходное окружение
     saved_env = {k: os.environ.get(k) for k in [
         "JWT_PRIVATE_KEY", "JWT_PRIVATE_KEY_PATH", "ADMIN_TOTP_SECRET",
@@ -351,6 +345,11 @@ def test_upload_document_passes_minio_sse():
     ca_key = serialization.load_pem_private_key((certs_dir / "ca.key").read_bytes(), password=None)
     ca_cert = x509.load_pem_x509_certificate(ca_pem.encode("utf-8"))
     set_trusted_root_ca(ca_pem)
+    try:
+        from src.admin_server.fastapi import security as sec_pkg
+        sec_pkg.set_trusted_root_ca(ca_pem)
+    except Exception:
+        pass
 
     # Выпускаем валидный сертификат с ролью admin_operator, подписанный Root CA
     client_key = rsa.generate_private_key(65537, 2048, default_backend())
@@ -401,12 +400,46 @@ def test_upload_document_passes_minio_sse():
         "X-Client-Cert-Subject": "CN=superadmin-workstation,OU=admin_operator"
     }
 
-    rag_mod = sys.modules.get("routers.rag_documents") or sys.modules.get("src.admin_server.fastapi.routers.rag_documents")
-    with patch.object(rag_mod, "get_minio_sse", return_value=mock_sse_obj):
-        client = TestClient(app)
-        response = client.post("/api/v1/rag/documents", content=body_bytes, headers=headers)
-        assert response.status_code == 201, f"Failed with {response.status_code}: {response.text}"
-        minio_client.put_object.assert_called_once()
-        _, kwargs = minio_client.put_object.call_args
-        assert kwargs.get("sse") == mock_sse_obj
+    try:
+        from db.database import get_db
+    except ImportError:
+        from src.admin_server.fastapi.db.database import get_db
+
+    class MockUploadDbSession:
+        def __init__(self):
+            self.documents = []
+
+        def add(self, obj):
+            if not getattr(obj, "id", None):
+                obj.id = 1
+            self.documents.append(obj)
+
+        async def commit(self):
+            pass
+
+        async def refresh(self, obj):
+            pass
+
+        async def rollback(self):
+            pass
+
+        async def execute(self, *args, **kwargs):
+            m = MagicMock()
+            m.scalars.return_value.first.return_value = None
+            m.scalar_one_or_none.return_value = None
+            return m
+
+    app.dependency_overrides[get_db] = lambda: MockUploadDbSession()
+
+    try:
+        rag_mod = sys.modules.get("routers.rag_documents") or sys.modules.get("src.admin_server.fastapi.routers.rag_documents")
+        with patch.object(rag_mod, "get_minio_sse", return_value=mock_sse_obj):
+            client = TestClient(app)
+            response = client.post("/api/v1/rag/documents", content=body_bytes, headers=headers)
+            assert response.status_code == 201, f"Failed with {response.status_code}: {response.text}"
+            minio_client.put_object.assert_called_once()
+            _, kwargs = minio_client.put_object.call_args
+            assert kwargs.get("sse") == mock_sse_obj
+    finally:
+        app.dependency_overrides.pop(get_db, None)
 

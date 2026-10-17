@@ -15,13 +15,10 @@
 
 import os
 import sys
-import json
-from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock
 import pytest
 
 # Предварительный импорт fastapi до модификаций sys.path
-import fastapi
 from fastapi.testclient import TestClient
 
 # Моки внешних сервисов
@@ -42,11 +39,9 @@ from security import (
 import server
 from server import app
 from db import models
-from db import audit
 from db.audit import (
     GENESIS_HASH,
     compute_audit_hash,
-    format_audit_timestamp,
     log_audit_event,
     verify_audit_chain,
     get_audit_logs,
@@ -109,6 +104,9 @@ class MockAuditSession:
             self.logs.append(entry)
 
     async def commit(self):
+        pass
+
+    async def rollback(self):
         pass
 
     async def refresh(self, entry: models.AuditLog):
@@ -365,7 +363,7 @@ async def test_tamper_detection_deleted_middle_record():
             action=f"ACTION_{i}"
         )
 
-    deleted_id = session.logs[1].id
+    session.logs[1].id
     session.logs.pop(1)  # удаляем среднюю запись
 
     res = await verify_audit_chain(session)
@@ -391,7 +389,7 @@ async def test_get_audit_logs_pagination_and_filters():
     # 1. Фильтр по actor
     logs, total = await get_audit_logs(session, actor="admin")
     assert total == 2
-    assert all(l.actor == "admin" for l in logs)
+    assert all(item.actor == "admin" for item in logs)
 
     # 2. Фильтр по status
     logs_fail, total_fail = await get_audit_logs(session, status="FAILURE")

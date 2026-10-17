@@ -1,10 +1,8 @@
-import os
 import shutil
 from pathlib import Path
-import pytest
 
 from scripts.setup_vds_security_env import setup_vds
-from scripts.deploy_vds_prod import find_docker_compose_cmd, run_deployment
+from scripts.deploy_vds_prod import find_docker_compose_cmd
 
 
 def test_setup_vds_security_env_creates_and_hardens_env(tmp_path):

@@ -36,7 +36,6 @@ from src.pki.bootstrap_pki import bootstrap_pki
 from src.pki.core.ca_engine import RootCAEngine
 from src.admin_client.backend.core.crypto.signer import ZeroTrustClientSigner
 from src.admin_client.backend.core.crypto.canonical import compute_rag_canonical_digest
-import security
 from security import (
     settings,
     verify_mtls_client_identity,
@@ -243,7 +242,7 @@ def test_anti_replay_protection_matrix():
     assert record_admin_nonce_if_new("   ") is False
 
 
-def test_e2e_rag_signing_and_encrypted_pipeline(tmp_path):
+def test_e2e_rag_signing_and_encrypted_pipeline(tmp_path, monkeypatch):
     """
     Сквозной E2E тест:
     1. Инициализация PKI;
@@ -253,6 +252,10 @@ def test_e2e_rag_signing_and_encrypted_pipeline(tmp_path):
     5. Конвертное шифрование текста AES-256-GCM Data-at-Rest;
     6. Формирование сервером квитанции AckReceipt и ее верификация клиентом.
     """
+    monkeypatch.delenv("BANK_CERTS_DIR", raising=False)
+    monkeypatch.delenv("ADMIN_CERTS_DIR", raising=False)
+    monkeypatch.delenv("ADMIN_CLIENT_CERTS_DIR", raising=False)
+    monkeypatch.delenv("CA_PUBLIC_DIR", raising=False)
     data_dir = tmp_path / "ca_data"
     export_dir = tmp_path / "certs_export"
     passphrase = "StrictProductionPassphrase_E2E_2026!"

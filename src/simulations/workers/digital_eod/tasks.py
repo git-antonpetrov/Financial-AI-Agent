@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
@@ -151,7 +152,11 @@ async def process_smart_contracts(session: AsyncSession) -> None:
     """
     log_info("Ruble EOD", "Поиск активных смарт-контрактов для исполнения...")
 
-    result = await session.execute(select(SmartContract).where(SmartContract.status == "active"))
+    result = await session.execute(
+        select(SmartContract)
+        .where(SmartContract.status == "active")
+        .with_for_update(skip_locked=True)
+    )
     contracts = result.scalars().all()
 
     processed = 0
@@ -201,8 +206,18 @@ async def process_smart_contracts(session: AsyncSession) -> None:
 async def run_ruble_eod() -> None:
     """
     Точка входа запуска ночного цикла расчетов цифрового рубля.
+    Защищена распределенной блокировкой PostgreSQL для исключения параллельного запуска воркеров.
     """
     async with AsyncSessionLocal() as session:
-        log_info("Ruble EOD", "=== НАЧАЛО EOD ЦИФРОВОГО РУБЛЯ ===")
-        await process_smart_contracts(session)
-        log_info("Ruble EOD", "=== EOD ЦИФРОВОГО РУБЛЯ ЗАВЕРШЕН ===")
+        lock = await session.scalar(text("SELECT pg_try_advisory_lock(84920483)"))
+        if not lock:
+            log_info("Ruble EOD", "Параллельный процесс Ruble EOD уже выполняется. Пропуск итерации.")
+            return
+
+        try:
+            log_info("Ruble EOD", "=== НАЧАЛО EOD ЦИФРОВОГО РУБЛЯ ===")
+            await process_smart_contracts(session)
+            log_info("Ruble EOD", "=== EOD ЦИФРОВОГО РУБЛЯ ЗАВЕРШЕН ===")
+        finally:
+            await session.execute(text("SELECT pg_advisory_unlock(84920483)"))
+            await session.commit()

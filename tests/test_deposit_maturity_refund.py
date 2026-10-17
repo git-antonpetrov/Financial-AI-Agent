@@ -1,12 +1,11 @@
 import asyncio
-import pytest
 from datetime import datetime, date
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
-from src.simulations.db.bank.db.models import Account, Transaction
+from src.simulations.db.bank.db.models import Account
 from src.simulations.db.invest.db.models import Deposit
-from src.simulations.workers.invest_eod.tasks import process_deposits, return_deposit_to_bank
+from src.simulations.workers.invest_eod.tasks import process_deposits
 
 
 def make_async_cm(session):
@@ -54,7 +53,7 @@ def test_process_deposits_maturity_refunds_to_bank_account(monkeypatch):
         added_bank_txs = []
 
         bank_session = AsyncMock()
-        bank_session.scalar = AsyncMock(return_value=bank_acc)
+        bank_session.scalar = AsyncMock(side_effect=[bank_acc, None])
         bank_session.add = MagicMock(side_effect=lambda tx: added_bank_txs.append(tx))
         bank_session.commit = AsyncMock()
 
@@ -172,3 +171,64 @@ def test_process_deposits_failsafe_when_no_bank_account(monkeypatch):
         assert dep.status == "active"
 
     asyncio.run(_test())
+
+
+def test_process_deposits_maturity_refund_idempotent(monkeypatch):
+    """
+    Проверяет, что при повторном запуске возврата вклада:
+    - если транзакция возврата уже есть в банке (existing_tx is not None),
+      баланс счета не увеличивается повторно и новая транзакция не создается.
+    """
+    async def _test():
+        dep = Deposit(
+            id="dep_mature_idempotent",
+            client_id="cl_idempotent_user",
+            account_number="42301810000000000004",
+            balance=Decimal("100000.00"),
+            interest_rate=Decimal("12.00"),
+            term_months=6,
+            status="active",
+            next_payment_date=datetime(2026, 10, 1),
+            next_payment_amount=Decimal("1000.00"),
+            opened_at=datetime(2026, 4, 1),
+        )
+
+        bank_acc = Account(
+            id="bank_acc_idemp",
+            client_id="cl_idempotent_user",
+            account_number="40817810000000000004",
+            balance=Decimal("106000.00"),
+            status="active",
+        )
+        added_bank_txs = []
+
+        bank_session = AsyncMock()
+        # Первый вызов возвращает bank_acc, второй вызов (select Transaction.id) возвращает уже существующий ID
+        bank_session.scalar = AsyncMock(side_effect=[bank_acc, "tx_already_created_123"])
+        bank_session.add = MagicMock(side_effect=lambda tx: added_bank_txs.append(tx))
+        bank_session.commit = AsyncMock()
+
+        invest_session = AsyncMock()
+        invest_session.commit = AsyncMock()
+        mock_dep_res = MagicMock()
+        mock_dep_res.scalars().all.return_value = [dep]
+        invest_session.execute = AsyncMock(return_value=mock_dep_res)
+
+        monkeypatch.setattr(
+            "src.simulations.workers.invest_eod.tasks.get_bank_session_maker",
+            lambda: lambda: make_async_cm(bank_session),
+        )
+
+        current_date = date(2026, 10, 1)
+        await process_deposits(invest_session, current_date)
+
+        # Баланс банковского счета не изменился
+        assert bank_acc.balance == Decimal("106000.00")
+        # Новая транзакция не создана
+        assert len(added_bank_txs) == 0
+        # Депозит закрыт
+        assert dep.status == "closed"
+        assert dep.balance == Decimal("0.00")
+
+    asyncio.run(_test())
+

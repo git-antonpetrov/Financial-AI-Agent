@@ -10,11 +10,11 @@ import os
 import sys
 import tempfile
 import datetime
+import fastapi  # noqa: F401  # Гарантируем предзагрузку реального пакета FastAPI из site-packages
 import pytest
-import fastapi
 from pathlib import Path
 from cryptography import x509
-from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
+from cryptography.x509.oid import NameOID
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -121,6 +121,20 @@ _server_cert = (
     .not_valid_before(_now - datetime.timedelta(days=1))
     .not_valid_after(_now + datetime.timedelta(days=365))
     .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+    .add_extension(
+        x509.KeyUsage(
+            digital_signature=True,
+            content_commitment=True,
+            key_encipherment=True,
+            data_encipherment=False,
+            key_agreement=False,
+            key_cert_sign=False,
+            crl_sign=False,
+            encipher_only=False,
+            decipher_only=False,
+        ),
+        critical=True,
+    )
     .sign(_ca_key, hashes.SHA256(), default_backend())
 )
 _server_cert_pem = _server_cert.public_bytes(serialization.Encoding.PEM).decode("utf-8")
@@ -201,6 +215,9 @@ _DEFAULT_ENV = {
     "ADMIN_TOTP_SECRET": "JBSWY3DPEHPK3PXP",
     "POSTGRES_PASSWORD": "test_postgres_secret",
     "FINANCIAL_AGENT_CERTS_CACHE_DIR": str(_certs_dir),
+    "BANK_DATABASE_URL": "postgresql+asyncpg://financial_ai_agent:test_postgres_secret@postgres-db:5432/bank_db",
+    "INVEST_DATABASE_URL": "postgresql+asyncpg://financial_ai_agent:test_postgres_secret@postgres-db:5432/invest_db",
+    "RUBLE_DATABASE_URL": "postgresql+asyncpg://financial_ai_agent:test_postgres_secret@postgres-db:5432/ruble_db",
 }
 
 # Экспортируем в os.environ сразу при импорте conftest (до импорта любого теста)
@@ -233,6 +250,19 @@ def setup_test_crypto_environment_session():
 def setup_test_crypto_environment():
     """Автоматическая фикстура для поддержания базовых переменных окружения и изоляции тестов."""
     try:
+        (_certs_dir / "ca.crt").write_text(_ca_cert_pem, encoding="utf-8")
+        (_certs_dir / "ca.key").write_text(_ca_key_pem, encoding="utf-8")
+        (_certs_dir / "bank.crt").write_text(_bank_cert_pem, encoding="utf-8")
+        (_certs_dir / "bank.key").write_text(_bank_key_pem, encoding="utf-8")
+        (_certs_dir / "admin_server.crt").write_text(_server_cert_pem, encoding="utf-8")
+        (_certs_dir / "admin_server.key").write_text(_server_key_pem, encoding="utf-8")
+        (_certs_dir / "enclave.pub").write_text(_enclave_pub_pem, encoding="utf-8")
+        (_certs_dir / "enclave.key").write_text(_enclave_key_pem, encoding="utf-8")
+        (_certs_dir / "oracle.pub").write_text(_oracle_pub_pem, encoding="utf-8")
+        (_certs_dir / "oracle.key").write_text(_oracle_key_pem, encoding="utf-8")
+    except Exception:
+        pass
+    try:
         from src.simulations.core.crypto.bank_ca import reset_bank_ca_for_tests
         reset_bank_ca_for_tests()
     except Exception:
@@ -243,6 +273,15 @@ def setup_test_crypto_environment():
     except Exception:
         pass
     try:
+        from src.simulations.core.crypto.chain_validator import reset_chain_validator_for_tests
+        reset_chain_validator_for_tests()
+    except Exception:
+        pass
+    try:
+        import sys
+        if "security" in sys.modules:
+            sys.modules["security"].set_trusted_root_ca(_ca_cert_pem)
+            sys.modules["security"].clear_admin_nonces_cache()
         from src.admin_server.fastapi.security import set_trusted_root_ca, clear_admin_nonces_cache
         set_trusted_root_ca(_ca_cert_pem)
         clear_admin_nonces_cache()
@@ -264,21 +303,30 @@ def setup_test_crypto_environment():
 @pytest.fixture(autouse=True)
 def setup_test_fastapi_db():
     """Обеспечивает валидную асинхронную сессию БД для тестов эндпоинтов FastAPI."""
-    import sys
     from pathlib import Path
     from unittest.mock import MagicMock
     repo_root = Path(__file__).resolve().parent.parent
     p1 = str(repo_root / "src" / "admin_server")
     p2 = str(repo_root / "src" / "admin_server" / "fastapi")
     if p1 not in sys.path:
-        sys.path.insert(0, p1)
+        sys.path.append(p1)
     if p2 not in sys.path:
         sys.path.insert(0, p2)
 
     apps = []
     overridden_deps = []
     try:
-        for mod in ["redis", "minio", "litellm", "asyncpg"]:
+        for mod in [
+            "redis",
+            "minio",
+            "litellm",
+            "asyncpg",
+            "psycopg2",
+            "psycopg2.pool",
+            "chromadb",
+            "chromadb.config",
+            "langchain_text_splitters",
+        ]:
             if mod not in sys.modules:
                 sys.modules[mod] = MagicMock()
 
@@ -364,7 +412,14 @@ def setup_test_fastapi_db():
         async def _mock_revocation_listener(*args, **kwargs):
             return
 
-        for mod_name in ["server", "src.admin_server.fastapi.server", "db.database", "src.admin_server.fastapi.db.database"]:
+        for mod_name in [
+            "server",
+            "src.admin_server.fastapi.server",
+            "db.database",
+            "src.admin_server.fastapi.db.database",
+            "src.simulations.api.main",
+            "src.simulations.api.core.auth",
+        ]:
             mod = sys.modules.get(mod_name)
             if mod:
                 if hasattr(mod, "engine"):
@@ -373,6 +428,12 @@ def setup_test_fastapi_db():
                     setattr(mod, "async_session", _mock_async_session)
                 if hasattr(mod, "run_revocation_listener"):
                     setattr(mod, "run_revocation_listener", _mock_revocation_listener)
+                if hasattr(mod, "run_simulation_revocation_listener"):
+                    setattr(mod, "run_simulation_revocation_listener", _mock_revocation_listener)
+                if hasattr(mod, "minio_client") and not isinstance(getattr(mod, "minio_client"), MagicMock):
+                    mock_minio = MagicMock()
+                    mock_minio.bucket_exists.return_value = True
+                    setattr(mod, "minio_client", mock_minio)
 
         def _override_routes(target_app, routes):
             for route in routes:

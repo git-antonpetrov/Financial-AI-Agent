@@ -1,8 +1,9 @@
 import random
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 
 from dateutil.relativedelta import relativedelta
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
@@ -15,6 +16,7 @@ from src.simulations.db.bank.db.models import (
     Account,
     AutoPayment,
     Transaction,
+    get_moscow_date,
     get_moscow_time,
 )
 
@@ -55,7 +57,7 @@ async def process_auto_payments(session: AsyncSession, current_date: date) -> No
                 description=f"Автоплатеж: {ap.recipient}",
                 status="completed",
                 date=current_date,
-                time=datetime.now(UTC).time(),
+                time=get_moscow_time(),
             )
             session.add(tx)
 
@@ -76,7 +78,7 @@ async def process_auto_payments(session: AsyncSession, current_date: date) -> No
                 description=f"Недостаточно средств. Автоплатеж: {ap.recipient}",
                 status="failed",
                 date=current_date,
-                time=datetime.now(UTC).time(),
+                time=get_moscow_time(),
             )
             session.add(tx)
             # Сдвигаем на завтра чтобы попробовать снова
@@ -107,6 +109,19 @@ async def process_tariff_fees(session: AsyncSession, current_date: date) -> None
     for acc in accounts:
         tariff_cost = Decimal(str(acc.tariff.service_cost))
         if tariff_cost > Decimal("0.00"):
+            # Проверка идемпотентности: не списывать повторно за текущую дату
+            fee_check = await session.execute(
+                select(Transaction.id).where(
+                    Transaction.account_id == acc.id,
+                    Transaction.operation_type == "service_fee",
+                    Transaction.date == current_date,
+                    Transaction.status == "completed",
+                ).limit(1)
+            )
+            existing_fee = fee_check.scalar_one_or_none()
+            if existing_fee is not None:
+                continue
+
             acc_bal = Decimal(str(acc.balance))
             if acc_bal >= tariff_cost:
                 acc.balance = acc_bal - tariff_cost
@@ -118,7 +133,7 @@ async def process_tariff_fees(session: AsyncSession, current_date: date) -> None
                     description=f"Плата за обслуживание тарифа '{acc.tariff.name}'",
                     status="completed",
                     date=current_date,
-                    time=datetime.now(UTC).time(),
+                    time=get_moscow_time(),
                 )
                 session.add(tx)
                 processed += 1
@@ -131,7 +146,7 @@ async def process_tariff_fees(session: AsyncSession, current_date: date) -> None
                     description=f"Недостаточно средств для платы за тариф '{acc.tariff.name}'",
                     status="failed",
                     date=current_date,
-                    time=datetime.now(UTC).time(),
+                    time=get_moscow_time(),
                 )
                 session.add(tx)
 
@@ -162,6 +177,23 @@ async def process_salaries(session: AsyncSession, current_date: date) -> None:
 
     for acc in accounts:
         if acc.client_id in paid_clients:
+            continue
+
+        # Проверка идемпотентности: не начислять зарплату повторно за текущую дату
+        sal_check = await session.execute(
+            select(Transaction.id)
+            .join(Account, Account.id == Transaction.account_id)
+            .where(
+                Account.client_id == acc.client_id,
+                Transaction.operation_type == "salary",
+                Transaction.date == current_date,
+                Transaction.status == "completed",
+            )
+            .limit(1)
+        )
+        existing_sal = sal_check.scalar_one_or_none()
+        if existing_sal is not None:
+            paid_clients.add(acc.client_id)
             continue
 
         salary_amount = 0
@@ -201,12 +233,21 @@ async def run_bank_eod() -> None:
     Запускает весь цикл EOD (End of Day) по реальному системному времени.
     """
     async with AsyncSessionLocal() as session:
-        current_date = date.today()
+        lock = await session.scalar(text("SELECT pg_try_advisory_lock(84920481)"))
+        if not lock:
+            log_info("Bank EOD", "Параллельный процесс Bank EOD уже выполняется. Пропуск итерации.")
+            return
 
-        log_info("Bank EOD", f"=== НАЧАЛО EOD ДЛЯ ДАТЫ {current_date} ===")
+        try:
+            current_date = get_moscow_date()
 
-        await process_auto_payments(session, current_date)
-        await process_tariff_fees(session, current_date)
-        await process_salaries(session, current_date)
+            log_info("Bank EOD", f"=== НАЧАЛО EOD ДЛЯ ДАТЫ {current_date} ===")
 
-        log_info("Bank EOD", "=== EOD ЗАВЕРШЕН ===")
+            await process_auto_payments(session, current_date)
+            await process_tariff_fees(session, current_date)
+            await process_salaries(session, current_date)
+
+            log_info("Bank EOD", "=== EOD ЗАВЕРШЕН ===")
+        finally:
+            await session.execute(text("SELECT pg_advisory_unlock(84920481)"))
+            await session.commit()

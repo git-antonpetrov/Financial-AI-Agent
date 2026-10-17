@@ -9,13 +9,12 @@ import json
 import time
 import uuid
 import base64
-import hashlib
-from unittest.mock import MagicMock, AsyncMock, patch
+from unittest.mock import MagicMock
 import pytest
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from cryptography.hazmat.primitives.asymmetric import rsa, ec, padding
+from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography import x509
 from cryptography.x509.oid import NameOID
@@ -30,12 +29,9 @@ for mod in ["redis", "minio", "litellm", "asyncpg", "chromadb", "psycopg2"]:
 sys.path.insert(0, os.path.abspath("src/admin_server"))
 sys.path.insert(0, os.path.abspath("src/admin_server/fastapi"))
 
-import security
 from security import (
     settings,
     verify_mtls_client_identity,
-    verify_mtls_client_certificate,
-    parse_mtls_client_certificate,
     revoke_certificate_in_redis,
     is_certificate_revoked_in_redis,
     record_admin_nonce_if_new,
@@ -43,15 +39,12 @@ from security import (
     compute_rag_canonical_digest,
     verify_digital_signature,
     sign_server_receipt,
-    calculate_key_fingerprint,
     _revoked_certs_memory,
     set_trusted_root_ca,
     reset_trusted_root_ca,
-    validate_x509_certificate_chain,
 )
-import server
 from server import app
-from db import models, crud
+from db import models
 from db.database import get_db
 
 
@@ -729,6 +722,20 @@ def test_submit_rag_document_3tier_enclave_chain_success(root_ca_fixture, mock_d
         .not_valid_before(now - datetime.timedelta(days=1))
         .not_valid_after(now + datetime.timedelta(days=90))
         .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
         .sign(ca_priv, hashes.SHA256())
     )
     enclave_pem = enclave_cert.public_bytes(serialization.Encoding.PEM).decode("utf-8")
@@ -748,6 +755,20 @@ def test_submit_rag_document_3tier_enclave_chain_success(root_ca_fixture, mock_d
         .not_valid_before(now - datetime.timedelta(hours=1))
         .not_valid_after(now + datetime.timedelta(hours=24))
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
         .sign(enclave_priv, hashes.SHA256())
     )
     agent_pem = agent_cert.public_bytes(serialization.Encoding.PEM).decode("utf-8")

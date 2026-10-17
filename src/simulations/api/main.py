@@ -4,6 +4,7 @@ from pathlib import Path
 # Добавляем корень проекта в sys.path
 sys.path.append(str(Path(__file__).resolve().parents[3]))
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
 
@@ -15,6 +16,7 @@ from fastapi import FastAPI
 # pyrefly: ignore [missing-import]
 from fastapi.middleware.cors import CORSMiddleware
 
+from src.simulations.api.core.auth import run_simulation_revocation_listener
 from src.simulations.api.routers.bank import (
     pki_router as bank_pki_router,
 )
@@ -25,7 +27,7 @@ from src.simulations.api.routers.bank import (
 )
 from src.simulations.api.routers.invest import router as invest_router
 from src.simulations.api.routers.ruble import router as ruble_router
-from src.simulations.core.utils.console_logger import log_error, log_info
+from src.simulations.core.utils.console_logger import log_error, log_info, log_warning
 from src.simulations.db.bank.db.client import get_async_engine as get_bank_engine
 from src.simulations.db.digital_ruble.db.client import (
     get_async_engine as get_ruble_engine,
@@ -51,8 +53,25 @@ async def lifespan(app: FastAPI):
         if not require_oracle:
             raise RuntimeError("STRICT_SECURITY: REQUIRE_ORACLE_SIGNATURE must be true in production")
 
+    # Фоновая задача мгновенной синхронизации отзывов через Redis Pub/Sub (SEC-09)
+    listener_task = None
+    should_run_listener = os.getenv("ENABLE_REVOCATION_LISTENER", "true").lower() in ("true", "1")
+    if should_run_listener:
+        try:
+            listener_task = asyncio.create_task(run_simulation_revocation_listener())
+            log_info("Simulation API", "Фоновый слушатель отзывов Redis запущен")
+        except Exception as e:
+            log_warning("Simulation API", f"Не удалось запустить фоновый слушатель отзывов: {e}")
+
     log_info("Simulation API", "Simulation API запущен и готов к работе")
     yield
+
+    if listener_task:
+        listener_task.cancel()
+        try:
+            await listener_task
+        except asyncio.CancelledError:
+            pass
 
     # Корректное освобождение пулов соединений PostgreSQL (SEC-18)
     for engine_fn, name in [
@@ -109,13 +128,28 @@ app.add_middleware(
         "x-bootstrap-token",
         "X-Enclave-Signature",
         "x-enclave-signature",
+        "X-Agent-Cert",
+        "x-agent-cert",
+        "X-Enclave-Cert",
+        "x-enclave-cert",
+        "X-Signature",
+        "x-signature",
+        "X-Cert",
+        "x-cert",
         "X-Nonce",
         "x-nonce",
         "X-Timestamp",
         "x-timestamp",
         "X-Bank-Signature",
+        "x-bank-signature",
     ],
-    expose_headers=["X-Bank-Signature", "X-Nonce", "X-Timestamp"],
+    expose_headers=[
+        "X-Bank-Signature",
+        "X-Bank-Cert-Fingerprint",
+        "X-Bank-Cert-Serial",
+        "X-Nonce",
+        "X-Timestamp",
+    ],
 )
 
 # Подключение роутеров
@@ -135,4 +169,4 @@ async def health_check():
 
 if __name__ == "__main__":
     log_info("Simulation API", "Запуск сервера API...")
-    uvicorn.run("main:app", host="0.0.0.0", port=8002, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8002, reload=False)

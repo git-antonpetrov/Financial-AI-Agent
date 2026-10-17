@@ -2,7 +2,6 @@
 Тесты для модуля common.llm.client: проверка устойчивости к сбоям (Retry on RateLimitError 429).
 """
 
-import pytest
 from unittest.mock import patch, MagicMock
 try:
     import litellm

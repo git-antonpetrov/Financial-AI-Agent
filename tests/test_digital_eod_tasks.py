@@ -28,7 +28,7 @@ def test_process_contract_success_full_transfer():
     async def _test():
         creator = DummyWallet(id=1, balance=Decimal("100.00"), frozen_balance=Decimal("50.00"))
         receiver = DummyWallet(id=2, balance=Decimal("20.00"), frozen_balance=Decimal("0.00"))
-        
+
         code = """def execute(context):
     if context.condition_status == 'active':
         context.transfer(from_wallet=context.creator_id, to_wallet=context.receiver_id, amount=Decimal('50.00'))
@@ -45,10 +45,10 @@ def test_process_contract_success_full_transfer():
 
         mock_session = AsyncMock()
         mock_session.add = MagicMock()
-        
+
         creator_res = MagicMock()
         creator_res.scalars.return_value.first.return_value = creator
-        
+
         receiver_res = MagicMock()
         receiver_res.scalars.return_value.first.return_value = receiver
 
@@ -76,7 +76,7 @@ def test_process_contract_success_partial_transfer_with_refund():
         # Создатель заморозил 50, но контракт перевел только 30
         creator = DummyWallet(id=1, balance=Decimal("100.00"), frozen_balance=Decimal("50.00"))
         receiver = DummyWallet(id=2, balance=Decimal("20.00"), frozen_balance=Decimal("0.00"))
-        
+
         code = """def execute(context):
     if context.condition_status == 'active':
         context.transfer(from_wallet=context.creator_id, to_wallet=context.receiver_id, amount=Decimal('30.00'))
@@ -118,7 +118,7 @@ def test_process_contract_failed_refunds_frozen_balance():
         # Если контракт упал с ошибкой, замороженные 50 должны вернуться на balance
         creator = DummyWallet(id=1, balance=Decimal("100.00"), frozen_balance=Decimal("50.00"))
         receiver = DummyWallet(id=2, balance=Decimal("20.00"), frozen_balance=Decimal("0.00"))
-        
+
         # Запрещенный код с __import__
         code = """def execute(context):
     __import__('os').system('ls')
@@ -157,7 +157,7 @@ def test_process_contract_condition_not_met_pending():
         # Условие не выполнено -> контракт остается pending, деньги не трогаются
         creator = DummyWallet(id=1, balance=Decimal("100.00"), frozen_balance=Decimal("50.00"))
         receiver = DummyWallet(id=2, balance=Decimal("20.00"), frozen_balance=Decimal("0.00"))
-        
+
         code = """def execute(context):
     if context.condition_status == 'delivered':
         context.transfer(from_wallet=context.creator_id, to_wallet=context.receiver_id, amount=Decimal('50.00'))

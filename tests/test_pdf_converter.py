@@ -5,7 +5,6 @@
 import os
 import sys
 import shutil
-import pytest
 import importlib.util
 
 
@@ -31,7 +30,7 @@ def test_find_soffice_custom_env():
 
 def test_find_soffice_not_found():
     """Проверяет поиск исполняемого файла LibreOffice при изолированном окружении."""
-    mod = load_pdf_converter()
+    load_pdf_converter()
     orig_which = shutil.which
     shutil.which = lambda x: None
     os.environ.pop("LIBREOFFICE_PATH", None)

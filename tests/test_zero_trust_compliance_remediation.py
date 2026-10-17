@@ -28,7 +28,6 @@ while admin_server_path in sys.path:
 if "fastapi" in sys.modules and getattr(sys.modules["fastapi"], "__file__", "") and "admin_server" in sys.modules["fastapi"].__file__:
     del sys.modules["fastapi"]
 
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 # Моки внешних сервисов при автономном тестировании
@@ -58,7 +57,6 @@ import datetime
 from src.pki.core.ca_engine import RootCAEngine
 from src.pki.core.cert_issuer import CertificateIssuer
 from src.admin_client.backend.core.crypto.signer import ZeroTrustClientSigner
-import security
 from security import (
     settings,
     sign_server_receipt,
@@ -67,7 +65,6 @@ from security import (
     unrevoke_agent_key_in_redis,
     _revoked_certs_memory,
 )
-from src.admin_client.backend.core.remote_client import RemoteAdminClient
 from src.admin_client.backend import main
 import contextlib
 
@@ -83,9 +80,43 @@ def patch_rag_external_services():
             patches.append(p)
         except Exception:
             pass
+    from unittest.mock import MagicMock
+    try:
+        from db.database import get_db
+    except ImportError:
+        from src.admin_server.fastapi.db.database import get_db
+
+    class MockRemediationDbSession:
+        def __init__(self):
+            self.documents = []
+
+        def add(self, obj):
+            if not getattr(obj, "id", None):
+                obj.id = 1
+            self.documents.append(obj)
+
+        async def commit(self):
+            pass
+
+        async def refresh(self, obj):
+            pass
+
+        async def rollback(self):
+            pass
+
+        async def execute(self, *args, **kwargs):
+            m = MagicMock()
+            m.scalars.return_value.first.return_value = None
+            m.scalar_one_or_none.return_value = None
+            return m
+
+    from src.admin_server.fastapi.server import app
+    app.dependency_overrides[get_db] = lambda: MockRemediationDbSession()
+
     try:
         yield
     finally:
+        app.dependency_overrides.pop(get_db, None)
         for p in patches:
             p.stop()
 
@@ -385,7 +416,7 @@ def test_receipt_verification_intermediate_ca_and_expiration(pki_setup, tmp_path
     3. Отклонение сертификата при недоступном Root CA.
     """
     ca_cert = x509.load_pem_x509_certificate(pki_setup["ca_pem"].encode("utf-8"))
-    ca_key = serialization.load_pem_private_key(
+    serialization.load_pem_private_key(
         RootCAEngine(data_dir=tmp_path / "ca", passphrase="test_passphrase_12345").get_root_ca_key_bytes()
         if hasattr(RootCAEngine, "get_root_ca_key_bytes") else
         # Загружаем ca_key из pki_setup
@@ -584,7 +615,6 @@ def test_rag_documents_and_delete_unauthorized_role_rejected(pki_setup):
     сертификата, выданного Root CA, но с неавторизованной ролью / CN (например, guest_viewer).
     """
     from src.pki.core.ca_engine import RootCAEngine
-    from src.pki.core.cert_issuer import CertificateIssuer
     from src.admin_server.fastapi.server import app
     from security import set_trusted_root_ca, compute_rag_canonical_digest
     client = TestClient(app)
@@ -593,8 +623,8 @@ def test_rag_documents_and_delete_unauthorized_role_rejected(pki_setup):
 
     # Выпускаем легитимно подписанный Root CA сертификат, но с неавторизованной ролью
     now = datetime.datetime.now(datetime.timezone.utc)
-    ca_cert = x509.load_pem_x509_certificate(pki_setup["ca_pem"].encode("utf-8"))
-    ca_priv = serialization.load_pem_private_key(
+    x509.load_pem_x509_certificate(pki_setup["ca_pem"].encode("utf-8"))
+    serialization.load_pem_private_key(
         pki_setup.get("ca_key_pem", "").encode("utf-8") if pki_setup.get("ca_key_pem") else
         # Создаем временный эмитент через кастомный ключ если ca_key_pem не экспортирован
         rsa.generate_private_key(65537, 2048).private_bytes(
@@ -684,7 +714,7 @@ def test_vector_worker_sha256_mismatch_aborts():
     from src.admin_server.vectors import vector_worker
 
     content = "# Важный регламент\nНормативный текст."
-    actual_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    hashlib.sha256(content.encode("utf-8")).hexdigest()
     mismatched_sha256 = "f" * 64
 
     task = {

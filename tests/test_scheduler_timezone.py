@@ -1,4 +1,3 @@
-import inspect
 from pathlib import Path
 import yaml
 from unittest.mock import patch, MagicMock
@@ -19,7 +18,7 @@ def test_bank_eod_main_configures_moscow_timezone():
         mock_scheduler_cls.return_value = mock_scheduler
 
         # Настраиваем mock event, чтобы не зависать в бесконечном wait()
-        mock_wait = MagicMock()
+        MagicMock()
         async def fake_wait():
             pass
         mock_event.return_value.wait = fake_wait

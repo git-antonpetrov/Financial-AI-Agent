@@ -4,7 +4,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import pytest
 from src.simulations.smart_contracts.dsl.context import ContractContext
-from src.simulations.smart_contracts.sandbox.executor import SmartContractSandbox, SandboxExecutionError
+from src.simulations.smart_contracts.sandbox.executor import SmartContractSandbox
 
 
 def test_valid_smart_contract_execution():
@@ -110,7 +110,28 @@ def run(ctx):
 
 
 def test_execution_timeout_and_ops_limit():
-    """Тест прерывания рекурсии по лимиту шагов и таймауту."""
+    """Тест прерывания косвенной рекурсии по динамическому лимиту шагов и таймауту."""
+    code = """
+def execute(ctx):
+    def step_a(n):
+        return step_b(n + 1)
+    def step_b(n):
+        return step_a(n + 1)
+    return step_a(0)
+"""
+    ctx = ContractContext("c-1", "w-1", "w-2", 100.0, "fulfilled")
+    success, is_completed, transfers, error = SmartContractSandbox.execute_contract(
+        code, ctx, timeout_seconds=1.0, max_operations=1000
+    )
+    assert success is False
+    assert (
+        "Превышен лимит вычислительной сложности" in error
+        or "Превышено максимальное время выполнения" in error
+    )
+
+
+def test_direct_recursion_rejected():
+    """Тест статического запрета прямой рекурсии в смарт-контрактах."""
     code = """
 def execute(ctx):
     def loop(n):
@@ -118,11 +139,9 @@ def execute(ctx):
     return loop(0)
 """
     ctx = ContractContext("c-1", "w-1", "w-2", 100.0, "fulfilled")
-    success, is_completed, transfers, error = SmartContractSandbox.execute_contract(
-        code, ctx, timeout_seconds=1.0, max_operations=1000
-    )
+    success, _, _, error = SmartContractSandbox.execute_contract(code, ctx)
     assert success is False
-    assert ("Превышен лимит вычислительной сложности" in error or "Превышено максимальное время выполнения" in error)
+    assert "Рекурсивный вызов функции 'loop' категорически запрещен" in error
 
 
 def test_while_and_for_loops_rejected():

@@ -1,5 +1,4 @@
 from pathlib import Path
-import pytest
 
 
 def load_caddyfile() -> str:
@@ -45,10 +44,10 @@ def test_caddyfile_mtls_headers_forwarded():
 
 
 def test_caddyfile_internal_simulation_routing():
-    """Проверяет межконтейнерный контур симуляции с автоматическим tls internal."""
+    """Проверяет межконтейнерный контур симуляции со строгим mTLS (client_auth)."""
     content = load_caddyfile()
     assert "simulation-api.internal" in content
-    assert "tls internal" in content, "Внутренний маршрут должен использовать tls internal"
+    assert "client_auth" in content, "Внутренний маршрут должен использовать client_auth"
     assert "reverse_proxy simulation-api:8002" in content
 
 

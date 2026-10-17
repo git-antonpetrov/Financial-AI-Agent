@@ -38,13 +38,13 @@ class Tariff(Base):
     __tablename__ = "tariffs"
     id = Column(String, primary_key=True, default=generate_uuid)
     name = Column(String, unique=True, nullable=False)  # 'Базовый', 'Зарплатный', 'Льготный'
-    service_cost = Column(Numeric(12, 2), default=0)
-    non_sbp_limit = Column(Numeric(12, 2), default=0)
-    sbp_limit = Column(Numeric(12, 2), default=30000000)
-    cash_withdrawal_limit = Column(Numeric(12, 2), default=0)
-    cash_withdrawal_fee = Column(Numeric(12, 2), default=100)
-    transfer_over_limit_fee_percent = Column(Numeric(5, 2), default=2.0)
-    deposit_fee = Column(Numeric(12, 2), default=0)
+    service_cost = Column(Numeric(12, 2), default=Decimal("0.00"))
+    non_sbp_limit = Column(Numeric(12, 2), default=Decimal("0.00"))
+    sbp_limit = Column(Numeric(12, 2), default=Decimal("30000000.00"))
+    cash_withdrawal_limit = Column(Numeric(12, 2), default=Decimal("0.00"))
+    cash_withdrawal_fee = Column(Numeric(12, 2), default=Decimal("100.00"))
+    transfer_over_limit_fee_percent = Column(Numeric(5, 2), default=Decimal("2.00"))
+    deposit_fee = Column(Numeric(12, 2), default=Decimal("0.00"))
 
     accounts = relationship("Account", back_populates="tariff")
 

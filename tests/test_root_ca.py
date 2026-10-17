@@ -1,5 +1,3 @@
-import datetime
-import os
 from pathlib import Path
 import pytest
 from cryptography import x509
@@ -41,9 +39,9 @@ def test_root_ca_engine_initialization_and_encryption(tmp_path: Path):
     """
     passphrase = "test-secret-ca-passphrase-4096"
     engine = RootCAEngine(data_dir=tmp_path, passphrase=passphrase, key_size=2048, validity_years=10)
-    
+
     cert, priv_key = engine.ensure_initialized()
-    
+
     assert (tmp_path / "ca.key").exists()
     assert (tmp_path / "ca.crt").exists()
     assert (tmp_path / "serial.txt").exists()
@@ -60,7 +58,7 @@ def test_root_ca_engine_initialization_and_encryption(tmp_path: Path):
     # 2. Проверяем свойства самоподписанного корневого сертификата
     assert cert.subject == cert.issuer
     assert cert.serial_number == 1
-    
+
     bc = cert.extensions.get_extension_for_oid(x509.ExtensionOID.BASIC_CONSTRAINTS).value
     assert bc.ca is True
 
@@ -158,16 +156,20 @@ def test_cert_issuer_client_mtls_certificate(tmp_path: Path):
     )
 
 
-def test_bootstrap_pki_full_flow(tmp_path: Path):
+def test_bootstrap_pki_full_flow(tmp_path: Path, monkeypatch):
     """
     Проверяет сквозной запуск Bootstrap PKI:
     генерацию корневого сертификата и сертификатов всех сервисов
     с формированием каталога MinIO.
     """
+    monkeypatch.delenv("BANK_CERTS_DIR", raising=False)
+    monkeypatch.delenv("ADMIN_CERTS_DIR", raising=False)
+    monkeypatch.delenv("ADMIN_CLIENT_CERTS_DIR", raising=False)
+    monkeypatch.delenv("CA_PUBLIC_DIR", raising=False)
     data_dir = tmp_path / "ca_data"
     export_dir = tmp_path / "shared_certs"
 
-    manifest = bootstrap_pki(
+    bootstrap_pki(
         data_dir=data_dir,
         export_dir=export_dir,
         passphrase="full-flow-passphrase-999",

@@ -1,5 +1,5 @@
 import inspect
-from datetime import datetime, timezone, timedelta, date, time
+from datetime import datetime, timezone, timedelta, date
 from decimal import Decimal
 import pytest
 
@@ -8,7 +8,6 @@ from src.simulations.db.bank.db.models import (
     Account as BankAccount,
     Card as BankCard,
     Transaction as BankTransaction,
-    Tariff as BankTariff,
     AutoPayment as BankAutoPayment,
 )
 from src.simulations.db.invest.db.models import (
@@ -16,7 +15,6 @@ from src.simulations.db.invest.db.models import (
     SavingsAccount as InvestSavings,
     Deposit as InvestDeposit,
     BrokerAccount as InvestBroker,
-    InvestmentStrategy as InvestStrategy,
 )
 from src.simulations.db.digital_ruble.db.models import (
     get_moscow_now as ruble_moscow_now,
@@ -190,7 +188,7 @@ def test_admin_server_response_models():
     for mod in ["redis", "minio", "litellm", "asyncpg"]:
         if mod not in sys.modules:
             sys.modules[mod] = MagicMock()
-    
+
     import os
     admin_dir = os.path.abspath("src/admin_server")
     fastapi_dir = os.path.abspath("src/admin_server/fastapi")
@@ -200,8 +198,7 @@ def test_admin_server_response_models():
         sys.path.insert(0, fastapi_dir)
 
     from src.admin_server.fastapi.server import app
-    from src.admin_server.fastapi.db import schemas
-    
+
     routes = {}
     for route in app.routes:
         if hasattr(route, "methods"):

@@ -36,10 +36,13 @@ from src.simulations.core.utils.db_utils import validate_db_name
 
 
 async def create_database_if_not_exists():
-    url = os.getenv(
-        "BANK_DATABASE_URL",
-        "postgresql+asyncpg://agent_user:agent_password@localhost:15432/bank_db",
-    )
+    url = os.getenv("BANK_DATABASE_URL")
+    if not url or not url.strip():
+        raise ValueError(
+            "Критическая ошибка конфигурации: переменная окружения BANK_DATABASE_URL "
+            "обязательна, но не задана. Использование значений по умолчанию запрещено."
+        )
+    url = url.strip()
     parsed = urlparse(url.replace("postgresql+asyncpg://", "postgresql://"))
     raw_db_name = parsed.path.lstrip("/")
     db_name = validate_db_name(raw_db_name)
@@ -57,20 +60,23 @@ async def create_database_if_not_exists():
         else:
             conn_kwargs["ssl"] = True
 
+    from src.simulations.core.utils.console_logger import log_info, log_warning
+
     try:
-        print(f"Подключаемся к {sys_url_asyncpg} для создания БД {db_name}...")
+        log_info("Bank DB", f"Подключение к {sys_url_asyncpg} для создания БД {db_name}...")
         conn = await asyncpg.connect(sys_url_asyncpg, **conn_kwargs)
         await conn.execute(f'CREATE DATABASE "{db_name}"')
         await conn.close()
-        print(f"✅ База данных {db_name} успешно создана.")
+        log_info("Bank DB", f"База данных {db_name} успешно создана.")
     except asyncpg.exceptions.DuplicateDatabaseError:
-        print(f"ℹ️ База данных {db_name} уже существует.")
+        log_info("Bank DB", f"База данных {db_name} уже существует.")
     except Exception as e:
-        print(f"⚠️ Ошибка при создании БД (возможно она уже есть или нет прав): {e}")
+        log_warning("Bank DB", f"Ошибка при создании БД (возможно она уже есть или нет прав): {e}")
 
 
 async def seed_data():
-    print("Создаем таблицы...")
+    from src.simulations.core.utils.console_logger import log_info
+    log_info("Bank DB", "Создание таблиц базы данных банка...")
     await init_db()
 
     async with AsyncSessionLocal() as session:
@@ -211,7 +217,7 @@ async def seed_data():
                     session.add(tx)
 
         await session.commit()
-        print("✅ Сидирование успешно завершено! Данные сгенерированы.")
+        log_info("Bank DB", "Сидирование успешно завершено! Данные сгенерированы.")
 
 
 async def main():

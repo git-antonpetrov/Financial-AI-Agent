@@ -13,7 +13,6 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 
 # Предварительно импортируем настоящий пакет fastapi до добавления локальных путей в sys.path
-import fastapi
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
@@ -32,15 +31,13 @@ from security import (
     create_access_token,
     decode_access_token,
     get_current_admin,
-    verify_password,
-    get_password_hash,
 )
 
 
 def test_rs256_token_generation_and_validation():
     """Проверяет создание и верификацию JWT-токена по алгоритму RS256."""
     token = create_access_token({"sub": "admin", "custom_role": "superadmin"})
-    
+
     # 1. Заголовок токена должен строго содержать alg=RS256
     unverified_headers = jwt.get_unverified_header(token)
     assert unverified_headers.get("alg") == "RS256"
@@ -99,8 +96,6 @@ def test_tampered_payload_rejected():
 @pytest.mark.anyio
 async def test_get_current_admin_valid_and_invalid():
     """Проверяет dependency get_current_admin на валидном и невалидном токене."""
-    from fastapi import HTTPException
-    import security
 
     if security.redis_blacklist is not None:
         security.redis_blacklist.exists.return_value = False
@@ -162,7 +157,7 @@ def test_key_loading_from_file_and_derivation():
 def test_validate_production_env():
     """Проверяет валидацию наличия RSA-ключа для продакшена."""
     test_settings = Settings()
-    
+
     # Сохраняем исходное окружение
     saved_env = {k: os.environ.get(k) for k in [
         "JWT_PRIVATE_KEY", "JWT_PRIVATE_KEY_PATH",
@@ -190,7 +185,6 @@ def test_validate_production_env():
 
 def test_public_key_endpoint():
     """Проверяет эндпоинт /api/auth/public-key в FastAPI."""
-    from fastapi.testclient import TestClient
     from server import app
 
     client = TestClient(app)

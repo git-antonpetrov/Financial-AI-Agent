@@ -1,6 +1,14 @@
 [tool.ruff]
 line-length = 120
 target-version = "py311"
+exclude = [
+    ".git",
+    "venv",
+    ".venv",
+    "node_modules",
+    "src/admin_client/frontend/node_modules",
+    "data",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "W"]
@@ -10,7 +18,7 @@ ignore = ["E203"]
 "src/simulations/api/main.py" = ["E402"]
 "src/simulations/workers/*" = ["E402"]
 "src/simulations/db/*/scripts/*" = ["E402"]
-"tests/*" = ["E402"]
+"tests/*" = ["E402", "E501"]
 
 [tool.pyrefly]
 preset = "off"

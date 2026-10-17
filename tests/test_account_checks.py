@@ -209,7 +209,7 @@ def test_ruble_create_contract_rejects_self_contract():
             condition_type="oracle",
             contract_code="def execute(ctx): pass"
         )
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(HTTPException):
             await create_smart_contract("w_creator_same", req)
 
     asyncio.run(_test())

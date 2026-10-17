@@ -1,7 +1,5 @@
 import asyncio
-import pytest
-from datetime import datetime, date, timedelta
-from dateutil.relativedelta import relativedelta
+from datetime import datetime, date
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
@@ -14,8 +12,8 @@ from src.simulations.api.routers.invest import (
     StrategySubscription,
 )
 from src.simulations.db.bank.db.models import Account
-from src.simulations.db.invest.db.models import Deposit, SavingsAccount, BrokerAccount
-from src.simulations.workers.invest_eod.tasks import process_deposits, process_savings_accounts
+from src.simulations.db.invest.db.models import Deposit, BrokerAccount
+from src.simulations.workers.invest_eod.tasks import process_deposits
 
 
 def make_async_cm(session):

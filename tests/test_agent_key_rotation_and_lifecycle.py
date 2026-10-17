@@ -36,7 +36,6 @@ from security import (
     generate_key_id,
     revoke_agent_key_in_redis,
     is_agent_key_revoked_in_redis,
-    verify_agent_jwt,
 )
 import server
 from server import app
@@ -214,9 +213,28 @@ def setup_mocks(monkeypatch):
     monkeypatch.setattr(crud, "list_agent_keys", store.list_agent_keys)
     monkeypatch.setattr(crud, "create_agent_request", store.create_agent_request)
 
-    # Заглушка зависимости get_db
+    class FakeAsyncDBSession:
+        def __init__(self):
+            self.logs = []
+        def get_bind(self):
+            return None
+        def add(self, obj):
+            pass
+        async def commit(self):
+            pass
+        async def refresh(self, obj):
+            pass
+        async def rollback(self):
+            pass
+        async def execute(self, *args, **kwargs):
+            m = MagicMock()
+            m.scalars.return_value.first.return_value = None
+            m.scalars.return_value.all.return_value = []
+            return m
+
+    # Асинхронная сессия get_db для тестов
     async def override_get_db():
-        yield MagicMock()
+        yield FakeAsyncDBSession()
     app.dependency_overrides[server.get_db] = override_get_db
 
     yield store

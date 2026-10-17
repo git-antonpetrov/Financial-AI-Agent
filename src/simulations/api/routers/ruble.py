@@ -504,7 +504,9 @@ async def update_contract_condition(
     if req.signature:
         nonce = req.nonce or (request.headers.get("X-Nonce") if request else None)
         timestamp = req.timestamp or (request.headers.get("X-Timestamp") if request else None)
-        require_nonce_ts = os.getenv("REQUIRE_ORACLE_NONCE_TIMESTAMP", "false").lower() in ("true", "1")
+        strict_sec = os.getenv("STRICT_SECURITY", "false").lower() in ("true", "1")
+        default_req = "true" if strict_sec else "false"
+        require_nonce_ts = os.getenv("REQUIRE_ORACLE_NONCE_TIMESTAMP", default_req).lower() in ("true", "1")
         if require_nonce_ts and (not nonce or not timestamp):
             raise HTTPException(
                 400,

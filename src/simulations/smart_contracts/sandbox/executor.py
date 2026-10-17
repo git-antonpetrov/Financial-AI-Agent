@@ -84,6 +84,46 @@ class SecurityASTVisitor(ast.NodeVisitor):
             raise SandboxExecutionError(f"Вызов метода '{node.func.attr}' категорически запрещен в смарт-контрактах")
         self.generic_visit(node)
 
+    def visit_BinOp(self, node: ast.BinOp) -> None:
+        if isinstance(node.op, ast.Pow):
+            raise SandboxExecutionError(
+                "Оператор возведения в степень (**) запрещен в смарт-контрактах (DoS protection)"
+            )
+        if isinstance(node.op, (ast.LShift, ast.RShift)):
+            raise SandboxExecutionError("Битовые сдвиги запрещены в смарт-контрактах (DoS protection)")
+        if isinstance(node.op, ast.Mult):
+            for val_node, mul_node in [(node.left, node.right), (node.right, node.left)]:
+                if isinstance(val_node, (ast.List, ast.Tuple)) or (
+                    isinstance(val_node, ast.Constant) and isinstance(val_node.value, str)
+                ):
+                    if (
+                        isinstance(mul_node, ast.Constant)
+                        and isinstance(mul_node.value, int)
+                        and mul_node.value > 1000
+                    ):
+                        raise SandboxExecutionError(
+                            "Умножение последовательностей с коэффициентом > 1000 запрещено (DoS protection)"
+                        )
+        self.generic_visit(node)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        if isinstance(node.op, ast.Pow):
+            raise SandboxExecutionError(
+                "Оператор составного возведения в степень (**=) запрещен в смарт-контрактах (DoS protection)"
+            )
+        if isinstance(node.op, (ast.LShift, ast.RShift)):
+            raise SandboxExecutionError("Составные битовые сдвиги запрещены в смарт-контрактах (DoS protection)")
+        if isinstance(node.op, ast.Mult):
+            if (
+                isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, int)
+                and node.value.value > 1000
+            ):
+                raise SandboxExecutionError(
+                    "Составное умножение последовательностей с коэффициентом > 1000 запрещено (DoS protection)"
+                )
+        self.generic_visit(node)
+
     def visit_Import(self, node: ast.Import) -> None:
         raise SandboxExecutionError("Импорт модулей (import) категорически запрещен в смарт-контрактах")
 
@@ -105,6 +145,17 @@ class SecurityASTVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        # Статический запрет рекурсии: запрет вызова функции внутри собственного тела
+        for sub_node in ast.walk(node):
+            if isinstance(sub_node, ast.Call):
+                func_name = None
+                if isinstance(sub_node.func, ast.Name):
+                    func_name = sub_node.func.id
+                if func_name == node.name:
+                    raise SandboxExecutionError(
+                        f"Рекурсивный вызов функции '{node.name}' категорически запрещен в смарт-контрактах"
+                    )
+
         if node.name == "execute":
             self.has_execute_function = True
             total_args = len(node.args.args)
@@ -146,11 +197,18 @@ class SmartContractSandbox:
         "ValueError": ValueError,
     }
 
+    MAX_CODE_SIZE: int = 65536  # Максимальный размер исходного кода смарт-контракта (64 КБ)
+
     @classmethod
     def validate_code(cls, code: str) -> None:
         """
         Проверяет AST-дерево кода смарт-контракта на отсутствие опасных операций и наличие точки входа.
         """
+        if not isinstance(code, str) or len(code.encode("utf-8")) > cls.MAX_CODE_SIZE:
+            raise SandboxExecutionError(
+                f"Размер исходного кода смарт-контракта превышает лимит {cls.MAX_CODE_SIZE} байт"
+            )
+
         try:
             tree = ast.parse(code)
         except SyntaxError as e:

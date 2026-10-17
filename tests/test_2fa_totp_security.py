@@ -15,7 +15,6 @@ import pyotp
 from unittest.mock import MagicMock
 
 # Предварительный импорт fastapi до модификаций sys.path
-import fastapi
 from fastapi.testclient import TestClient
 
 # Моки внешних сервисов
@@ -31,7 +30,6 @@ import security
 from security import (
     settings,
     generate_totp_secret,
-    get_totp_uri,
     verify_totp_code,
     create_access_token,
     get_password_hash,
@@ -54,8 +52,11 @@ class InMemoryRedisMock:
     def setex(self, key: str, ttl: int, value: str):
         self.store[key] = value
 
-    def set(self, key: str, value: str):
+    def set(self, key: str, value: str, nx: bool = False, ex: int | None = None):
+        if nx and key in self.store:
+            return None
         self.store[key] = value
+        return True
 
     def delete(self, key: str):
         self.store.pop(key, None)
@@ -67,6 +68,9 @@ class InMemoryRedisMock:
 
     def expire(self, key: str, ttl: int):
         pass
+
+    def ttl(self, key: str) -> int:
+        return 300 if key in self.store else -2
 
 
 class MockAuditSession:

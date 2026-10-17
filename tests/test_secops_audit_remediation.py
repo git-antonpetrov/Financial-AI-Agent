@@ -17,7 +17,7 @@ import os
 import sys
 import uuid
 from datetime import datetime, timezone, timedelta
-from unittest.mock import MagicMock, AsyncMock, patch
+from unittest.mock import patch
 import pytest
 import jwt
 from fastapi import HTTPException, status
@@ -30,32 +30,23 @@ sys.path.insert(0, os.path.abspath("src/admin_server/vectors"))
 
 os.environ["POSTGRES_PASSWORD"] = "test_postgres_secret"
 
-import security
 from security import (
     settings,
     create_access_token,
     decode_access_token,
     get_current_admin,
-    get_current_user,
     verify_agent_jwt,
     encrypt_data_at_rest,
     decrypt_data_at_rest,
-    encrypt_text_at_rest,
-    decrypt_text_at_rest,
     derive_key,
-    resolve_encryption_key,
     MAGIC_ENCRYPTION_V1,
-    MAGIC_ENCRYPTION_V2_PREFIX,
     Role,
 )
 from vectors.chroma_envelope import (
     encrypt_chroma_chunk,
     decrypt_chroma_chunk,
     is_encrypted_chunk,
-    MAGIC_ENVELOPE_V1,
-    MAGIC_ENVELOPE_V2_PREFIX,
 )
-import server
 from server import app
 
 
@@ -138,7 +129,7 @@ def test_sec11_enc2_with_kid_roundtrip():
     """Шифрование с указанием kid формирует заголовок ENC2:<kid>: и корректно расшифровывается."""
     key = b"K" * 32
     plaintext = b"Financial Secret Portfolio Balance: 100,000,000 RUB"
-    
+
     # С Key ID (KID) -> формат ENC2
     encrypted = encrypt_data_at_rest(plaintext, key=key, kid="primary-2026")
     assert encrypted.startswith(b"ENC2:primary-2026:")
@@ -150,7 +141,7 @@ def test_sec11_legacy_enc1_backward_compatibility():
     """Legacy пакеты формата ENC1 прозрачно расшифровываются."""
     key = b"L" * 32
     plaintext = b"Legacy encrypted data from previous version"
-    
+
     # Без kid -> legacy ENC1
     legacy_enc = encrypt_data_at_rest(plaintext, key=key)
     assert legacy_enc.startswith(MAGIC_ENCRYPTION_V1)
@@ -162,12 +153,12 @@ def test_sec11_chroma_envelope_enc2_and_enc1():
     """Chroma envelope поддерживает как ENC2 с kid, так и legacy ENC1."""
     key = b"C" * 32
     chunk = "Конфиденциальный нормативный акт Центробанка"
-    
+
     # ENC2 с kid
     enc2 = encrypt_chroma_chunk(chunk, key=key, kid="rag-key-v2")
     assert is_encrypted_chunk(enc2) is True
     assert decrypt_chroma_chunk(enc2, key=key) == chunk
-    
+
     # Legacy ENC1
     enc1 = encrypt_chroma_chunk(chunk, key=key)
     assert is_encrypted_chunk(enc1) is True
@@ -213,18 +204,18 @@ def test_sec26_derive_key_methods():
     """derive_key поддерживает PBKDF2, HKDF и сохраняет совместимость с SHA-256."""
     passphrase = "Ultra-Secure-Master-Passphrase-2026"
     salt = b"test-custom-salt-12345"
-    
+
     # 1. PBKDF2
     k_pbkdf2 = derive_key(passphrase, salt=salt, method="pbkdf2", iterations=1000)
     assert len(k_pbkdf2) == 32
     assert isinstance(k_pbkdf2, bytes)
-    
+
     # 2. HKDF
     k_hkdf = derive_key(passphrase, salt=salt, method="hkdf")
     assert len(k_hkdf) == 32
     assert isinstance(k_hkdf, bytes)
     assert k_hkdf != k_pbkdf2
-    
+
     # 3. Legacy SHA-256 совместимость
     import hashlib
     expected_sha = hashlib.sha256(passphrase.encode("utf-8")).digest()

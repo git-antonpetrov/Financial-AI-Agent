@@ -104,6 +104,10 @@ def run_deployment(skip_build: bool = False, no_docker: bool = False, timeout: i
         "chromadb-server",
         "admin-server",
         "simulation-api",
+        "bank-worker",
+        "invest-worker",
+        "digital-worker",
+        "vector-worker",
         "caddy-server",
     ]
 
@@ -112,9 +116,10 @@ def run_deployment(skip_build: bool = False, no_docker: bool = False, timeout: i
         running_count = 0
         for svc in critical_services:
             status = "not_found"
+            fmt = "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}"
             try:
                 insp = subprocess.run(
-                    ["docker", "inspect", "--format={{.State.Status}}", svc],
+                    ["docker", "inspect", f"--format={fmt}", svc],
                     capture_output=True,
                     text=True,
                 )
@@ -122,7 +127,7 @@ def run_deployment(skip_build: bool = False, no_docker: bool = False, timeout: i
             except Exception:
                 pass
 
-            if status != "running":
+            if status not in ("healthy", "running"):
                 alias_map = {
                     "financial-postgres": "postgres-db",
                     "redis-server": "redis",
@@ -130,6 +135,10 @@ def run_deployment(skip_build: bool = False, no_docker: bool = False, timeout: i
                     "chromadb-server": "chromadb",
                     "admin-server": "admin-server",
                     "simulation-api": "simulation-api",
+                    "bank-worker": "bank-worker",
+                    "invest-worker": "invest-worker",
+                    "digital-worker": "digital-worker",
+                    "vector-worker": "vector-worker",
                     "caddy-server": "caddy",
                 }
                 alt = alias_map.get(svc)
@@ -143,7 +152,7 @@ def run_deployment(skip_build: bool = False, no_docker: bool = False, timeout: i
                         ).stdout.strip()
                         if cid:
                             insp = subprocess.run(
-                                ["docker", "inspect", "--format={{.State.Status}}", cid],
+                                ["docker", "inspect", f"--format={fmt}", cid],
                                 capture_output=True,
                                 text=True,
                             )
@@ -151,7 +160,7 @@ def run_deployment(skip_build: bool = False, no_docker: bool = False, timeout: i
                     except Exception:
                         pass
 
-            if status == "running":
+            if status in ("healthy", "running"):
                 running_count += 1
 
         if running_count == len(critical_services):

@@ -6,8 +6,7 @@
 
 # 1. Внешний защищенный шлюз Администратора
 {$ADMIN_DOMAIN:admin.fin-ai-agent.ru}, {$ADMIN_LOCAL_DOMAIN:admin.fin-ai-agent.local} {
-    # Строгие протоколы TLS 1.3 / TLS 1.2 и безопасные наборы шифров
-    # Строгие протоколы TLS 1.3 / TLS 1.2 и безопасные наборы шифров
+    # Строгий протокол TLS 1.3 и безопасные наборы шифров
     tls {
         protocols tls1.2 tls1.3
         ciphers TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
@@ -43,12 +42,13 @@
         header_up X-Real-IP {remote_host}
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto https
+        header_up X-Proxy-Secret "{$PROXY_INTERNAL_SECRET:financial-core-proxy-token-2026}"
         header_up X-Client-Cert-Verify {tls_client_verified}
         header_up X-Client-Cert-Subject {tls_client_subject}
         header_up X-Client-Cert-Issuer {tls_client_issuer}
         header_up X-Client-Cert-Serial {tls_client_serial}
         header_up X-Client-Cert-Fingerprint {tls_client_fingerprint}
-        header_up X-Client-Cert-Pem {http.request.tls.client.certificate_pem}
+        header_up X-Client-Cert-Pem {tls_client_escaped_cert}
 
         transport http {
             response_header_timeout 180s
@@ -60,7 +60,17 @@
 
 # 2. Внутренний банковский контур (Шифрование транзита между контейнерами и подсетями)
 simulation-api.internal, bank-service.internal {
-    tls internal
+    # Защита от непреднамеренного внешнего доступа через порт 443 хоста
+    @external not remote_ip 172.16.0.0/12 10.0.0.0/8 192.168.0.0/16 127.0.0.1 ::1
+    abort @external
+
+    tls {
+        protocols tls1.3
+        client_auth {
+            mode {$CADDY_CLIENT_AUTH_MODE:require_and_verify}
+            trusted_ca_cert_file /etc/caddy/certs/ca.crt
+        }
+    }
 
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains"
@@ -70,6 +80,7 @@ simulation-api.internal, bank-service.internal {
     }
 
     reverse_proxy simulation-api:8002 {
+        header_up -X-Client-Cert-*
         header_up -X-Client-Cert-Verify
         header_up -X-Client-Cert-Subject
         header_up -X-Client-Cert-Issuer
@@ -79,6 +90,7 @@ simulation-api.internal, bank-service.internal {
         header_up X-Real-IP {remote_host}
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto https
+        header_up X-Proxy-Secret "{$PROXY_INTERNAL_SECRET:financial-core-proxy-token-2026}"
 
         transport http {
             response_header_timeout 60s
@@ -90,7 +102,12 @@ simulation-api.internal, bank-service.internal {
 
 # 3. Внутренний контур Администратора (Межсетевое TLS-взаимодействие)
 admin-server.internal {
-    tls internal {
+    # Защита от непреднамеренного внешнего доступа через порт 443 хоста
+    @external not remote_ip 172.16.0.0/12 10.0.0.0/8 192.168.0.0/16 127.0.0.1 ::1
+    abort @external
+
+    tls {
+        protocols tls1.3
         client_auth {
             mode {$CADDY_CLIENT_AUTH_MODE:require_and_verify}
             trusted_ca_cert_file /etc/caddy/certs/ca.crt
@@ -116,12 +133,13 @@ admin-server.internal {
         header_up X-Real-IP {remote_host}
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto https
+        header_up X-Proxy-Secret "{$PROXY_INTERNAL_SECRET:financial-core-proxy-token-2026}"
         header_up X-Client-Cert-Verify {tls_client_verified}
         header_up X-Client-Cert-Subject {tls_client_subject}
         header_up X-Client-Cert-Issuer {tls_client_issuer}
         header_up X-Client-Cert-Serial {tls_client_serial}
         header_up X-Client-Cert-Fingerprint {tls_client_fingerprint}
-        header_up X-Client-Cert-Pem {http.request.tls.client.certificate_pem}
+        header_up X-Client-Cert-Pem {tls_client_escaped_cert}
 
         transport http {
             response_header_timeout 180s

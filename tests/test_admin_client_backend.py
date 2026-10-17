@@ -24,7 +24,7 @@ def test_validate_server_url_allows_localhost_and_public():
     validate_server_url("http://localhost:8001")
     validate_server_url("http://127.0.0.1:8005")
     validate_server_url("http://[::1]:8005")
-    
+
     # Публичный домен (при моке публичного IP)
     with patch("socket.getaddrinfo") as mock_dns:
         mock_dns.return_value = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
@@ -91,7 +91,7 @@ def test_admin_client_ports_dynamic_configuration():
     dashboard_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src", "admin_client", "frontend", "src", "Dashboard.tsx"))
     with open(dashboard_path, "r", encoding="utf-8") as f:
         content = f.read()
-    
+
     # Фронтенд должен использовать динамический базовый URL
     assert "getLocalSidecarUrl" in content
     assert "${sidecarBaseUrl}/api/local/process" in content
@@ -113,7 +113,7 @@ def test_ipc_security_guard_enforces_secret():
     test_secret = "test-crypto-ipc-secret-123456"
     with patch.object(main, "SIDECAR_IPC_SECRET", test_secret):
         client = TestClient(main.app)
-        
+
         # 1. Запрос без токена блокируется middleware (403)
         res_no_token = client.post("/api/local/process")
         assert res_no_token.status_code == 403
@@ -164,7 +164,6 @@ def test_pyinstaller_spec_hardening():
 
 def test_frozen_execution_requires_secret():
     """Проверяет логику запрета запуска упакованного бинарника без IPC-секрета."""
-    import main
     # При sys.frozen == False и пустом секрете (режим разработки) модуль импортируется без ошибок
     assert getattr(sys, "frozen", False) is False
 
@@ -173,7 +172,6 @@ def test_local_auth_login_and_status():
     """Проверяет локальную авторизацию через BFF и получение статуса сессии."""
     from fastapi.testclient import TestClient
     import main
-    from unittest.mock import MagicMock
 
     client = TestClient(main.app)
 
@@ -281,7 +279,7 @@ def test_process_document_uses_session_credentials():
     with patch.object(main.remote_client, "server_url", "https://localhost:8000"), \
          patch.object(main.remote_client, "access_token", "header.payload.signature"), \
          patch.object(main.remote_client, "get_contentai_config", return_value={"username": "ocr_user", "password": "ocr_pass", "api_uri": "https://ocr.internal"}), \
-         patch.object(main, "run_pipeline") as mock_pipeline:
+         patch.object(main, "run_pipeline"):
 
         dummy_file = io.BytesIO(b"PDF document content")
         # Отправляем форму без явных server_url, admin_token и contentai_* (они подтягиваются из remote_client)

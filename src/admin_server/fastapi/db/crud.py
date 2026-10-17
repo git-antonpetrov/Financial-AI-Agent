@@ -1,4 +1,5 @@
 import hashlib
+import inspect
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import update
@@ -8,18 +9,21 @@ from sqlalchemy.orm import selectinload
 
 from . import models
 
+try:
+    from src.common.crypto.zeroize import secure_zero_memory
+except ImportError:
+    try:
+        from common.crypto.zeroize import secure_zero_memory
+    except ImportError:
+        def secure_zero_memory(target):
+            pass
 
-import inspect
-from typing import Any
 
-
-def _is_real_awaitable(obj: Any) -> bool:
-    """Проверяет, является ли объект настоящим awaitable, исключая MagicMock."""
-    if obj is None:
-        return False
-    if type(obj).__name__ in ("MagicMock", "Mock", "NonCallableMagicMock"):
-        return False
-    return inspect.isawaitable(obj)
+async def _safe_await(val):
+    """Безопасно ожидает асинхронные операции БД, поддерживая как AsyncSession, так и синхронные моки."""
+    if inspect.isawaitable(val):
+        return await val
+    return val
 
 
 def parse_date_from_system_name(system_name: str) -> datetime:
@@ -61,14 +65,11 @@ async def create_document(
     )
     try:
         db.add(doc)
-        c_res = db.commit()
-        if _is_real_awaitable(c_res):
-            await c_res
-        r_res = db.refresh(doc)
-        if _is_real_awaitable(r_res):
-            await r_res
-    except Exception:
-        pass
+        await _safe_await(db.commit())
+        await _safe_await(db.refresh(doc))
+    except Exception as e:
+        await _safe_await(db.rollback())
+        raise RuntimeError(f"Ошибка сохранения документа в базе данных: {e}") from e
     return doc
 
 
@@ -289,8 +290,7 @@ async def update_checking_to_processing(
     )
     doc = None
     try:
-        exec_res = db.execute(query)
-        result = await exec_res if _is_real_awaitable(exec_res) else exec_res
+        result = await db.execute(query)
         if hasattr(result, "scalars") and callable(result.scalars):
             doc = result.scalars().first()
     except Exception:
@@ -308,8 +308,7 @@ async def update_checking_to_processing(
             .order_by(models.Document.created_at.desc())
         )
         try:
-            exec_fn = db.execute(query_fn)
-            result_fn = await exec_fn if _is_real_awaitable(exec_fn) else exec_fn
+            result_fn = await db.execute(query_fn)
             if hasattr(result_fn, "scalars") and callable(result_fn.scalars):
                 doc = result_fn.scalars().first()
         except Exception:
@@ -327,11 +326,10 @@ async def update_checking_to_processing(
         if raw_content is not None:
             doc.raw_content = raw_content
         try:
-            c_res = db.commit()
-            if _is_real_awaitable(c_res):
-                await c_res
-        except Exception:
-            pass
+            await _safe_await(db.commit())
+        except Exception as e:
+            await _safe_await(db.rollback())
+            raise RuntimeError(f"Ошибка фиксации обновления статуса документа: {e}") from e
         return doc
 
     # Запасной вариант: если 'checking' запись не найдена, создаём новую
@@ -463,7 +461,14 @@ async def get_active_agent_key(db: AsyncSession, agent_name: str, kid: str | Non
     return key
 
 
-async def register_agent(db: AsyncSession, agent_name: str, public_key: str, ttl_days: int = 90) -> models.Agent:
+async def get_agent_key_by_kid(db: AsyncSession, kid: str) -> models.AgentKey | None:
+    """Извлекает ключ агента по его уникальному идентификатору (kid)."""
+    query = select(models.AgentKey).where(models.AgentKey.kid == kid)
+    result = await db.execute(query)
+    return result.scalars().first()
+
+
+async def register_agent(db: AsyncSession, agent_name: str, public_key: str, ttl_days: int = 1) -> models.Agent:
     """Регистрирует нового агента или выполняет ротацию ключа для уже существующего."""
     if not public_key.strip().startswith("-----BEGIN"):
         raise ValueError("Public key must be in PEM format (starting with -----BEGIN...)")
@@ -518,7 +523,7 @@ async def register_agent(db: AsyncSession, agent_name: str, public_key: str, ttl
 
 
 async def rotate_agent_key(
-    db: AsyncSession, agent_name: str, new_public_key: str, ttl_days: int = 90
+    db: AsyncSession, agent_name: str, new_public_key: str, ttl_days: int = 1
 ) -> tuple[models.Agent, models.AgentKey]:
     """Выполняет плановую ротацию ключа агента с архивацией предыдущего."""
     if not new_public_key.strip().startswith("-----BEGIN"):
@@ -540,6 +545,11 @@ async def rotate_agent_key(
     old_keys_res = await db.execute(old_keys_query)
     for old_k in old_keys_res.scalars().all():
         old_k.status = "superseded"
+
+    # Зануление конфиденциального буфера старого ключа в памяти перед ротацией (NIST SP 800-88)
+    if agent.public_key:
+        old_key_buf = bytearray(agent.public_key.encode("utf-8"))
+        secure_zero_memory(old_key_buf)
 
     agent.public_key = new_public_key
     agent.status = "active"

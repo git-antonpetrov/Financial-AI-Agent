@@ -78,14 +78,6 @@ class OracleKeyManager:
     def get_public_key_pem(self) -> str:
         return self._public_key_pem
 
-    @property
-    def _dev_private_key(self) -> rsa.RSAPrivateKey | None:
-        """Свойство для обратной совместимости с тестами."""
-        return self._private_key
-
-    def get_dev_private_key(self) -> rsa.RSAPrivateKey | None:
-        return self._private_key
-
     def get_private_key(self) -> rsa.RSAPrivateKey | None:
         return self._private_key
 
@@ -142,7 +134,7 @@ class OracleVerifier:
         """
         Создает цифровую подпись оракула (для тестирования или сервиса оракула).
         """
-        key = private_key or self.key_manager.get_dev_private_key()
+        key = private_key or self.key_manager.get_private_key()
         if not key:
             raise RuntimeError("Приватный ключ оракула недоступен для создания подписи")
 
@@ -172,9 +164,8 @@ class OracleVerifier:
         if not signature_b64 or not signature_b64.strip():
             return False, "Подпись оракула отсутствует"
 
-        # SEC-14: Если включен строгий режим проверки nonce и timestamp для оракула
-        require_nonce_ts = os.getenv("REQUIRE_ORACLE_NONCE_TIMESTAMP", "false").lower() in ("true", "1")
-        if require_nonce_ts and (timestamp is None or nonce is None):
+        # SEC-14: Для верификации подписи оракула строго обязательны параметры timestamp и nonce (защита от Replay)
+        if timestamp is None or nonce is None:
             return False, "Для верификации подписи оракула обязательны параметры timestamp и nonce (SEC-14)"
 
         # SEC-14: Проверка дрейфа времени (Timestamp Skew)
@@ -218,8 +209,12 @@ class OracleVerifier:
             )
             return True, "Подпись оракула валидна"
         except InvalidSignature:
+            if nonce is not None:
+                self.nonce_store.discard_nonce(nonce)
             return False, "Цифровая подпись оракула недействительна"
         except Exception as e:
+            if nonce is not None:
+                self.nonce_store.discard_nonce(nonce)
             return False, f"Ошибка проверки подписи оракула: {e}"
 
 

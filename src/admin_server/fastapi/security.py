@@ -57,6 +57,15 @@ except ImportError:
         get_permissions_for_role,  # noqa: F401
     )
 
+try:
+    from src.common.crypto.zeroize import secure_zero_memory
+except ImportError:
+    try:
+        from common.crypto.zeroize import secure_zero_memory
+    except ImportError:
+        def secure_zero_memory(target: Any) -> None:
+            pass
+
 VALID_ADMIN_USERS: set[str] = {"admin", "operator", "auditor"}
 
 __all__ = [
@@ -83,14 +92,14 @@ class Settings:
     AUDITOR_PASSWORD_HASH: str = os.getenv("AUDITOR_PASSWORD_HASH", "")
 
     def get_password_hash_for_user(self, username: str) -> str:
-        """Возвращает хэш пароля для конкретного пользователя с изоляцией учетных записей."""
+        """Возвращает хэш пароля для конкретного пользователя со строгой изоляцией учетных записей."""
         uname = (username or "").strip().lower()
         if uname == "admin":
             return self.ADMIN_PASSWORD_HASH
         elif uname == "operator":
-            return self.OPERATOR_PASSWORD_HASH or self.ADMIN_PASSWORD_HASH
+            return self.OPERATOR_PASSWORD_HASH
         elif uname == "auditor":
-            return self.AUDITOR_PASSWORD_HASH or self.ADMIN_PASSWORD_HASH
+            return self.AUDITOR_PASSWORD_HASH
         return ""
     ADMIN_TOTP_SECRET: str = os.getenv("ADMIN_TOTP_SECRET", "").strip()
     REQUIRE_2FA: bool = os.getenv("REQUIRE_2FA", "false").lower() in (
@@ -127,6 +136,7 @@ class Settings:
     )
     REDIS_SSL: bool = os.getenv("REDIS_SSL", "false").lower() in ("true", "1", "yes")
     POSTGRES_SSLMODE: str = os.getenv("POSTGRES_SSLMODE", "prefer").strip()
+    PROXY_INTERNAL_SECRET: str = os.getenv("PROXY_INTERNAL_SECRET", "").strip()
 
     AGENT_DIGITAL_BOOTSTRAP_TOKEN: str = os.getenv("AGENT_DIGITAL_BOOTSTRAP_TOKEN", "")
     AGENT_BANK_BOOTSTRAP_TOKEN: str = os.getenv("AGENT_BANK_BOOTSTRAP_TOKEN", "")
@@ -1253,9 +1263,13 @@ def encrypt_data_at_rest(
         raise TypeError(f"Ожидались bytes или str, получено: {type(data).__name__}")
 
     resolved_key = resolve_encryption_key(key)
+    key_buffer = bytearray(resolved_key)
     nonce = os.urandom(12)
-    aesgcm = AESGCM(resolved_key)
-    ciphertext_and_tag = aesgcm.encrypt(nonce, bytes(data), associated_data)
+    try:
+        aesgcm = AESGCM(bytes(key_buffer))
+        ciphertext_and_tag = aesgcm.encrypt(nonce, bytes(data), associated_data)
+    finally:
+        secure_zero_memory(key_buffer)
     if kid is not None:
         return MAGIC_ENCRYPTION_V2_PREFIX + kid.encode("utf-8") + b":" + nonce + ciphertext_and_tag
     return MAGIC_ENCRYPTION_V1 + nonce + ciphertext_and_tag
@@ -1299,14 +1313,16 @@ def decrypt_data_at_rest(
         raise ValueError("Неподдерживаемый формат шифрования или отсутствующий заголовок ENC1/ENC2.")
 
     resolved_key = resolve_encryption_key(key)
-    aesgcm = AESGCM(resolved_key)
-
+    key_buffer = bytearray(resolved_key)
     try:
+        aesgcm = AESGCM(bytes(key_buffer))
         return aesgcm.decrypt(nonce, ciphertext_and_tag, associated_data)
     except Exception as e:
         raise ValueError(
             "Ошибка расшифровки данных: неверный ключ, поврежденный шифротекст или несовпадение тега аутентификации."
         ) from e
+    finally:
+        secure_zero_memory(key_buffer)
 
 
 def encrypt_text_at_rest(
@@ -1391,7 +1407,23 @@ def extract_cn_from_subject(subject: str | None) -> str | None:
 def parse_mtls_client_certificate(request: Request) -> dict[str, Any]:
     """
     Извлекает и нормализует метаданные mTLS клиентского сертификата из HTTP-заголовков reverse proxy (Caddy/Nginx).
+    Обеспечивает валидацию X-Proxy-Secret для исключения спуфинга mTLS-заголовков внутри сети.
     """
+    proxy_secret = settings.PROXY_INTERNAL_SECRET or os.getenv("PROXY_INTERNAL_SECRET", "").strip()
+    if proxy_secret:
+        client_secret = request.headers.get("x-proxy-secret", "").strip()
+        if not client_secret or not hmac.compare_digest(client_secret, proxy_secret):
+            return {
+                "verified": False,
+                "raw_verify_status": "UNTRUSTED_PROXY",
+                "subject": None,
+                "issuer": None,
+                "serial": None,
+                "fingerprint": None,
+                "common_name": None,
+                "is_present": False,
+            }
+
     verify_header = request.headers.get("x-client-cert-verify", "").strip()
     # Caddy передает "SUCCESS" или статус верификации
     is_verified = verify_header.upper() in ("SUCCESS", "TRUE", "1")
@@ -1662,6 +1694,21 @@ def clear_admin_nonces_cache() -> None:
         _admin_nonces_memory.clear()
 
 
+def discard_admin_nonce(nonce: str, redis_conn=None) -> None:
+    """Сбрасывает зарезервированный Nonce при сбое валидации подписи (защита от DoS по сожжению Nonce)."""
+    if not nonce or not nonce.strip():
+        return
+    nonce = nonce.strip()
+    client = redis_conn or redis_blacklist
+    if client:
+        try:
+            client.delete(f"admin:nonce:{nonce}")
+        except Exception:
+            pass
+    with _admin_nonces_lock:
+        _admin_nonces_memory.pop(nonce, None)
+
+
 # --- ЦИФРОВЫЕ ПОДПИСИ И ВЕРИФИКАЦИЯ (DIGITAL SIGNATURES & X.509) ---
 
 
@@ -1840,12 +1887,26 @@ def set_trusted_root_ca(ca_input: Any) -> None:
     """Устанавливает доверенный Root CA в оперативной памяти (для тестов и кастомной инициализации)."""
     global _trusted_root_ca_cache
     _trusted_root_ca_cache = parse_x509_certificate(ca_input)
+    import sys
+
+    for mod_name in ["security", "src.admin_server.fastapi.security", "fastapi.security"]:
+        if mod_name in sys.modules and sys.modules[mod_name] is not sys.modules.get(__name__):
+            target = sys.modules[mod_name]
+            if hasattr(target, "_trusted_root_ca_cache"):
+                setattr(target, "_trusted_root_ca_cache", _trusted_root_ca_cache)
 
 
 def reset_trusted_root_ca() -> None:
     """Сбрасывает закешированный Root CA."""
     global _trusted_root_ca_cache
     _trusted_root_ca_cache = None
+    import sys
+
+    for mod_name in ["security", "src.admin_server.fastapi.security", "fastapi.security"]:
+        if mod_name in sys.modules and sys.modules[mod_name] is not sys.modules.get(__name__):
+            target = sys.modules[mod_name]
+            if hasattr(target, "_trusted_root_ca_cache"):
+                setattr(target, "_trusted_root_ca_cache", None)
 
 
 def parse_x509_certificate(cert_input: Any) -> Any | None:
@@ -2083,6 +2144,28 @@ def validate_x509_certificate_chain(
                 ),
             )
 
+        # Валидация X.509 расширений Root CA (RFC 5280)
+        try:
+            root_bc_ext = root_ca.extensions.get_extension_for_oid(x509.ExtensionOID.BASIC_CONSTRAINTS)
+            if not root_bc_ext.value.ca:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Корневой сертификат Root CA обязан иметь расширение BasicConstraints с флагом CA=True",
+                )
+            if root_bc_ext.value.path_length is not None and root_bc_ext.value.path_length < 1:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail=(
+                        "Корневой сертификат Root CA исчерпал лимит вложенности "
+                        "центров сертификации (path_length < 1)"
+                    ),
+                )
+        except x509.ExtensionNotFound:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Корневой сертификат Root CA не содержит обязательного расширения BasicConstraints",
+            )
+
         # Валидация X.509 расширений промежуточного CA Анклава (RFC 5280)
         try:
             bc_ext = enclave_cert.extensions.get_extension_for_oid(x509.ExtensionOID.BASIC_CONSTRAINTS)
@@ -2108,7 +2191,13 @@ def validate_x509_certificate_chain(
                     ),
                 )
         except x509.ExtensionNotFound:
-            pass
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=(
+                    "Промежуточный сертификат Анклава обязан содержать "
+                    "расширение KeyUsage с флагом key_cert_sign=True"
+                ),
+            )
 
         try:
             verify_certificate_signature(enclave_cert, root_ca.public_key())

@@ -262,7 +262,12 @@ class AgentRotateKeyRequest(BaseModel):
         max_length=8192,
         description="Новый публичный RSA-ключ в формате PEM",
     )
-    ttl_days: int | None = Field(default=90, ge=1, le=365, description="Срок действия ключа в днях")
+    ttl_days: int | None = Field(
+        default=1,
+        ge=1,
+        le=365,
+        description="Срок действия ключа в днях (по умолчанию 1 день / 24 часа)",
+    )
 
 
 class AgentRevokeKeyRequest(BaseModel):

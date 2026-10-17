@@ -10,12 +10,9 @@
 import os
 import sys
 import pytest
-import jwt
-from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock
 
 # Предварительный импорт fastapi до манипуляций с sys.path
-import fastapi
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
@@ -62,11 +59,66 @@ class InMemoryRedisMock:
         pass
 
 
+class MockAuditSession:
+    """Имитатор асинхронной сессии БД для изолированного аудита."""
+    def __init__(self):
+        self.logs = []
+
+    def get_bind(self):
+        return None
+
+    def add(self, entry):
+        if not hasattr(entry, "id") or entry.id is None:
+            entry.id = len(self.logs) + 1
+        if entry not in self.logs:
+            self.logs.append(entry)
+
+    async def commit(self):
+        pass
+
+    async def refresh(self, entry):
+        pass
+
+    async def rollback(self):
+        pass
+
+    async def delete(self, entry):
+        if entry in self.logs:
+            self.logs.remove(entry)
+
+    async def execute(self, statement):
+        class ScalarResult:
+            def __init__(self, res_list):
+                self._list = res_list
+            def scalars(self):
+                return self
+            def all(self):
+                return list(self._list)
+            def first(self):
+                return self._list[0] if self._list else None
+        return ScalarResult(list(self.logs))
+
+
+@pytest.fixture(autouse=True)
+def setup_mock_db():
+    from server import app
+    from db.database import get_db
+    mock_session = MockAuditSession()
+    app.dependency_overrides[get_db] = lambda: mock_session
+    yield mock_session
+    app.dependency_overrides.pop(get_db, None)
+
+
 @pytest.fixture(autouse=True)
 def setup_mock_redis(monkeypatch):
     """Изолирует хранилище Redis для каждого теста."""
     mock_redis = InMemoryRedisMock()
     monkeypatch.setattr(security, "redis_blacklist", mock_redis)
+    try:
+        import server
+        monkeypatch.setattr(server, "redis_client", mock_redis)
+    except Exception:
+        pass
     return mock_redis
 
 

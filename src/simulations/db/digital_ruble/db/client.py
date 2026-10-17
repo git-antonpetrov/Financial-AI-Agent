@@ -14,10 +14,13 @@ def get_async_engine():
     """
     Ленивая инициализация асинхронного движка базы данных цифрового рубля.
     """
-    DATABASE_URL = os.getenv(
-        "RUBLE_DATABASE_URL",
-        "postgresql+asyncpg://agent_user:agent_password@localhost:15432/ruble_db",
-    )
+    DATABASE_URL = os.getenv("RUBLE_DATABASE_URL") or os.getenv("DIGITAL_RUBLE_DATABASE_URL")
+    if not DATABASE_URL or not DATABASE_URL.strip():
+        raise ValueError(
+            "Критическая ошибка конфигурации: переменная окружения RUBLE_DATABASE_URL "
+            "обязательна, но не задана. Использование значений по умолчанию с открытыми паролями запрещено."
+        )
+    DATABASE_URL = DATABASE_URL.strip()
     ssl_mode = os.getenv("POSTGRES_SSLMODE", "").strip()
     if ssl_mode and "?" not in DATABASE_URL:
         DATABASE_URL += f"?ssl={ssl_mode}"

@@ -28,7 +28,7 @@ if admin_server_path not in sys.path:
     sys.path.insert(0, admin_server_path)
 
 try:
-    from src.admin_client.backend.core.crypto.canonical import compute_rag_canonical_digest, compute_receipt_canonical_bytes
+    from src.admin_client.backend.core.crypto.canonical import compute_receipt_canonical_bytes
     from src.admin_client.backend.core.crypto.hardware_bridge import HardwareSigningBridge, SimulatedTPMBridge
     from src.admin_client.backend.core.crypto.software_bridge import SoftwareSigningBridge
     from src.admin_client.backend.core.crypto.signer import ZeroTrustClientSigner
@@ -37,8 +37,6 @@ try:
         WindowsCertificateStoreError,
         CertificateValidationError,
         KeyMissingError,
-        find_root_ca_in_windows_store,
-        find_client_cert_in_windows_store,
         export_windows_cert_to_cache,
         get_windows_cert_store_help_message,
         resolve_and_validate_client_certificate,
@@ -47,7 +45,7 @@ try:
     from src.admin_client.backend.pipeline import DocumentPipeline
     from src.admin_client.backend import main
 except ImportError:
-    from core.crypto.canonical import compute_rag_canonical_digest, compute_receipt_canonical_bytes
+    from core.crypto.canonical import compute_receipt_canonical_bytes
     from core.crypto.hardware_bridge import HardwareSigningBridge, SimulatedTPMBridge
     from core.crypto.software_bridge import SoftwareSigningBridge
     from core.crypto.signer import ZeroTrustClientSigner
@@ -56,8 +54,6 @@ except ImportError:
         WindowsCertificateStoreError,
         CertificateValidationError,
         KeyMissingError,
-        find_root_ca_in_windows_store,
-        find_client_cert_in_windows_store,
         export_windows_cert_to_cache,
         get_windows_cert_store_help_message,
         resolve_and_validate_client_certificate,
@@ -145,7 +141,7 @@ def test_simulated_tpm_bridge_biometrics_success_and_denial(test_pki_pair):
     )
     assert tpm_ok.get_certificate_pem().startswith("-----BEGIN CERTIFICATE-----")
     assert tpm_ok.get_public_key_pem().startswith("-----BEGIN PUBLIC KEY-----")
-    
+
     test_data = b"Canonical payload to sign"
     sig_pss = tpm_ok.sign_digest(test_data, scheme="PSS")
     assert isinstance(sig_pss, str) and len(sig_pss) > 50
@@ -206,7 +202,7 @@ def test_software_signing_bridge_key_generation_and_signing(test_pki_pair):
     )
     assert sw_bridge.get_certificate_pem().startswith("-----BEGIN CERTIFICATE-----")
     assert sw_bridge.get_public_key_pem().startswith("-----BEGIN PUBLIC KEY-----")
-    
+
     test_payload = b"Sample financial statement payload"
     sig = sw_bridge.sign_digest(test_payload, scheme="PSS")
     assert isinstance(sig, str) and len(sig) > 64
@@ -306,16 +302,16 @@ def test_zero_trust_client_signature_interoperability_with_server(test_pki_pair)
         ca_cert_pem=test_pki_pair["ca_pem"]
     )
     test_body = b'{"document_title":"Audit Report 2026","content":"Classified"}'
-    
+
     headers = signer.create_rag_request_headers(test_body)
-    
+
     # Сервер восстанавливает канонический дайджест
     server_digest = server_canonical(
         timestamp=int(headers["X-Timestamp"]),
         nonce=headers["X-Nonce"],
         body_bytes=test_body
     )
-    
+
     # Сервер проверяет цифровую подпись публичным сертификатом клиента
     is_valid = verify_digital_signature(
         public_key_or_cert=headers["X-Cert"],

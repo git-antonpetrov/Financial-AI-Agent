@@ -282,6 +282,14 @@ def bootstrap_pki(
     shutil.copyfile(export_path / "admin_server.crt", admin_dir / "admin_server.crt")
     shutil.copyfile(export_path / "admin_server.key", admin_dir / "admin_server.key")
 
+    # enclave_certs: изолированное хранилище ключей промежуточного УЦ Анклава
+    enclave_dir = export_path / "enclave_certs"
+    enclave_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(export_path / "ca.crt", enclave_dir / "ca.crt")
+    shutil.copyfile(export_path / "enclave_ca.crt", enclave_dir / "enclave_ca.crt")
+    if (export_path / "enclave_ca.key").exists():
+        shutil.copyfile(export_path / "enclave_ca.key", enclave_dir / "enclave_ca.key")
+
     # admin_client_certs: изолированное хранилище ключей супер-администратора
     admin_client_dir = export_path / "admin_client_certs"
     admin_client_dir.mkdir(parents=True, exist_ok=True)
@@ -296,6 +304,7 @@ def bootstrap_pki(
     dedicated_mounts = {
         "CA_PUBLIC_DIR": (ca_public_dir, ["ca.crt"]),
         "BANK_CERTS_DIR": (bank_dir, ["ca.crt", "bank.crt", "bank.key"]),
+        "ENCLAVE_CERTS_DIR": (enclave_dir, ["ca.crt", "enclave_ca.crt", "enclave_ca.key"]),
         "ADMIN_CERTS_DIR": (
             admin_dir,
             ["ca.crt", "admin_server.crt", "admin_server.key"],
@@ -313,13 +322,19 @@ def bootstrap_pki(
             for fname in file_list:
                 shutil.copyfile(src_d / fname, dst_p / fname)
 
-    # Изоляция ключа супер-администратора от общего раздела certs_data в Docker
-    isolate_admin_client = os.getenv("ISOLATE_ADMIN_CLIENT_KEY", "false").lower() in (
-        "true",
-        "1",
-    )
-    if isolate_admin_client:
-        for f_to_remove in ["admin_client.key", "client.key"]:
+    # Изоляция закрытых ключей от общего корня раздела certs_data в Docker (SEC-02: Zero-Trust Key Isolation)
+    # Закрытые ключи сервисов доступны исключительно через специализированные изолированные тома:
+    # bank_certs, admin_certs, enclave_certs, admin_client_certs.
+    isolate_keys = os.getenv("ISOLATE_PRIVATE_KEYS", "false").lower() in ("true", "1")
+    if isolate_keys:
+        for f_to_remove in [
+            "admin_client.key",
+            "client.key",
+            "enclave_ca.key",
+            "bank.key",
+            "admin_server.key",
+            "server.key",
+        ]:
             target_f = export_path / f_to_remove
             if target_f.exists():
                 target_f.unlink()
@@ -328,7 +343,7 @@ def bootstrap_pki(
             if admin_client_dir.exists():
                 shutil.rmtree(admin_client_dir, ignore_errors=True)
         print(
-            "[+] SEC-02: Закрытый ключ admin_client.key успешно изолирован от общего тома certs_data."
+            "[+] SEC-02: Закрытые ключи сервисов успешно изолированы от общего тома certs_data."
         )
 
     print("\n[✓] Инициализация PKI успешно завершена. Все сервисы обеспечены доверенными сертификатами.")

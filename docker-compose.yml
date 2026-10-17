@@ -13,7 +13,9 @@ services:
       - ADMIN_CERTS_DIR=/export/admin_certs
       - BANK_CERTS_DIR=/export/bank_certs
       - ADMIN_CLIENT_CERTS_DIR=/export/admin_client_certs
+      - ENCLAVE_CERTS_DIR=/export/enclave_certs
       - ISOLATE_ADMIN_CLIENT_KEY=true
+      - ISOLATE_PRIVATE_KEYS=true
       - FORCE_REGENERATE=${FORCE_REGENERATE:-false}
       - STRICT_SECURITY=true
     volumes:
@@ -23,6 +25,7 @@ services:
       - admin_certs:/export/admin_certs
       - bank_certs:/export/bank_certs
       - admin_client_certs:/export/admin_client_certs
+      - enclave_certs:/export/enclave_certs
     networks:
       - pki_net
     restart: "no"
@@ -178,6 +181,7 @@ services:
         condition: service_completed_successfully
     environment:
       - INVEST_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/invest_db
+      - BANK_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/bank_db
       - TZ=Europe/Moscow
       - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
       - SSL_CERT_FILE=/certs/ca.crt
@@ -248,6 +252,11 @@ services:
       - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
       - SSL_CERT_FILE=/certs/ca.crt
       - DATA_ENCRYPTION_KEY=${DATA_ENCRYPTION_KEY}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - REDIS_SSL=${REDIS_SSL:-true}
+      - REDIS_SSL_CA_CERTS=/certs/ca.crt
       - AGENT_BANK_BOOTSTRAP_TOKEN=${AGENT_BANK_BOOTSTRAP_TOKEN}
       - AGENT_INVEST_BOOTSTRAP_TOKEN=${AGENT_INVEST_BOOTSTRAP_TOKEN}
       - AGENT_DIGITAL_BOOTSTRAP_TOKEN=${AGENT_DIGITAL_BOOTSTRAP_TOKEN}
@@ -258,7 +267,7 @@ services:
     volumes:
       - bank_certs:/certs:ro
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\" || exit 1"]
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8002/health')\" || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -294,7 +303,7 @@ services:
     networks:
       - data_net
     healthcheck:
-      test: ["CMD-SHELL", "curl -k -f https://localhost:9000/minio/health/live || exit 1"]
+      test: ["CMD-SHELL", "curl --cacert /certs/ca.crt -f https://localhost:9000/minio/health/live || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -381,6 +390,7 @@ services:
       - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
       - SSL_CERT_FILE=/certs/ca.crt
       - REDIS_SSL_CA_CERTS=/certs/ca.crt
+      - PROXY_INTERNAL_SECRET=${PROXY_INTERNAL_SECRET:-financial-core-proxy-token-2026}
     volumes:
       - ./data:/app/data:ro
       - admin_certs:/certs:ro
@@ -506,13 +516,14 @@ services:
       - CADDY_CLIENT_AUTH_MODE=${CADDY_CLIENT_AUTH_MODE:-require_and_verify}
       - ADMIN_DOMAIN=${ADMIN_DOMAIN:-admin.fin-ai-agent.ru}
       - ADMIN_LOCAL_DOMAIN=${ADMIN_LOCAL_DOMAIN:-admin.fin-ai-agent.local}
+      - PROXY_INTERNAL_SECRET=${PROXY_INTERNAL_SECRET:-financial-core-proxy-token-2026}
     volumes:
       - ./src/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - ca_public:/etc/caddy/certs:ro
       - caddy_data:/data
       - caddy_config:/config
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:80 || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:80/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -585,3 +596,4 @@ volumes:
   minio_data:
   redis_data:
   chroma_data:
+  enclave_certs:

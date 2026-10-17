@@ -5,7 +5,7 @@ WORKDIR /app
 RUN apk add --no-cache gcc musl-dev libffi-dev && \
     addgroup -S appgroup && \
     adduser -S appuser -G appgroup && \
-    mkdir -p /data/ca /shared_certs /export/ca_public /export/admin_certs /export/bank_certs /export/admin_client_certs /app && \
+    mkdir -p /data/ca /shared_certs /export/ca_public /export/admin_certs /export/bank_certs /export/admin_client_certs /export/enclave_certs /app && \
     chown -R appuser:appgroup /data/ca /shared_certs /export /app
 
 COPY src/pki/requirements.txt /app/requirements.txt

@@ -6,23 +6,18 @@ from unittest.mock import AsyncMock, MagicMock
 from src.simulations.smart_contracts.dsl.context import ContractContext
 from src.simulations.api.routers.invest import (
     close_deposit,
-    close_savings,
     CloseProductRequest,
     open_deposit,
-    open_savings,
     OpenProductRequest,
 )
 from src.simulations.db.bank.db.models import Account, Tariff, AutoPayment
-from src.simulations.db.invest.db.models import Deposit, SavingsAccount, BrokerAccount, InvestmentStrategy
+from src.simulations.db.invest.db.models import Deposit, SavingsAccount
 from src.simulations.workers.bank_eod.tasks import (
     process_auto_payments,
     process_tariff_fees,
-    process_salaries,
 )
 from src.simulations.workers.invest_eod.tasks import (
     process_savings_accounts,
-    process_deposits,
-    process_broker_accounts,
 )
 
 
@@ -201,6 +196,7 @@ def test_bank_eod_tasks_exact_decimal_calculations():
 
         mock_acc_res = MagicMock()
         mock_acc_res.scalars().all.return_value = [acc]
+        mock_acc_res.scalar_one_or_none.return_value = None
         session.execute = AsyncMock(return_value=mock_acc_res)
 
         await process_tariff_fees(session, current_date)

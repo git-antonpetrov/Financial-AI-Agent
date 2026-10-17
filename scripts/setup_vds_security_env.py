@@ -150,6 +150,8 @@ def setup_vds(project_dir: str | None = None) -> dict[str, str]:
         "AGENT_BANK_BOOTSTRAP_TOKEN": ("bootstrap_token_bank_agent_secret", lambda: secrets.token_urlsafe(32)),
         "AGENT_INVEST_BOOTSTRAP_TOKEN": ("bootstrap_token_invest_agent_secret", lambda: secrets.token_urlsafe(32)),
         "AGENT_MAIN_BOOTSTRAP_TOKEN": ("bootstrap_token_main_agent_secret", lambda: secrets.token_urlsafe(32)),
+        "ORACLE_BOOTSTRAP_TOKEN": ("bootstrap_token_oracle_secret", lambda: secrets.token_urlsafe(32)),
+        "AGENT_ORACLE_BOOTSTRAP_TOKEN": ("bootstrap_token_oracle_agent_secret", lambda: secrets.token_urlsafe(32)),
     }
 
     for key, (placeholder_val, gen_fn) in placeholders.items():
@@ -159,11 +161,12 @@ def setup_vds(project_dir: str | None = None) -> dict[str, str]:
             env_dict[key] = new_val
             generated_info[key] = "Сгенерирован надежный случайный пароль/токен"
 
-    # 5. MinIO KMS ключ
+    # 5. MinIO KMS ключ (32 байта в кодировке Base64)
     cur_kms = env_dict.get("MINIO_KMS_SECRET_KEY", "")
-    if not cur_kms or "0123456789abcdef" in cur_kms:
-        env_dict["MINIO_KMS_SECRET_KEY"] = f"financial-kms-key:{secrets.token_hex(32)}"
-        generated_info["MINIO_KMS_SECRET_KEY"] = "Сгенерирован ключ MinIO KMS SSE-S3"
+    if not cur_kms or "0123456789abcdef" in cur_kms or (":" in cur_kms and len(cur_kms.split(":")[-1]) == 64):
+        kms_b64 = base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+        env_dict["MINIO_KMS_SECRET_KEY"] = f"financial-kms-key:{kms_b64}"
+        generated_info["MINIO_KMS_SECRET_KEY"] = "Сгенерирован ключ MinIO KMS SSE-S3 (32 байта Base64)"
 
     # 6. Хэш пароля администратора
     cur_admin_hash = env_dict.get("ADMIN_PASSWORD_HASH", "")

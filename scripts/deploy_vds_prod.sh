@@ -159,6 +159,10 @@ CRITICAL_SERVICES=(
     "chromadb-server"
     "admin-server"
     "simulation-api"
+    "bank-worker"
+    "invest-worker"
+    "digital-worker"
+    "vector-worker"
     "caddy-server"
 )
 
@@ -171,8 +175,8 @@ while true; do
 
     RUNNING_COUNT=0
     for svc in "${CRITICAL_SERVICES[@]}"; do
-        STATUS=$($DOCKER_BIN inspect --format='{{.State.Status}}' "$svc" 2>/dev/null || echo "not_found")
-        if [[ "$STATUS" != "running" ]]; then
+        STATUS=$($DOCKER_BIN inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$svc" 2>/dev/null || echo "not_found")
+        if [[ "$STATUS" != "healthy" && "$STATUS" != "running" ]]; then
             CID=""
             case "$svc" in
                 "financial-postgres") CID=$($DOCKER_COMPOSE_CMD ps -q postgres-db 2>/dev/null || true) ;;
@@ -181,13 +185,17 @@ while true; do
                 "chromadb-server")    CID=$($DOCKER_COMPOSE_CMD ps -q chromadb 2>/dev/null || true) ;;
                 "admin-server")       CID=$($DOCKER_COMPOSE_CMD ps -q admin-server 2>/dev/null || true) ;;
                 "simulation-api")     CID=$($DOCKER_COMPOSE_CMD ps -q simulation-api 2>/dev/null || true) ;;
+                "bank-worker")        CID=$($DOCKER_COMPOSE_CMD ps -q bank-worker 2>/dev/null || true) ;;
+                "invest-worker")      CID=$($DOCKER_COMPOSE_CMD ps -q invest-worker 2>/dev/null || true) ;;
+                "digital-worker")     CID=$($DOCKER_COMPOSE_CMD ps -q digital-worker 2>/dev/null || true) ;;
+                "vector-worker")      CID=$($DOCKER_COMPOSE_CMD ps -q vector-worker 2>/dev/null || true) ;;
                 "caddy-server" | "caddy-ingress") CID=$($DOCKER_COMPOSE_CMD ps -q caddy 2>/dev/null || true) ;;
             esac
             if [[ -n "$CID" ]]; then
-                STATUS=$($DOCKER_BIN inspect --format='{{.State.Status}}' "$CID" 2>/dev/null || echo "not_found")
+                STATUS=$($DOCKER_BIN inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$CID" 2>/dev/null || echo "not_found")
             fi
         fi
-        if [[ "$STATUS" == "running" ]]; then
+        if [[ "$STATUS" == "healthy" || "$STATUS" == "running" ]]; then
             RUNNING_COUNT=$((RUNNING_COUNT + 1))
         fi
     done

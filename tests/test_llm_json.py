@@ -14,7 +14,6 @@ for agent in ["DIGITAL", "MAIN", "BANK", "INVEST"]:
     os.environ[f"AGENT_{agent}_BOOTSTRAP_TOKEN"] = "test_token"
 
 # Предварительно импортирует модуль fastapi
-import fastapi
 
 # Замещает внешние сервисы моками для изоляции окружения тестов
 for mod in ["redis", "minio", "litellm", "asyncpg"]:
@@ -64,7 +63,7 @@ def test_extract_json_empty_list():
 def test_get_client_ip_anti_spoofing():
     """Проверяет защиту от спуфинга IP-адреса клиента в заголовке X-Forwarded-For."""
     from server import get_client_ip
-    
+
     # 1. Заголовок со спуфингом: проверяет извлечение последнего надежного адреса
     req = MagicMock()
     req.headers = {"x-forwarded-for": "1.2.3.4, 10.0.0.1, 203.0.113.195"}

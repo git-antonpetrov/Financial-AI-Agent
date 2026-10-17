@@ -30,7 +30,7 @@ class BankCertificateAuthority:
 
     def initialize_ca(
         self,
-        key_size: int = 2048,
+        key_size: int = 4096,
         common_name: str = "Financial AI Agent Root CA",
         validity_days: int = 3650,
     ) -> tuple[x509.Certificate, rsa.RSAPrivateKey]:

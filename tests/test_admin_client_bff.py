@@ -8,10 +8,8 @@
 
 import os
 import sys
-import json
 import pytest
 from unittest.mock import MagicMock, patch
-import requests
 
 # Настройка путей импорта
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -28,7 +26,6 @@ try:
         RemoteAdminClient,
         AuthenticationError,
         SessionExpiredError,
-        RemoteClientError,
     )
 except ImportError:
     import main
@@ -36,7 +33,6 @@ except ImportError:
         RemoteAdminClient,
         AuthenticationError,
         SessionExpiredError,
-        RemoteClientError,
     )
 from fastapi.testclient import TestClient
 

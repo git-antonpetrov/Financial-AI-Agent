@@ -3,30 +3,22 @@
 интеграция Банка с Root CA и подписание чеков.
 """
 
-import os
-import sys
 import time
 import base64
 import uuid
 import datetime
-from pathlib import Path
 import pytest
 
 from cryptography import x509
-from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
+from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
-from cryptography.hazmat.backends import default_backend
 
 from src.simulations.core.crypto.bank_ca import (
     BankCertificateAuthority,
-    get_bank_ca,
-    reset_bank_ca_for_tests,
 )
 from src.simulations.core.crypto.chain_validator import (
     X509ChainValidator,
-    get_chain_validator,
-    reset_chain_validator_for_tests,
 )
 from src.simulations.core.crypto.receipt_signer import ReceiptSigner
 

@@ -325,6 +325,70 @@ def test_x509_chain_validator_extension_constraints():
     assert exc_leaf.value.status_code == 401
     assert "CA=True запрещен" in str(exc_leaf.value.detail)
 
+    # 4. Проверка path_length < 1 у Root CA при наличии промежуточного CA (RFC 5280)
+    root_ca_path0 = (
+        x509.CertificateBuilder()
+        .subject_name(ca_subject)
+        .issuer_name(ca_subject)
+        .public_key(ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=365))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .sign(ca_key, hashes.SHA256(), default_backend())
+    )
+    set_trusted_root_ca(root_ca_path0)
+    valid_ca_bc_enc = (
+        x509.CertificateBuilder()
+        .subject_name(enc_subject)
+        .issuer_name(ca_subject)
+        .public_key(enc_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=30))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .sign(ca_key, hashes.SHA256(), default_backend())
+    )
+    valid_ca_bc_enc_pem = valid_ca_bc_enc.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+    with pytest.raises(HTTPException) as exc_path:
+        validate_x509_certificate_chain(leaf_pem, enclave_cert_input=valid_ca_bc_enc_pem)
+    assert exc_path.value.status_code == 401
+    assert "исчерпал лимит вложенности" in str(exc_path.value.detail)
+
+    # 5. Проверка обязательности KeyUsage у промежуточного CA
+    set_trusted_root_ca(root_ca)
+    enc_no_ku = (
+        x509.CertificateBuilder()
+        .subject_name(enc_subject)
+        .issuer_name(ca_subject)
+        .public_key(enc_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=30))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .sign(ca_key, hashes.SHA256(), default_backend())
+    )
+    enc_no_ku_pem = enc_no_ku.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+    with pytest.raises(HTTPException) as exc_noku:
+        validate_x509_certificate_chain(leaf_pem, enclave_cert_input=enc_no_ku_pem)
+    assert exc_noku.value.status_code == 401
+    assert "обязан содержать расширение KeyUsage" in str(exc_noku.value.detail)
+
+
 
 # -----------------------------------------------------------------------------
 # 5. Маппинг ролей пользователей админки

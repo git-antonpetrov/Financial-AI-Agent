@@ -1,6 +1,5 @@
 import os
 import sys
-import yaml
 
 # Мокирует внешние сетевые сервисы перед импортом vector_worker
 from unittest.mock import MagicMock
@@ -64,7 +63,7 @@ def test_sanitize_chroma_metadata():
         123: "numeric_key"
     }
     sanitized = sanitize_chroma_metadata(raw)
-    
+
     assert "null_val" not in sanitized
     assert sanitized["short_name"] == "fz_115"
     assert sanitized["version"] == 1
@@ -74,7 +73,7 @@ def test_sanitize_chroma_metadata():
     assert sanitized["nested"] == json.dumps({"sub": "value"}, ensure_ascii=False)
     assert sanitized["date_field"] == "2024-01-01"
     assert sanitized["123"] == "numeric_key"
-    
+
     # Проверяет, что все значения строго скалярных типов: str, int, float или bool
     for k, v in sanitized.items():
         assert isinstance(k, str)
@@ -83,13 +82,13 @@ def test_sanitize_chroma_metadata():
 def test_process_task_preserves_minio_file_on_error():
     """Проверяет сохранение файла в MinIO при возникновении ошибки обработки."""
     from src.admin_server.vectors import vector_worker
-    
+
     vector_worker.minio_client.remove_object.reset_mock()
     # Имитирует возврат некорректного Markdown без short_name
     mock_resp = MagicMock()
     mock_resp.read.return_value = b"# No frontmatter"
     vector_worker.minio_client.get_object.return_value = mock_resp
-    
+
     task = {
         "agent": "bank",
         "action": "upsert",
@@ -98,19 +97,19 @@ def test_process_task_preserves_minio_file_on_error():
         "file_hash": "hash123"
     }
     process_task(task)
-    
+
     # Файл не должен удаляться при сбое
     vector_worker.minio_client.remove_object.assert_not_called()
 
 def test_process_task_deletes_minio_file_on_success():
     """Проверяет удаление файла из MinIO после успешного выполнения задачи."""
     from src.admin_server.vectors import vector_worker
-    
+
     vector_worker.minio_client.remove_object.reset_mock()
     mock_resp = MagicMock()
     mock_resp.read.return_value = b"doc_to_delete\n"
     vector_worker.minio_client.get_object.return_value = mock_resp
-    
+
     task = {
         "agent": "bank",
         "action": "delete",
@@ -119,6 +118,6 @@ def test_process_task_deletes_minio_file_on_success():
         "file_hash": "hash456"
     }
     process_task(task)
-    
+
     # Файл должен удаляться только после успешного выполнения
     vector_worker.minio_client.remove_object.assert_called_once_with("docs", "bank/delete_list.txt")

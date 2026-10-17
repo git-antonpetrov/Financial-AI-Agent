@@ -5,14 +5,10 @@
 
 import os
 import sys
-import shutil
-import tempfile
-from pathlib import Path
 from unittest.mock import MagicMock
 import pytest
 
 from cryptography import x509
-from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.x509.oid import ExtendedKeyUsageOID
 from fastapi import HTTPException, Request
 
@@ -28,11 +24,8 @@ sys.path.insert(0, os.path.abspath("src/admin_server/fastapi"))
 sys.path.insert(0, os.path.abspath("src/simulations/core/crypto"))
 
 from src.pki.bootstrap_pki import bootstrap_pki
-from src.pki.core.ca_engine import RootCAEngine
-from src.pki.core.cert_issuer import CertificateIssuer
 from src.simulations.core.crypto.chain_validator import X509ChainValidator
 from src.simulations.core.crypto.bank_ca import BankCertificateAuthority
-import security
 from security import (
     verify_mtls_client_identity,
     revoke_certificate_in_redis,
@@ -50,8 +43,12 @@ def clean_revoked_memory():
 
 
 @pytest.fixture
-def pki_test_env(tmp_path):
+def pki_test_env(tmp_path, monkeypatch):
     """Инициализирует тестовое изолированное окружение PKI."""
+    monkeypatch.delenv("BANK_CERTS_DIR", raising=False)
+    monkeypatch.delenv("ADMIN_CERTS_DIR", raising=False)
+    monkeypatch.delenv("ADMIN_CLIENT_CERTS_DIR", raising=False)
+    monkeypatch.delenv("CA_PUBLIC_DIR", raising=False)
     data_dir = tmp_path / "ca_data"
     export_dir = tmp_path / "certs_export"
     passphrase = "StrictProductionPassphrase_2026_Test!"

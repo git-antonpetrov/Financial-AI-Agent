@@ -25,30 +25,29 @@ class NonceStore:
             try:
                 import redis
 
-                redis_cls = getattr(redis, "Redis", None)
-                if redis_cls is not None and getattr(redis_cls, "__module__", "") != "unittest.mock":
-                    redis_host = os.getenv("REDIS_HOST", "redis")
-                    redis_port = int(os.getenv("REDIS_PORT", "6379"))
-                    redis_password = os.getenv("REDIS_PASSWORD", "")
-                    redis_ssl = os.getenv("REDIS_SSL", "false").lower() in ("true", "1", "yes")
-                    redis_ca = os.getenv("REDIS_SSL_CA_CERTS", "/certs/ca.crt")
+                redis_host = os.getenv("REDIS_HOST", "redis")
+                redis_port = int(os.getenv("REDIS_PORT", "6379"))
+                redis_password = os.getenv("REDIS_PASSWORD", "")
+                redis_ssl = os.getenv("REDIS_SSL", "true").lower() in ("true", "1", "yes")
+                redis_ca = os.getenv("REDIS_SSL_CA_CERTS", "/certs/ca.crt")
 
-                    kwargs = {
-                        "host": redis_host,
-                        "port": redis_port,
-                        "password": redis_password or None,
-                        "decode_responses": True,
-                        "socket_timeout": 1.5,
-                        "socket_connect_timeout": 1.5,
-                    }
-                    if redis_ssl and os.path.exists(redis_ca):
-                        kwargs["ssl"] = True
-                        kwargs["ssl_ca_certs"] = redis_ca
-                        kwargs["ssl_cert_reqs"] = "required"
-                    candidate_redis = redis.Redis(**kwargs)
-                    candidate_redis.ping()
-                    if getattr(candidate_redis, "__class__", None).__module__ != "unittest.mock":
-                        self.redis_client = candidate_redis
+                kwargs = {
+                    "host": redis_host,
+                    "port": redis_port,
+                    "password": redis_password or None,
+                    "decode_responses": True,
+                    "socket_timeout": 1.5,
+                    "socket_connect_timeout": 1.5,
+                }
+                if redis_ssl and os.path.exists(redis_ca):
+                    kwargs["ssl"] = True
+                    kwargs["ssl_ca_certs"] = redis_ca
+                    kwargs["ssl_cert_reqs"] = "required"
+                candidate_redis = redis.Redis(**kwargs)
+                if candidate_redis.ping() is True:
+                    self.redis_client = candidate_redis
+                else:
+                    self.redis_client = None
             except Exception:
                 self.redis_client = None
         self._memory_cache: dict[str, float] = {}
@@ -67,14 +66,16 @@ class NonceStore:
         actual_ttl = ttl or self.default_ttl
 
         # 1. Попытка через Redis, если подключен
-        is_mock_redis = getattr(getattr(self.redis_client, "__class__", None), "__module__", "") == "unittest.mock"
-        if self.redis_client is not None and not is_mock_redis:
+        if self.redis_client is not None:
             try:
                 key = f"enclave:nonce:{nonce}"
-                # set nx=True возвращает True только если ключа не существовало
+                # set nx=True возвращает True/OK только если ключа не существовало,
+                # и None/False если ключ уже существует
                 success = self.redis_client.set(key, "1", ex=actual_ttl, nx=True)
-                if getattr(success, "__class__", None).__module__ != "unittest.mock":
-                    return bool(success)
+                if success in (True, 1, "OK", b"OK"):
+                    return True
+                if success in (False, None):
+                    return False
             except Exception as e:
                 log_warning(
                     "NonceStore",
@@ -94,6 +95,19 @@ class NonceStore:
 
             self._memory_cache[nonce] = now + actual_ttl
             return True
+
+    def discard_nonce(self, nonce: str) -> None:
+        """Сбрасывает зарезервированный nonce при сбое валидации подписи (защита от DoS по сожжению nonce)."""
+        if not nonce or not nonce.strip():
+            return
+        nonce = nonce.strip()
+        if self.redis_client is not None:
+            try:
+                self.redis_client.delete(f"enclave:nonce:{nonce}")
+            except Exception:
+                pass
+        with self._lock:
+            self._memory_cache.pop(nonce, None)
 
     def clear(self) -> None:
         """Очищает память (для тестов)."""
@@ -168,18 +182,10 @@ class EnclaveKeyManager:
     def get_public_key_pem(self) -> str:
         return self._public_key_pem
 
-    @property
-    def _dev_private_key(self) -> rsa.RSAPrivateKey | None:
-        """Свойство для обратной совместимости с тестами."""
-        return self._private_key
-
-    def get_dev_private_key(self) -> rsa.RSAPrivateKey | None:
-        return self._private_key
-
     def get_private_key(self) -> rsa.RSAPrivateKey | None:
         return self._private_key
 
-    def get_dev_private_key_pem(self) -> str | None:
+    def get_private_key_pem(self) -> str | None:
         if self._private_key:
             return self._private_key.private_bytes(
                 encoding=serialization.Encoding.PEM,
@@ -336,8 +342,10 @@ class EnclaveVerifier:
                 except InvalidSignature:
                     continue
 
+            self.nonce_store.discard_nonce(nonce)
             return False, "Цифровая подпись Анклава недействительна (Invalid Signature)"
         except Exception as e:
+            self.nonce_store.discard_nonce(nonce)
             return False, f"Ошибка проверки подписи: {e}"
 
 

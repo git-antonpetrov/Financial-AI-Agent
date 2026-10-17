@@ -1,4 +1,3 @@
-import pytest
 from fastapi.testclient import TestClient
 from src.simulations.api.main import app
 

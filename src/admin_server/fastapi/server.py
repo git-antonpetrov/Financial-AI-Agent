@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hashlib
 import ipaddress
 import json
@@ -11,6 +12,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
 import jwt
+import urllib3
 
 # pyrefly: ignore [missing-import]
 import redis
@@ -84,11 +86,23 @@ MINIO_URL = os.getenv("MINIO_URL", "minio:9000")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "")
 
+minio_http_client = None
+minio_ca = os.getenv("MINIO_SSL_CA_CERTS", "/certs/ca.crt")
+if settings.MINIO_SECURE and os.path.exists(minio_ca):
+    try:
+        minio_http_client = urllib3.PoolManager(
+            ca_certs=minio_ca,
+            cert_reqs="CERT_REQUIRED",
+        )
+    except Exception as ce:
+        log_warning("MinIO", f"Не удалось инициализировать PoolManager с CA: {ce}")
+
 minio_client = Minio(
     MINIO_URL,
     access_key=MINIO_ACCESS_KEY,
     secret_key=MINIO_SECRET_KEY,
     secure=settings.MINIO_SECURE,
+    http_client=minio_http_client,
 )
 
 # --- НАСТРОЙКА REDIS ---
@@ -339,6 +353,8 @@ def get_client_ip(request: Request) -> str:
 
 _in_memory_rate_limits: dict[str, list[float]] = {}
 _rate_limit_lock = threading.Lock()
+_in_memory_totp_replays: dict[str, float] = {}
+_totp_replay_lock = threading.Lock()
 
 
 def check_rate_limit(key: str, max_requests: int = 15, window_seconds: int = 60) -> bool:
@@ -351,6 +367,8 @@ def check_rate_limit(key: str, max_requests: int = 15, window_seconds: int = 60)
         try:
             current = redis_client.incr(key)
             if current == 1:
+                redis_client.expire(key, window_seconds)
+            elif hasattr(redis_client, "ttl") and callable(redis_client.ttl) and redis_client.ttl(key) == -1:
                 redis_client.expire(key, window_seconds)
             return current <= max_requests
         except Exception as e:
@@ -368,6 +386,37 @@ def check_rate_limit(key: str, max_requests: int = 15, window_seconds: int = 60)
             return False
         valid_ts.append(now)
         _in_memory_rate_limits[key] = valid_ts
+        return True
+
+
+def check_and_record_totp_replay(username: str, totp_code: str, window_seconds: int = 90) -> bool:
+    """
+    Атомарно проверяет и регистрирует одноразовый TOTP код (защита от Replay Attack и TOCTOU гонок).
+    Возвращает True если код уникален и успешно зафиксирован, False если код уже был использован.
+    """
+    replay_key = f"totp_used:{username}:{totp_code}"
+    now = time.time()
+    if redis_client:
+        try:
+            # Атомарный SET c NX=True и EX=window_seconds исключает состояние гонки (TOCTOU)
+            acquired = redis_client.set(replay_key, "used", nx=True, ex=window_seconds)
+            return bool(acquired)
+        except Exception as e:
+            log_warning(
+                "Auth",
+                f"Redis недоступен для TOTP replay check ({e}), переключение на in-memory fallback",
+            )
+
+    # In-memory fallback с потокобезопасной блокировкой
+    with _totp_replay_lock:
+        # Очистка устаревших записей
+        expired_keys = [k for k, exp in _in_memory_totp_replays.items() if exp < now]
+        for k in expired_keys:
+            _in_memory_totp_replays.pop(k, None)
+
+        if replay_key in _in_memory_totp_replays:
+            return False
+        _in_memory_totp_replays[replay_key] = now + window_seconds
         return True
 
 
@@ -492,34 +541,6 @@ async def login(
                 headers={"WWW-Authenticate": "Bearer", "X-2FA-Required": "true"},
             )
 
-        # Защита от Replay Attack: предотвращение повторного применения одного и того же кода
-        replay_key = f"totp_used:{form_data.username}:{totp_code}"
-        if redis_client:
-            try:
-                if redis_client.exists(replay_key):
-                    masked_otp = f"{totp_code[:2]}****" if len(totp_code) >= 2 else "******"
-                    log_warning(
-                        "Auth",
-                        f"Replay attack detected: TOTP code {masked_otp} reused from IP: {client_ip}",
-                    )
-                    await audit.log_audit_event(
-                        db,
-                        actor=form_data.username,
-                        action="AUTH_2FA_REPLAY_ATTACK",
-                        status="FAILURE",
-                        actor_ip=client_ip,
-                        details=f"Replayed TOTP: {masked_otp}",
-                    )
-                    raise HTTPException(
-                        status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="TOTP code has already been used. Please wait for the next code.",
-                        headers={"WWW-Authenticate": "Bearer"},
-                    )
-            except HTTPException:
-                raise
-            except Exception as e:
-                log_warning("Auth", f"Redis TOTP replay check error: {e}")
-
         # Целевой секрет для валидации: постоянный ключ сервера либо pending-ключ онбординга
         target_secret = settings.ADMIN_TOTP_SECRET or pending_secret
 
@@ -545,6 +566,27 @@ async def login(
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid 2FA TOTP code",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        # Защита от Replay Attack: атомарная проверка и фиксация кода (исключает TOCTOU гонки)
+        if not check_and_record_totp_replay(form_data.username, totp_code, window_seconds=90):
+            masked_otp = f"{totp_code[:2]}****" if len(totp_code) >= 2 else "******"
+            log_warning(
+                "Auth",
+                f"Replay attack detected: TOTP code {masked_otp} reused from IP: {client_ip}",
+            )
+            await audit.log_audit_event(
+                db,
+                actor=form_data.username,
+                action="AUTH_2FA_REPLAY_ATTACK",
+                status="FAILURE",
+                actor_ip=client_ip,
+                details=f"Replayed TOTP: {masked_otp}",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="TOTP code has already been used. Please wait for the next code.",
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
@@ -574,10 +616,9 @@ async def login(
                 details="2FA successfully onboarded and persisted to encrypted storage",
             )
 
-        # Фиксируем использование одноразового пароля на 90 секунд в Redis и отмечаем завершение привязки 2FA
+        # Отмечаем завершение привязки 2FA в Redis
         if redis_client:
             try:
-                redis_client.setex(replay_key, 90, "used")
                 redis_client.set(f"auth:totp_enrolled:{form_data.username}", "1")
             except Exception:
                 pass
@@ -763,11 +804,12 @@ async def pair_2fa(
         )
         raise HTTPException(status_code=400, detail="Incorrect username or password")
 
-    if not settings.ADMIN_PASSWORD_HASH:
-        log_error("Auth", "Server not configured: ADMIN_PASSWORD_HASH missing")
-        raise HTTPException(status_code=500, detail="Server not configured: ADMIN_PASSWORD_HASH missing")
+    expected_hash = settings.get_password_hash_for_user(payload.username)
+    if not expected_hash:
+        log_error("Auth", f"User {payload.username} has no password configured")
+        raise HTTPException(status_code=400, detail="Incorrect username or password")
 
-    if not verify_password(payload.password, settings.ADMIN_PASSWORD_HASH):
+    if not verify_password(payload.password, expected_hash):
         if redis_client:
             try:
                 curr = redis_client.incr(failed_key)
@@ -823,11 +865,11 @@ async def pair_2fa(
         except Exception:
             pass
 
-    # 1. Если ADMIN_TOTP_SECRET уже настроен (в .env или в БД):
-    #    - Отдаем существующий постоянный секрет сервера (полная обратная совместимость!).
-    # 2. Если секрет еще не настроен (новый инстанс):
-    #    - Генерируем новый 160-битный секрет и сохраняем его в pending до подтверждения кодом.
-    if settings.ADMIN_TOTP_SECRET:
+    # 1. Если это супер-администратор и ADMIN_TOTP_SECRET уже настроен:
+    #    - Отдаем настроенный постоянный секрет супер-администратора.
+    # 2. Для оператора, аудитора или при первом онбординге:
+    #    - Генерируем новый персональный 160-битный секрет и сохраняем его в pending до подтверждения кодом.
+    if settings.ADMIN_TOTP_SECRET and payload.username.lower() == "admin":
         secret = settings.ADMIN_TOTP_SECRET
     else:
         secret = generate_totp_secret()
@@ -1098,7 +1140,7 @@ async def rotate_agent_key_endpoint(
         raise HTTPException(status_code=403, detail="Invalid bootstrap token")
 
     try:
-        _, new_key = await crud.rotate_agent_key(db, req.agent_name, req.new_public_key, req.ttl_days or 90)
+        _, new_key = await crud.rotate_agent_key(db, req.agent_name, req.new_public_key, req.ttl_days or 1)
     except ValueError as e:
         log_warning("Agent Key Rotation", str(e))
         raise HTTPException(status_code=400, detail=str(e))
@@ -1189,7 +1231,7 @@ async def admin_rotate_agent_key(
     if agent_name != req.agent_name:
         raise HTTPException(status_code=400, detail="Path agent_name does not match request body")
     try:
-        _, new_key = await crud.rotate_agent_key(db, agent_name, req.new_public_key, req.ttl_days or 90)
+        _, new_key = await crud.rotate_agent_key(db, agent_name, req.new_public_key, req.ttl_days or 1)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     log_success(
@@ -1202,7 +1244,7 @@ async def admin_rotate_agent_key(
         action="KEY_ROTATED",
         status="SUCCESS",
         resource=f"agent:{agent_name}",
-        details={"kid": new_key.kid, "ttl_days": req.ttl_days or 90},
+        details={"kid": new_key.kid, "ttl_days": req.ttl_days or 1},
     )
     return schemas.AgentActionResponse(
         status="success",
@@ -1317,11 +1359,15 @@ async def create_agent_request(req: schemas.AgentRequestJWT, db: AsyncSession = 
     соответствие kid и криптографическую подпись RS256.
     """
     try:
-        # Декодируем claims без проверки подписи только для определения имени агента
-        unverified_payload = jwt.decode(req.token, options={"verify_signature": False})
-        agent_name = unverified_payload.get("agent_name")
         unverified_headers = jwt.get_unverified_header(req.token)
         token_kid = unverified_headers.get("kid")
+        # Извлечение имени агента из полезной нагрузки без обхода проверки подписи в jwt.decode
+        payload_b64 = req.token.split(".")[1]
+        padded_b64 = payload_b64 + "=" * (-len(payload_b64) % 4)
+        raw_claims = json.loads(base64.urlsafe_b64decode(padded_b64).decode("utf-8"))
+        agent_name = raw_claims.get("agent_name")
+        if not agent_name and token_kid:
+            agent_name = token_kid.split("-")[0]
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JWT format")
 

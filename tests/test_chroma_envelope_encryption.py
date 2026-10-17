@@ -18,7 +18,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 # Предварительный импорт fastapi до любых модификаций sys.path
-import fastapi
 
 # Настройка путей для импорта
 sys.path.insert(0, os.path.abspath("src/admin_server"))
@@ -35,14 +34,12 @@ for mod in ["redis", "litellm", "asyncpg", "psycopg2", "psycopg2.pool", "chromad
 
 from vectors.chroma_envelope import (
     is_envelope_encryption_enabled,
-    resolve_encryption_key,
     encrypt_chroma_chunk,
     decrypt_chroma_chunk,
     encrypt_chroma_metadata,
     decrypt_chroma_metadata,
     encrypt_batch,
     decrypt_chroma_results,
-    MAGIC_ENVELOPE_V1,
     is_encrypted_chunk,
 )
 
@@ -112,7 +109,7 @@ def test_ru5d_plaintext_collision_prevention():
     не определяется ошибочно как зашифрованный пакет ENC1 и не ломает расшифровку.
     """
     key = b"7" * 32
-    
+
     # 1. Строки, начинающиеся с RU5D, которые НЕ являются зашифрованными пакетами
     non_envelope_strings = [
         "RU5D",

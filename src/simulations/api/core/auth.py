@@ -11,6 +11,77 @@ from src.simulations.core.crypto.chain_validator import get_chain_validator
 from src.simulations.core.crypto.enclave_verifier import get_enclave_verifier
 from src.simulations.core.utils.console_logger import log_error, log_info, log_warning
 
+# Локальный in-memory кэш отозванных сущностей для мгновенной блокировки (Instant Revocation 0 секунд)
+_simulation_revoked_cache: set[str] = set()
+
+
+def update_simulation_revocation_cache(key: str, is_revoked: bool = True) -> None:
+    """Обновляет локальный кэш отозванных сертификатов и агентов по событиям Pub/Sub."""
+    if is_revoked:
+        _simulation_revoked_cache.add(key)
+    else:
+        _simulation_revoked_cache.discard(key)
+
+
+def is_simulation_entity_revoked(key: str) -> bool:
+    """Проверяет наличие ключа/субъекта в локальном кэше мгновенного отзыва."""
+    return key in _simulation_revoked_cache
+
+
+async def run_simulation_revocation_listener() -> None:
+    """
+    Фоновый асинхронный подписчик на Redis-канал 'security:revocations'.
+    Обеспечивает мгновенную (0 секунд) синхронизацию кэша _simulation_revoked_cache при отзывах/восстановлениях.
+    """
+    import asyncio
+
+    try:
+        import redis
+
+        redis_host = os.getenv("REDIS_HOST", "redis")
+        redis_port = int(os.getenv("REDIS_PORT", "6379"))
+        redis_password = os.getenv("REDIS_PASSWORD", "")
+        redis_ssl = os.getenv("REDIS_SSL", "true").lower() in ("true", "1", "yes")
+        redis_ca = os.getenv("REDIS_SSL_CA_CERTS", "/certs/ca.crt")
+
+        kwargs = {
+            "host": redis_host,
+            "port": redis_port,
+            "password": redis_password or None,
+            "decode_responses": True,
+            "socket_timeout": 2.0,
+            "socket_connect_timeout": 2.0,
+        }
+        if redis_ssl and os.path.exists(redis_ca):
+            kwargs["ssl"] = True
+            kwargs["ssl_ca_certs"] = redis_ca
+            kwargs["ssl_cert_reqs"] = "required"
+
+        def _init_pubsub():
+            c = redis.Redis(**kwargs)
+            ps = c.pubsub()
+            ps.subscribe("security:revocations")
+            return c, ps
+
+        client, pubsub = await asyncio.to_thread(_init_pubsub)
+        while True:
+            msg = await asyncio.to_thread(pubsub.get_message, ignore_subscribe_messages=True, timeout=0.5)
+            if msg and msg.get("type") == "message":
+                data = msg.get("data")
+                if isinstance(data, bytes):
+                    data = data.decode("utf-8")
+                if isinstance(data, str):
+                    if data.startswith("unrevoked:"):
+                        key = data.replace("unrevoked:", "")
+                        update_simulation_revocation_cache(key, is_revoked=False)
+                    else:
+                        update_simulation_revocation_cache(data, is_revoked=True)
+            await asyncio.sleep(0.5)
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        log_warning("Simulation Auth", f"Фоновый слушатель отзывов Redis завершил работу: {e}")
+
 
 def extract_token_from_headers(
     x_bootstrap_token: str | None = None,
@@ -139,14 +210,7 @@ async def check_enclave_or_token_auth(
                 detail="Для аутентификации по сертификату X.509 требуются заголовки: X-Signature, X-Nonce, X-Timestamp",
             )
 
-        verifier = get_enclave_verifier()
-        if not verifier.nonce_cache.record_nonce_if_new(nonce):
-            log_warning("Simulation Auth", f"Replay attack на '{domain_name}': nonce '{nonce}' уже использован")
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"Обнаружена повторная атака (Replay Attack): nonce '{nonce}' уже был использован",
-            )
-
+        # 1. Валидация метки времени запроса (формат и допустимый дрейф не более 300с)
         now = time.time()
         try:
             req_ts = float(timestamp)
@@ -159,6 +223,15 @@ async def check_enclave_or_token_auth(
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Метка времени запроса устарела (дрейф превышает 300с)",
+            )
+
+        # 2. Атомарная фиксация Nonce для защиты от атак повторения (Replay Attacks)
+        verifier = get_enclave_verifier()
+        if not verifier.nonce_cache.record_nonce_if_new(nonce):
+            log_warning("Simulation Auth", f"Replay attack на '{domain_name}': nonce '{nonce}' уже использован")
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Обнаружена повторная атака (Replay Attack): nonce '{nonce}' уже был использован",
             )
 
         chain_val = get_chain_validator()
@@ -176,27 +249,29 @@ async def check_enclave_or_token_auth(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Некорректный формат сертификата Анклава X-Enclave-Cert",
                 )
-            is_enc_valid, enc_err = chain_val.validate_certificate_chain(enc_cert)
+            is_enc_valid, enc_err = chain_val.validate_certificate_chain(enc_cert, is_ca=True)
             if not is_enc_valid:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail=f"Промежуточный сертификат Анклава не прошел валидацию: {enc_err}",
                 )
-            is_leaf_valid, leaf_err = chain_val.validate_certificate_chain(leaf_cert, issuer_ca_input=enc_cert)
+            is_leaf_valid, leaf_err = chain_val.validate_certificate_chain(
+                leaf_cert, issuer_ca_input=enc_cert, is_ca=False
+            )
             if not is_leaf_valid:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail=f"Сертификат агента не прошел валидацию Анклавом: {leaf_err}",
                 )
         else:
-            is_leaf_valid, leaf_err = chain_val.validate_certificate_chain(leaf_cert)
+            is_leaf_valid, leaf_err = chain_val.validate_certificate_chain(leaf_cert, is_ca=False)
             if not is_leaf_valid:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail=f"Сертификат агента не прошел валидацию Root CA: {leaf_err}",
                 )
 
-        # Проверка 5 (Zero-Trust Pipeline): Проверка отзыва сертификата и агента в Redis CRL
+        # Проверка 5 (Zero-Trust Pipeline): Проверка отзыва сертификата и агента в Redis CRL и In-Memory Cache
         serial_str = str(leaf_cert.serial_number)
         fp_str = f"sha256:{hashlib.sha256(leaf_cert.public_bytes(serialization.Encoding.DER)).hexdigest()}"
         cn_str = None
@@ -205,6 +280,69 @@ async def check_enclave_or_token_auth(
                 cn_str = str(attr.value)
                 break
 
+        # 5.1 Проверка родительского сертификата Анклава на отзыв (при наличии)
+        if enclave_cert:
+            enc_obj = chain_val.parse_certificate(enclave_cert)
+            if enc_obj:
+                enc_serial = str(enc_obj.serial_number)
+                enc_fp = f"sha256:{hashlib.sha256(enc_obj.public_bytes(serialization.Encoding.DER)).hexdigest()}"
+                enc_cn = None
+                for attr in enc_obj.subject:
+                    if attr.oid == NameOID.COMMON_NAME:
+                        enc_cn = str(attr.value)
+                        break
+
+                if (
+                    is_simulation_entity_revoked(enc_serial)
+                    or is_simulation_entity_revoked(enc_fp)
+                    or (enc_cn and is_simulation_entity_revoked(enc_cn))
+                ):
+                    log_warning(
+                        "Simulation Auth",
+                        f"Доступ заблокирован: родительский Анклав {enc_cn} отозван (In-Memory)",
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Доступ заблокирован: родительский сертификат Анклава отозван",
+                    )
+
+                redis_cli = getattr(verifier.nonce_store, "redis_client", None)
+                if redis_cli is not None:
+                    try:
+                        if (
+                            redis_cli.exists(f"revoked:cert:serial:{enc_serial}")
+                            or redis_cli.exists(f"revoked:cert:fp:{enc_fp}")
+                            or (enc_cn and redis_cli.exists(f"revoked:agent:{enc_cn}"))
+                        ):
+                            log_warning(
+                                "Simulation Auth",
+                                f"Доступ заблокирован: родительский Анклав {enc_cn} отозван (Redis)",
+                            )
+                            raise HTTPException(
+                                status_code=status.HTTP_403_FORBIDDEN,
+                                detail="Доступ заблокирован: родительский сертификат Анклава отозван",
+                            )
+                    except HTTPException:
+                        raise
+                    except Exception as e:
+                        log_warning("Simulation Auth", f"Ошибка проверки отзыва Анклава в Redis: {e}")
+
+        # 5.2 Проверка конечного сертификата агента в In-Memory Cache
+        if (
+            is_simulation_entity_revoked(serial_str)
+            or is_simulation_entity_revoked(fp_str)
+            or (cn_str and is_simulation_entity_revoked(cn_str))
+        ):
+            log_warning(
+                "Simulation Auth",
+                f"Доступ заблокирован: агент {cn_str} или сертификат отозван (In-Memory)",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Доступ заблокирован: агент или сертификат отозван (Certificate has been revoked)",
+            )
+
+        # 5.3 Проверка конечного сертификата агента в Redis
         redis_cli = getattr(verifier.nonce_store, "redis_client", None)
         if redis_cli is not None:
             try:
@@ -213,7 +351,10 @@ async def check_enclave_or_token_auth(
                     or redis_cli.exists(f"revoked:cert:fp:{fp_str}")
                     or (cn_str and redis_cli.exists(f"revoked:agent:{cn_str}"))
                 ):
-                    log_warning("Simulation Auth", f"Доступ заблокирован: агент {cn_str} или сертификат отозван")
+                    log_warning(
+                        "Simulation Auth",
+                        f"Доступ заблокирован: агент {cn_str} или сертификат отозван (Redis)",
+                    )
                     raise HTTPException(
                         status_code=status.HTTP_403_FORBIDDEN,
                         detail="Доступ заблокирован: агент или сертификат отозван (Certificate has been revoked)",
@@ -234,11 +375,14 @@ async def check_enclave_or_token_auth(
             "infrastructure",
             "agent",
         }
-        if ou_values and not any(role in valid_roles for role in ou_values):
-            log_warning("Simulation Auth", f"Недопустимая роль сертификата: {ou_values}")
+        if not ou_values or not any(role in valid_roles for role in ou_values):
+            log_warning("Simulation Auth", f"Недопустимая или отсутствующая роль сертификата: {ou_values}")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Недопустимая роль в сертификате (OU={ou_values}) для доступа к банковским операциям",
+                detail=(
+                    f"Недопустимая или отсутствующая роль в сертификате (OU={ou_values}) "
+                    "для доступа к банковским операциям"
+                ),
             )
 
         body = await request.body()
@@ -269,6 +413,10 @@ async def check_enclave_or_token_auth(
             )
 
         if not is_sig_valid:
+            try:
+                verifier.nonce_store.discard_nonce(nonce)
+            except Exception:
+                pass
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail=f"Недействительная цифровая подпись запроса агента: {sig_err}",

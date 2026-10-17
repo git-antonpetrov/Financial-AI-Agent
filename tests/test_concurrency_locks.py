@@ -1,5 +1,4 @@
 import asyncio
-import pytest
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 from sqlalchemy.dialects import postgresql
@@ -28,8 +27,8 @@ from src.simulations.api.routers.invest import (
     CloseProductRequest,
 )
 from src.simulations.db.bank.db.models import Account
-from src.simulations.db.digital_ruble.db.models import Wallet, SmartContract
-from src.simulations.db.invest.db.models import Deposit, SavingsAccount, BrokerAccount
+from src.simulations.db.digital_ruble.db.models import Wallet
+from src.simulations.db.invest.db.models import Deposit, SavingsAccount
 
 
 def compile_pg(stmt) -> str:

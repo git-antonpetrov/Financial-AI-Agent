@@ -247,6 +247,7 @@ def get_receipt_signer() -> ReceiptSigner:
     current_ca = get_bank_ca()
     if _RECEIPT_SIGNER_INSTANCE is None or _RECEIPT_SIGNER_INSTANCE.ca is not current_ca:
         _RECEIPT_SIGNER_INSTANCE = ReceiptSigner(current_ca)
+    ReceiptSigner._active_ca = current_ca
     return _RECEIPT_SIGNER_INSTANCE
 
 

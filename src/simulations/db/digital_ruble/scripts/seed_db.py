@@ -33,11 +33,13 @@ from src.simulations.core.utils.db_utils import validate_db_name
 
 
 async def create_database_if_not_exists():
-    DATABASE_URL = os.getenv(
-        "RUBLE_DATABASE_URL",
-        "postgresql+asyncpg://agent_user:agent_password@localhost:15432/ruble_db",
-    )
-    url = DATABASE_URL
+    url = os.getenv("RUBLE_DATABASE_URL") or os.getenv("DIGITAL_RUBLE_DATABASE_URL")
+    if not url or not url.strip():
+        raise ValueError(
+            "Критическая ошибка конфигурации: переменная окружения RUBLE_DATABASE_URL "
+            "обязательна, но не задана. Использование значений по умолчанию запрещено."
+        )
+    url = url.strip()
     parsed = urlparse(url.replace("postgresql+asyncpg://", "postgresql://"))
     raw_db_name = parsed.path.lstrip("/")
     db_name = validate_db_name(raw_db_name)
@@ -54,20 +56,23 @@ async def create_database_if_not_exists():
         else:
             conn_kwargs["ssl"] = True
 
+    from src.simulations.core.utils.console_logger import log_info, log_warning
+
     try:
-        print(f"Подключаемся к {sys_url_asyncpg} для создания БД {db_name}...")
+        log_info("Digital Ruble DB", f"Подключаемся к {sys_url_asyncpg} для создания БД {db_name}...")
         conn = await asyncpg.connect(sys_url_asyncpg, **conn_kwargs)
         await conn.execute(f'CREATE DATABASE "{db_name}"')
         await conn.close()
-        print(f"База данных {db_name} успешно создана.")
+        log_info("Digital Ruble DB", f"База данных {db_name} успешно создана.")
     except asyncpg.exceptions.DuplicateDatabaseError:
-        print(f"База данных {db_name} уже существует.")
+        log_info("Digital Ruble DB", f"База данных {db_name} уже существует.")
     except Exception as e:
-        print(f"Ошибка при создании БД: {e}")
+        log_warning("Digital Ruble DB", f"Ошибка при создании БД: {e}")
 
 
 async def seed_data():
-    print("Создаем таблицы...")
+    from src.simulations.core.utils.console_logger import log_info
+    log_info("Digital Ruble DB", "Создаем таблицы...")
     await init_db()
 
     async with AsyncSessionLocal() as session:
@@ -77,7 +82,7 @@ async def seed_data():
             "33333333-3333-3333-3333-333333333333",  # Васильков
         ]
 
-        print("Создаем кошельки цифрового рубля (1 на человека)...")
+        log_info("Digital Ruble DB", "Создаем кошельки цифрового рубля (1 на человека)...")
         wallets = []
         for client_id in client_ids:
             wallet = Wallet(
@@ -91,7 +96,7 @@ async def seed_data():
 
         await session.flush()  # Получаем ID кошельков
 
-        print("Создаем историю транзакций...")
+        log_info("Digital Ruble DB", "Создаем историю транзакций...")
         for _ in range(15):
             sender = random.choice(wallets)
             receiver = random.choice([w for w in wallets if w.id != sender.id])
@@ -106,7 +111,7 @@ async def seed_data():
             )
             session.add(tx)
 
-        print("Создаем ожидающие смарт-контракты...")
+        log_info("Digital Ruble DB", "Создаем ожидающие смарт-контракты...")
         conditions = [
             "приемка_квартиры",
             "доставка_товара",
@@ -147,7 +152,7 @@ def execute(ctx):
             session.add(sc)
 
         await session.commit()
-        print("База цифрового рубля успешно заполнена тестовыми данными!")
+        log_info("Digital Ruble DB", "База цифрового рубля успешно заполнена тестовыми данными!")
 
 
 async def main():

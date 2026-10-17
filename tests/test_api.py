@@ -25,7 +25,7 @@ def test_admin_jwt_token_generation_and_decoding():
     """Проверяет корректность создания и декодирования JWT токена администратора."""
     jwt_secret = os.getenv("JWT_SECRET_KEY", "test_jwt_secret_key_minimum_32_bytes_long_12345")
     token = create_test_token(jwt_secret)
-    
+
     assert isinstance(token, str)
     decoded = jwt.decode(token, jwt_secret, algorithms=["HS256"])
     assert decoded["sub"] == "admin"
@@ -36,7 +36,7 @@ def test_admin_jwt_token_expired():
     """Проверяет отклонение JWT токена с истекшим сроком действия."""
     jwt_secret = os.getenv("JWT_SECRET_KEY", "test_jwt_secret_key_minimum_32_bytes_long_12345")
     token = create_test_token(jwt_secret, expires_in_days=-1)
-    
+
     try:
         jwt.decode(token, jwt_secret, algorithms=["HS256"])
         assert False, "Токен с истекшим сроком действия должен вызывать ошибку ExpiredSignatureError"
@@ -49,7 +49,7 @@ def test_agent_requests_api_call_success():
     jwt_secret = os.getenv("JWT_SECRET_KEY", "test_jwt_secret_key_minimum_32_bytes_long_12345")
     token = create_test_token(jwt_secret)
     target_url = "https://admin.fin-ai-agent.ru/api/agent-requests"
-    
+
     req = urllib.request.Request(target_url, headers={"Authorization": f"Bearer {token}"})
     assert req.get_header("Authorization") == f"Bearer {token}"
     assert req.full_url == target_url

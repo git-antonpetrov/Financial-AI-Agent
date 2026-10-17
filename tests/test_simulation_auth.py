@@ -1,10 +1,8 @@
-import os
 import pytest
 from fastapi import FastAPI, Depends
 from fastapi.testclient import TestClient
 
 from src.simulations.api.core.auth import (
-    extract_token,
     verify_bank_token,
     verify_invest_token,
     verify_digital_token,
@@ -52,7 +50,7 @@ def test_public_health_check_requires_no_token(test_app):
 
 def test_unauthorized_when_no_token_provided(test_app):
     client = TestClient(test_app)
-    
+
     res_bank = client.get("/bank/test")
     assert res_bank.status_code == 401
     assert "Отсутствует токен аутентификации" in res_bank.json()["detail"]
@@ -66,7 +64,7 @@ def test_unauthorized_when_no_token_provided(test_app):
 
 def test_unauthorized_when_invalid_token(test_app):
     client = TestClient(test_app)
-    
+
     headers = {"X-Bootstrap-Token": "completely_fake_token"}
     response = client.get("/bank/test", headers=headers)
     assert response.status_code == 401
@@ -75,7 +73,7 @@ def test_unauthorized_when_invalid_token(test_app):
 
 def test_forbidden_cross_domain_access(test_app):
     client = TestClient(test_app)
-    
+
     # Инвест-агент пытается стучаться в банк
     headers = {"X-Bootstrap-Token": "secret_invest_token_456"}
     response = client.get("/bank/test", headers=headers)
@@ -95,7 +93,7 @@ def test_forbidden_cross_domain_access(test_app):
 
 def test_successful_access_via_bootstrap_token_header(test_app):
     client = TestClient(test_app)
-    
+
     # Банк
     res_bank = client.get("/bank/test", headers={"X-Bootstrap-Token": "secret_bank_token_123"})
     assert res_bank.status_code == 200
@@ -114,7 +112,7 @@ def test_successful_access_via_bootstrap_token_header(test_app):
 
 def test_successful_access_via_authorization_bearer(test_app):
     client = TestClient(test_app)
-    
+
     headers = {"Authorization": "Bearer secret_bank_token_123"}
     response = client.get("/bank/test", headers=headers)
     assert response.status_code == 200
@@ -190,7 +188,7 @@ def test_enclave_signature_with_agent_token_joint_validation(test_app):
         nonce=nonce,
         body_bytes=body,
     )
-    raw_sig = key_mgr._dev_private_key.sign(
+    raw_sig = key_mgr.get_private_key().sign(
         canonical_digest,
         padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
         hashes.SHA256(),
@@ -216,7 +214,7 @@ def test_enclave_signature_with_agent_token_joint_validation(test_app):
         nonce=nonce_cross,
         body_bytes=body,
     )
-    raw_sig_cross = key_mgr._dev_private_key.sign(
+    raw_sig_cross = key_mgr.get_private_key().sign(
         canonical_cross,
         padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
         hashes.SHA256(),
@@ -271,7 +269,7 @@ def test_enclave_signature_strict_passes_with_valid_signature(test_app, monkeypa
         nonce=nonce,
         body_bytes=body,
     )
-    raw_sig = key_mgr._dev_private_key.sign(
+    raw_sig = key_mgr.get_private_key().sign(
         canonical_digest,
         padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
         hashes.SHA256(),

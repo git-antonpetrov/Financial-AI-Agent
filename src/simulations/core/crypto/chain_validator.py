@@ -149,12 +149,14 @@ class X509ChainValidator:
         self,
         leaf_cert_input: x509.Certificate | str | bytes,
         issuer_ca_input: x509.Certificate | str | bytes | None = None,
+        is_ca: bool = False,
     ) -> tuple[bool, str]:
         """
-        Проверяет подлинность сертификата leaf_cert по отношению к доверенному Root CA:
-        1. Проверяет срок действия leaf_cert;
+        Проверяет подлинность сертификата leaf_cert по отношению к доверенному Root CA / Issuer CA:
+        1. Проверяет срок действия leaf_cert и issuer_ca;
         2. Проверяет совпадение Subject CA и Issuer leaf;
-        3. Криптографически проверяет цифровую подпись сертификата открытым ключом Root CA.
+        3. Проверяет расширения BasicConstraints, KeyUsage и path_length;
+        4. Криптографически проверяет цифровую подпись сертификата открытым ключом CA.
         """
         leaf_cert = self.parse_certificate(leaf_cert_input)
         if leaf_cert is None:
@@ -164,19 +166,96 @@ class X509ChainValidator:
         if issuer_ca is None:
             return False, "Доверенный корневой сертификат (Root CA) не настроен"
 
-        # 1. Проверка срока действия
+        # 1. Проверка срока действия проверяемого сертификата и сертификата эмитента
         is_valid_time, time_msg = self.validate_certificate_lifetime(leaf_cert)
         if not is_valid_time:
             return False, time_msg
+
+        is_ca_valid_time, ca_time_msg = self.validate_certificate_lifetime(issuer_ca)
+        if not is_ca_valid_time:
+            return False, f"Сертификат эмитента недействителен по времени: {ca_time_msg}"
 
         # 2. Проверка соответствия субъекта издателя
         if leaf_cert.issuer != issuer_ca.subject:
             return False, (
                 f"Несоответствие цепочки доверия: эмитент сертификата ({leaf_cert.issuer.rfc4514_string()}) "
-                f"не совпадает с доверенным Root CA ({issuer_ca.subject.rfc4514_string()})"
+                f"не совпадает с доверенным CA ({issuer_ca.subject.rfc4514_string()})"
             )
 
-        # 3. Криптографическая проверка подписи открытым ключом CA
+        # 3. Проверка расширений X.509 BasicConstraints и KeyUsage для издателя (CA)
+        try:
+            ca_bc = issuer_ca.extensions.get_extension_for_oid(x509.ExtensionOID.BASIC_CONSTRAINTS).value
+            if not getattr(ca_bc, "ca", False):
+                return False, "Сертификат издателя не является удостоверяющим центром (BasicConstraints: CA=False)"
+        except x509.ExtensionNotFound:
+            return False, "Сертификат издателя не содержит обязательного расширения BasicConstraints"
+
+        try:
+            ca_ku = issuer_ca.extensions.get_extension_for_oid(x509.ExtensionOID.KEY_USAGE).value
+            if not getattr(ca_ku, "key_cert_sign", False):
+                return False, (
+                    "Сертификат издателя не имеет полномочий подписи "
+                    "сертификатов (KeyUsage: key_cert_sign=False)"
+                )
+        except x509.ExtensionNotFound:
+            pass
+
+        # 4. Проверка статуса CA для проверяемого сертификата (Leaf vs Intermediate CA)
+        try:
+            leaf_bc = leaf_cert.extensions.get_extension_for_oid(x509.ExtensionOID.BASIC_CONSTRAINTS).value
+            has_ca_flag = bool(getattr(leaf_bc, "ca", False))
+            if is_ca:
+                if not has_ca_flag:
+                    return (
+                        False,
+                        "Промежуточный сертификат должен иметь статус центра сертификации (BasicConstraints: CA=True)",
+                    )
+            else:
+                if has_ca_flag:
+                    return (
+                        False,
+                        "Сертификат конечного узла не может иметь статус центра сертификации (CA=True запрещен)",
+                    )
+        except x509.ExtensionNotFound:
+            if is_ca:
+                return False, "Промежуточный сертификат CA обязан содержать расширение BasicConstraints: CA=True"
+
+        # 4.1 Проверка KeyUsage для проверяемого сертификата
+        try:
+            leaf_ku = leaf_cert.extensions.get_extension_for_oid(x509.ExtensionOID.KEY_USAGE).value
+            if is_ca:
+                if not getattr(leaf_ku, "key_cert_sign", False):
+                    return (
+                        False,
+                        "Промежуточный центр сертификации обязан иметь право подписи сертификатов (key_cert_sign=True)",
+                    )
+            else:
+                if not getattr(leaf_ku, "digital_signature", False):
+                    return (
+                        False,
+                        "Сертификат конечного узла должен обладать "
+                        "полномочием цифровой подписи (digital_signature=True)",
+                    )
+        except x509.ExtensionNotFound:
+            if is_ca:
+                return False, "Промежуточный сертификат CA обязан содержать расширение KeyUsage (key_cert_sign)"
+
+        # 4.2 Проверка ограничения path_length эмитента при валидации промежуточного CA (RFC 5280)
+        if is_ca:
+            ca_path_len = getattr(ca_bc, "path_length", None)
+            if ca_path_len is not None and ca_path_len < 1:
+                return False, "Сертификат эмитента исчерпал лимит вложенности центров сертификации (path_length < 1)"
+
+        # 5. Проверка по локальному CRL (если передан)
+        if self.crl_pem:
+            try:
+                crl_obj = x509.load_pem_x509_crl(self.crl_pem.encode("utf-8"), default_backend())
+                if crl_obj.get_revoked_certificate_by_serial_number(leaf_cert.serial_number):
+                    return False, f"Сертификат с серийным номером {leaf_cert.serial_number} отозван (CRL)"
+            except Exception as e:
+                return False, f"Ошибка проверки CRL: {e}"
+
+        # 6. Криптографическая проверка подписи открытым ключом CA
         try:
             ca_pub_key = issuer_ca.public_key()
             if isinstance(ca_pub_key, rsa.RSAPublicKey):

@@ -27,6 +27,7 @@ try:
     from core.utils.console_logger import log_error, log_success, log_warning
     from security import (
         compute_rag_canonical_digest,
+        discard_admin_nonce,
         get_minio_sse,
         record_admin_nonce_if_new,
         settings,
@@ -44,6 +45,7 @@ except ImportError:
         )
         from ..security import (
             compute_rag_canonical_digest,
+            discard_admin_nonce,
             get_minio_sse,
             record_admin_nonce_if_new,
             settings,
@@ -60,6 +62,7 @@ except ImportError:
         )
         from src.admin_server.fastapi.security import (
             compute_rag_canonical_digest,
+            discard_admin_nonce,
             get_minio_sse,
             record_admin_nonce_if_new,
             settings,
@@ -264,7 +267,6 @@ async def submit_rag_document(
     has_valid_role = (
         any(ou in allowed_roles for ou in leaf_ous)
         or any(cn in ("superadmin-workstation", "admin-server") for cn in leaf_cns)
-        or any(r in leaf_subject_str for r in allowed_roles)
     )
     is_enclave_agent = bool(x_enclave_cert) and any(
         "agent" in cn.lower() or ou in ("bank_operator", "agent") for cn in leaf_cns for ou in (leaf_ous or ["agent"])
@@ -306,6 +308,7 @@ async def submit_rag_document(
         )
 
     if not sig_verified:
+        discard_admin_nonce(x_nonce, redis_conn=redis_client)
         log_warning(
             "RAG Security",
             f"Цифровая подпись X-Signature не прошла валидацию для документа '{doc_req.document_title}'",
@@ -409,7 +412,6 @@ async def submit_rag_document(
                 "system_name": doc_req.document_title,
                 "short_name": safe_title,
                 "filename": filename,
-                "content": doc_req.content,
                 "metadata": doc_req.metadata,
             }
             await anyio.to_thread.run_sync(redis_client.lpush, "document_tasks", json.dumps(queue_payload))
@@ -586,7 +588,6 @@ async def submit_rag_documents_delete(
     has_valid_role = (
         any(ou in allowed_roles for ou in leaf_ous)
         or any(cn in ("superadmin-workstation", "admin-server") for cn in leaf_cns)
-        or any(r in leaf_subject_str for r in allowed_roles)
     )
     is_enclave_agent = bool(x_enclave_cert) and any(
         "agent" in cn.lower() or ou in ("bank_operator", "agent") for cn in leaf_cns for ou in (leaf_ous or ["agent"])
@@ -624,6 +625,7 @@ async def submit_rag_documents_delete(
         )
 
     if not sig_verified:
+        discard_admin_nonce(x_nonce, redis_conn=redis_client)
         log_warning(
             "RAG Security",
             "Цифровая подпись X-Signature не прошла валидацию для запроса на удаление",

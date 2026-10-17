@@ -1,13 +1,11 @@
 import os
 import sys
-import re
 from pathlib import Path
 from unittest.mock import MagicMock
 import pytest
 import yaml
 
 # Предварительный импорт fastapi до модификаций sys.path
-import fastapi
 from fastapi import Request, HTTPException
 from fastapi.testclient import TestClient
 
@@ -20,14 +18,12 @@ for mod in ["redis", "minio", "litellm", "asyncpg"]:
 sys.path.insert(0, os.path.abspath("src/admin_server"))
 sys.path.insert(0, os.path.abspath("src/admin_server/fastapi"))
 
-import security
 from security import (
     settings,
     extract_cn_from_subject,
     parse_mtls_client_certificate,
     verify_mtls_client_certificate,
 )
-import server
 from server import app
 
 
@@ -353,11 +349,15 @@ def test_zero_trust_pki_dockerfile_and_bootstrap_exist():
     assert bootstrap_py.exists(), "src/pki/bootstrap_pki.py должен существовать"
 
 
-def test_pki_bootstrap_in_transit_certificates(tmp_path):
+def test_pki_bootstrap_in_transit_certificates(tmp_path, monkeypatch):
     """
     Проверяет корректность генерации полного комплекта сертификатов сервисов
     через центральный Zero-Trust PKI bootstrap engine (src.pki.bootstrap_pki).
     """
+    monkeypatch.delenv("BANK_CERTS_DIR", raising=False)
+    monkeypatch.delenv("ADMIN_CERTS_DIR", raising=False)
+    monkeypatch.delenv("ADMIN_CLIENT_CERTS_DIR", raising=False)
+    monkeypatch.delenv("CA_PUBLIC_DIR", raising=False)
     from src.pki.bootstrap_pki import bootstrap_pki
     data_dir = tmp_path / "ca_data"
     export_dir = tmp_path / "shared_certs"

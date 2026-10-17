@@ -3,6 +3,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from dateutil.relativedelta import relativedelta
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
@@ -14,7 +15,7 @@ from src.simulations.core.utils.console_logger import log_error, log_info
 from src.simulations.db.bank.db.client import (
     get_async_session_maker as get_bank_session_maker,
 )
-from src.simulations.db.bank.db.models import Account, Transaction
+from src.simulations.db.bank.db.models import Account, Transaction, get_moscow_date
 from src.simulations.db.invest.db.models import (
     BrokerAccount,
     Deposit,
@@ -49,6 +50,21 @@ async def return_deposit_to_bank(client_id: str, deposit_number: str, amount: De
                     f"У клиента {client_id} не найден активный банковский счет для возврата вклада {deposit_number}",
                 )
                 return False
+
+            # Проверка идемпотентности: не начислять повторно, если возврат уже был выполнен ранее
+            existing_tx = await b_session.scalar(
+                select(Transaction.id).where(
+                    Transaction.account_id == acc.id,
+                    Transaction.operation_type == "transfer_in_invest",
+                    Transaction.description == f"Возврат вклада {deposit_number} по истечении срока",
+                ).limit(1)
+            )
+            if existing_tx is not None:
+                log_info(
+                    "Invest EOD",
+                    f"Вклад {deposit_number} уже был зачислен на счет {acc.account_number} ранее (идемпотентность)",
+                )
+                return True
 
             acc.balance = Decimal(str(acc.balance)) + amount
             tx = Transaction(
@@ -235,12 +251,21 @@ async def run_invest_eod() -> None:
     Запускает весь цикл EOD для инвестиций по реальному системному времени.
     """
     async with AsyncSessionLocal() as session:
-        current_date = date.today()
+        lock = await session.scalar(text("SELECT pg_try_advisory_lock(84920482)"))
+        if not lock:
+            log_info("Invest EOD", "Параллельный процесс Invest EOD уже выполняется. Пропуск итерации.")
+            return
 
-        log_info("Invest EOD", f"=== НАЧАЛО EOD ИНВЕСТИЦИЙ ДЛЯ ДАТЫ {current_date} ===")
+        try:
+            current_date = get_moscow_date()
 
-        await process_savings_accounts(session, current_date)
-        await process_deposits(session, current_date)
-        await process_broker_accounts(session, current_date)
+            log_info("Invest EOD", f"=== НАЧАЛО EOD ИНВЕСТИЦИЙ ДЛЯ ДАТЫ {current_date} ===")
 
-        log_info("Invest EOD", "=== EOD ИНВЕСТИЦИЙ ЗАВЕРШЕН ===")
+            await process_savings_accounts(session, current_date)
+            await process_deposits(session, current_date)
+            await process_broker_accounts(session, current_date)
+
+            log_info("Invest EOD", "=== EOD ИНВЕСТИЦИЙ ЗАВЕРШЕН ===")
+        finally:
+            await session.execute(text("SELECT pg_advisory_unlock(84920482)"))
+            await session.commit()

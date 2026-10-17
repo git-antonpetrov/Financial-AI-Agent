@@ -18,9 +18,9 @@ from src.simulations.api.routers.ruble import (
     withdraw_wallet,
     FundWithdrawRequest,
 )
-from src.simulations.db.bank.db.models import Account, Transaction
+from src.simulations.db.bank.db.models import Account
 from src.simulations.db.digital_ruble.db.models import Wallet
-from src.simulations.db.invest.db.models import Deposit, SavingsAccount, BrokerAccount
+from src.simulations.db.invest.db.models import Deposit, SavingsAccount
 
 
 def make_async_cm(session):
