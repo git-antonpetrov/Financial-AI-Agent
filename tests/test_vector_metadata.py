@@ -1,10 +1,14 @@
 import os
 import sys
-
-# Мокирует внешние сетевые сервисы перед импортом vector_worker
 from unittest.mock import MagicMock
-for mod in ["redis", "minio", "chromadb", "chromadb.config", "litellm", "psycopg2", "psycopg2.pool"]:
-    sys.modules[mod] = MagicMock()
+
+# Мокирует внешние сервисы только если они отсутствуют в системе
+for mod in ["redis", "psycopg2", "psycopg2.pool"]:
+    if mod not in sys.modules:
+        try:
+            __import__(mod)
+        except ImportError:
+            sys.modules[mod] = MagicMock()
 
 os.environ["POSTGRES_PASSWORD"] = "test"
 
@@ -79,15 +83,17 @@ def test_sanitize_chroma_metadata():
         assert isinstance(k, str)
         assert isinstance(v, (str, int, float, bool))
 
-def test_process_task_preserves_minio_file_on_error():
+def test_process_task_preserves_minio_file_on_error(monkeypatch):
     """Проверяет сохранение файла в MinIO при возникновении ошибки обработки."""
     from src.admin_server.vectors import vector_worker
 
-    vector_worker.minio_client.remove_object.reset_mock()
+    mock_client = MagicMock()
+    monkeypatch.setattr(vector_worker, "minio_client", mock_client)
+    monkeypatch.setattr(vector_worker, "get_chroma_client", lambda: MagicMock())
     # Имитирует возврат некорректного Markdown без short_name
     mock_resp = MagicMock()
     mock_resp.read.return_value = b"# No frontmatter"
-    vector_worker.minio_client.get_object.return_value = mock_resp
+    mock_client.get_object.return_value = mock_resp
 
     task = {
         "agent": "bank",
@@ -99,16 +105,18 @@ def test_process_task_preserves_minio_file_on_error():
     process_task(task)
 
     # Файл не должен удаляться при сбое
-    vector_worker.minio_client.remove_object.assert_not_called()
+    mock_client.remove_object.assert_not_called()
 
-def test_process_task_deletes_minio_file_on_success():
+def test_process_task_deletes_minio_file_on_success(monkeypatch):
     """Проверяет удаление файла из MinIO после успешного выполнения задачи."""
     from src.admin_server.vectors import vector_worker
 
-    vector_worker.minio_client.remove_object.reset_mock()
+    mock_client = MagicMock()
+    monkeypatch.setattr(vector_worker, "minio_client", mock_client)
+    monkeypatch.setattr(vector_worker, "get_chroma_client", lambda: MagicMock())
     mock_resp = MagicMock()
     mock_resp.read.return_value = b"doc_to_delete\n"
-    vector_worker.minio_client.get_object.return_value = mock_resp
+    mock_client.get_object.return_value = mock_resp
 
     task = {
         "agent": "bank",

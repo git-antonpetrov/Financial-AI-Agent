@@ -20,10 +20,13 @@ from cryptography import x509
 from cryptography.x509.oid import NameOID
 import datetime
 
-# Моки внешних сервисов
-for mod in ["redis", "minio", "litellm", "asyncpg", "chromadb", "psycopg2"]:
+# Моки внешних сервисов (только отсутствующих в окружении)
+for mod in ["redis", "psycopg2", "psycopg2.pool"]:
     if mod not in sys.modules:
-        sys.modules[mod] = MagicMock()
+        try:
+            __import__(mod)
+        except ImportError:
+            sys.modules[mod] = MagicMock()
 
 # Настройка путей
 sys.path.insert(0, os.path.abspath("src/admin_server"))
@@ -44,6 +47,9 @@ from security import (
     reset_trusted_root_ca,
 )
 from server import app
+import server
+server.minio_client = MagicMock()
+server.minio_client.bucket_exists.return_value = True
 from db import models
 from db.database import get_db
 
@@ -297,8 +303,15 @@ class MockDbSession:
 
 
 @pytest.fixture
-def mock_db_session():
-    """Создает сессию базы данных в памяти."""
+def mock_db_session(monkeypatch):
+    """Создает сессию базы данных в памяти и изолирует MinIO для тестов."""
+    try:
+        import routers.rag_documents as rag_docs
+        mock_minio = MagicMock()
+        mock_minio.bucket_exists.return_value = True
+        monkeypatch.setattr(rag_docs, "_get_external_services", lambda: (mock_minio, None))
+    except Exception:
+        pass
     return MockDbSession()
 
 

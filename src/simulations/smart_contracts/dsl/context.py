@@ -18,16 +18,41 @@ class ContractContext:
         amount: float | Decimal,
         condition_status: str,
     ):
-        self.contract_id = str(contract_id)
-        self.creator_id = str(creator_id)
-        self.receiver_id = str(receiver_id)
-        self.amount = Decimal(str(amount))
-        self.condition_status = str(condition_status)
-        self.current_date = date.today()
+        self._contract_id = str(contract_id)
+        self._creator_id = str(creator_id)
+        self._receiver_id = str(receiver_id)
+        self._amount = Decimal(str(amount))
+        self._condition_status = str(condition_status)
+        self._current_date = date.today()
 
         # Внутреннее состояние песочницы для регистрации запросов на перевод
         self._requested_transfers: list[dict[str, Any]] = []
         self._is_completed: bool = False
+        self._initialized: bool = True
+
+    @property
+    def contract_id(self) -> str:
+        return self._contract_id
+
+    @property
+    def creator_id(self) -> str:
+        return self._creator_id
+
+    @property
+    def receiver_id(self) -> str:
+        return self._receiver_id
+
+    @property
+    def amount(self) -> Decimal:
+        return self._amount
+
+    @property
+    def condition_status(self) -> str:
+        return self._condition_status
+
+    @property
+    def current_date(self) -> date:
+        return self._current_date
 
     FORBIDDEN_ATTRS = {
         "__class__",
@@ -42,6 +67,19 @@ class ContractContext:
         "__func__",
         "__closure__",
     }
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if getattr(self, "_initialized", False):
+            if name.startswith("_") or name in (
+                "contract_id",
+                "creator_id",
+                "receiver_id",
+                "amount",
+                "condition_status",
+                "current_date",
+            ):
+                raise AttributeError(f"Модификация защищенного атрибута '{name}' контекста запрещена")
+        super().__setattr__(name, value)
 
     def __getattribute__(self, name: str) -> Any:
         if name in ContractContext.FORBIDDEN_ATTRS:
@@ -106,4 +144,4 @@ class ContractContext:
 
     def complete(self) -> None:
         """Помечает контракт как завершенный (готов к расчету)."""
-        self._is_completed = True
+        super().__setattr__("_is_completed", True)

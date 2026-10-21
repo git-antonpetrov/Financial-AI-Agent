@@ -15,9 +15,13 @@ for agent in ["DIGITAL", "MAIN", "BANK", "INVEST"]:
 
 # Предварительно импортирует модуль fastapi
 
-# Замещает внешние сервисы моками для изоляции окружения тестов
-for mod in ["redis", "minio", "litellm", "asyncpg"]:
-    sys.modules[mod] = MagicMock()
+# Замещает внешние сервисы моками только если они не установлены
+for mod in ["redis", "psycopg2", "psycopg2.pool"]:
+    if mod not in sys.modules:
+        try:
+            __import__(mod)
+        except ImportError:
+            sys.modules[mod] = MagicMock()
 
 sys.path.insert(0, os.path.abspath("src/admin_server"))
 sys.path.insert(0, os.path.abspath("src/admin_server/fastapi"))

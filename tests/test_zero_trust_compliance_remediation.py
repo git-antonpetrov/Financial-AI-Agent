@@ -597,6 +597,7 @@ def test_vector_worker_process_task_content_fallback():
     mock_update_status = MagicMock()
 
     with patch.object(vector_worker, "minio_client", mock_minio), \
+         patch.object(vector_worker, "get_chroma_client", return_value=mock_chroma), \
          patch.object(vector_worker, "chroma_client", mock_chroma), \
          patch.object(vector_worker, "get_embeddings_google", return_value=[[0.1] * 768]), \
          patch.object(vector_worker, "update_document_status", mock_update_status):

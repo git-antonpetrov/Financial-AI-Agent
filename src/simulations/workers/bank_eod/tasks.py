@@ -1,4 +1,6 @@
+import inspect
 import random
+from contextlib import asynccontextmanager
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -11,7 +13,7 @@ from sqlalchemy.orm import selectinload
 from src.simulations.db.bank.db.client import get_async_session_maker
 
 AsyncSessionLocal = get_async_session_maker()
-from src.simulations.core.utils.console_logger import log_info
+from src.simulations.core.utils.console_logger import log_error, log_info
 from src.simulations.db.bank.db.models import (
     Account,
     AutoPayment,
@@ -19,6 +21,26 @@ from src.simulations.db.bank.db.models import (
     get_moscow_date,
     get_moscow_time,
 )
+
+
+@asynccontextmanager
+async def _item_savepoint(session: AsyncSession):
+    """
+    Создает изолированный вложенный savepoint (session.begin_nested()) для обработки отдельного элемента.
+    Предотвращает откат всей транзакции при сбое на одном элементе.
+    """
+    if hasattr(session, "begin_nested"):
+        nested = session.begin_nested()
+        if hasattr(nested, "__aenter__"):
+            async with nested:
+                yield
+            return
+        elif inspect.iscoroutine(nested):
+            nested.close()
+            yield
+            return
+    yield
+
 
 
 async def process_auto_payments(session: AsyncSession, current_date: date) -> None:
@@ -37,52 +59,57 @@ async def process_auto_payments(session: AsyncSession, current_date: date) -> No
 
     processed = 0
     for ap in autopayments:
-        # Получаем счет с пессимистической блокировкой строки во избежание гонок
-        account = await session.get(Account, ap.account_id, with_for_update=True)
-        if not account or account.status != "active":
+        try:
+            async with _item_savepoint(session):
+                # Получаем счет с пессимистической блокировкой строки во избежание гонок
+                account = await session.get(Account, ap.account_id, with_for_update=True)
+                if not account or account.status != "active":
+                    continue
+
+                acc_bal = Decimal(str(account.balance))
+                ap_amt = Decimal(str(ap.amount))
+                if acc_bal >= ap_amt:
+                    # Списываем деньги
+                    account.balance = acc_bal - ap_amt
+
+                    # Создаем транзакцию
+                    tx = Transaction(
+                        account_id=account.id,
+                        category="expense",
+                        operation_type="auto_payment",
+                        amount=ap_amt,
+                        description=f"Автоплатеж: {ap.recipient}",
+                        status="completed",
+                        date=current_date,
+                        time=get_moscow_time(),
+                    )
+                    session.add(tx)
+
+                    # Обновляем дату следующего платежа
+                    if ap.schedule == "monthly":
+                        ap.next_payment_date = ap.next_payment_date + relativedelta(months=1)
+                    else:  # Еженедельное расписание (weekly)
+                        ap.next_payment_date = ap.next_payment_date + timedelta(days=7)
+
+                    processed += 1
+                else:
+                    # Денег не хватает
+                    tx = Transaction(
+                        account_id=account.id,
+                        category="expense",
+                        operation_type="auto_payment",
+                        amount=ap_amt,
+                        description=f"Недостаточно средств. Автоплатеж: {ap.recipient}",
+                        status="failed",
+                        date=current_date,
+                        time=get_moscow_time(),
+                    )
+                    session.add(tx)
+                    # Сдвигаем на завтра чтобы попробовать снова
+                    ap.next_payment_date = ap.next_payment_date + timedelta(days=1)
+        except Exception as e:
+            log_error("Bank EOD", f"Ошибка при обработке автоплатежа {ap.id}: {e}")
             continue
-
-        acc_bal = Decimal(str(account.balance))
-        ap_amt = Decimal(str(ap.amount))
-        if acc_bal >= ap_amt:
-            # Списываем деньги
-            account.balance = acc_bal - ap_amt
-
-            # Создаем транзакцию
-            tx = Transaction(
-                account_id=account.id,
-                category="expense",
-                operation_type="auto_payment",
-                amount=ap_amt,
-                description=f"Автоплатеж: {ap.recipient}",
-                status="completed",
-                date=current_date,
-                time=get_moscow_time(),
-            )
-            session.add(tx)
-
-            # Обновляем дату следующего платежа
-            if ap.schedule == "monthly":
-                ap.next_payment_date = ap.next_payment_date + relativedelta(months=1)
-            else:  # Еженедельное расписание (weekly)
-                ap.next_payment_date = ap.next_payment_date + timedelta(days=7)
-
-            processed += 1
-        else:
-            # Денег не хватает
-            tx = Transaction(
-                account_id=account.id,
-                category="expense",
-                operation_type="auto_payment",
-                amount=ap_amt,
-                description=f"Недостаточно средств. Автоплатеж: {ap.recipient}",
-                status="failed",
-                date=current_date,
-                time=get_moscow_time(),
-            )
-            session.add(tx)
-            # Сдвигаем на завтра чтобы попробовать снова
-            ap.next_payment_date = ap.next_payment_date + timedelta(days=1)
 
     await session.commit()
     log_info("Bank EOD", f"Успешно обработано автоплатежей: {processed}")
@@ -107,48 +134,53 @@ async def process_tariff_fees(session: AsyncSession, current_date: date) -> None
 
     processed = 0
     for acc in accounts:
-        tariff_cost = Decimal(str(acc.tariff.service_cost))
-        if tariff_cost > Decimal("0.00"):
-            # Проверка идемпотентности: не списывать повторно за текущую дату
-            fee_check = await session.execute(
-                select(Transaction.id).where(
-                    Transaction.account_id == acc.id,
-                    Transaction.operation_type == "service_fee",
-                    Transaction.date == current_date,
-                    Transaction.status == "completed",
-                ).limit(1)
-            )
-            existing_fee = fee_check.scalar_one_or_none()
-            if existing_fee is not None:
-                continue
+        try:
+            async with _item_savepoint(session):
+                tariff_cost = Decimal(str(acc.tariff.service_cost))
+                if tariff_cost > Decimal("0.00"):
+                    # Проверка идемпотентности: не списывать повторно за текущую дату
+                    fee_check = await session.execute(
+                        select(Transaction.id).where(
+                            Transaction.account_id == acc.id,
+                            Transaction.operation_type == "service_fee",
+                            Transaction.date == current_date,
+                            Transaction.status == "completed",
+                        ).limit(1)
+                    )
+                    existing_fee = fee_check.scalar_one_or_none()
+                    if existing_fee is not None:
+                        continue
 
-            acc_bal = Decimal(str(acc.balance))
-            if acc_bal >= tariff_cost:
-                acc.balance = acc_bal - tariff_cost
-                tx = Transaction(
-                    account_id=acc.id,
-                    category="expense",
-                    operation_type="service_fee",
-                    amount=tariff_cost,
-                    description=f"Плата за обслуживание тарифа '{acc.tariff.name}'",
-                    status="completed",
-                    date=current_date,
-                    time=get_moscow_time(),
-                )
-                session.add(tx)
-                processed += 1
-            else:
-                tx = Transaction(
-                    account_id=acc.id,
-                    category="expense",
-                    operation_type="service_fee",
-                    amount=tariff_cost,
-                    description=f"Недостаточно средств для платы за тариф '{acc.tariff.name}'",
-                    status="failed",
-                    date=current_date,
-                    time=get_moscow_time(),
-                )
-                session.add(tx)
+                    acc_bal = Decimal(str(acc.balance))
+                    if acc_bal >= tariff_cost:
+                        acc.balance = acc_bal - tariff_cost
+                        tx = Transaction(
+                            account_id=acc.id,
+                            category="expense",
+                            operation_type="service_fee",
+                            amount=tariff_cost,
+                            description=f"Плата за обслуживание тарифа '{acc.tariff.name}'",
+                            status="completed",
+                            date=current_date,
+                            time=get_moscow_time(),
+                        )
+                        session.add(tx)
+                        processed += 1
+                    else:
+                        tx = Transaction(
+                            account_id=acc.id,
+                            category="expense",
+                            operation_type="service_fee",
+                            amount=tariff_cost,
+                            description=f"Недостаточно средств для платы за тариф '{acc.tariff.name}'",
+                            status="failed",
+                            date=current_date,
+                            time=get_moscow_time(),
+                        )
+                        session.add(tx)
+        except Exception as e:
+            log_error("Bank EOD", f"Ошибка при списании абонентской платы для счета {acc.id}: {e}")
+            continue
 
     await session.commit()
     log_info("Bank EOD", f"Списана абонентская плата по {processed} счетам")
@@ -179,50 +211,55 @@ async def process_salaries(session: AsyncSession, current_date: date) -> None:
         if acc.client_id in paid_clients:
             continue
 
-        # Проверка идемпотентности: не начислять зарплату повторно за текущую дату
-        sal_check = await session.execute(
-            select(Transaction.id)
-            .join(Account, Account.id == Transaction.account_id)
-            .where(
-                Account.client_id == acc.client_id,
-                Transaction.operation_type == "salary",
-                Transaction.date == current_date,
-                Transaction.status == "completed",
-            )
-            .limit(1)
-        )
-        existing_sal = sal_check.scalar_one_or_none()
-        if existing_sal is not None:
-            paid_clients.add(acc.client_id)
-            continue
+        try:
+            async with _item_savepoint(session):
+                # Проверка идемпотентности: не начислять зарплату повторно за текущую дату
+                sal_check = await session.execute(
+                    select(Transaction.id)
+                    .join(Account, Account.id == Transaction.account_id)
+                    .where(
+                        Account.client_id == acc.client_id,
+                        Transaction.operation_type == "salary",
+                        Transaction.date == current_date,
+                        Transaction.status == "completed",
+                    )
+                    .limit(1)
+                )
+                existing_sal = sal_check.scalar_one_or_none()
+                if existing_sal is not None:
+                    paid_clients.add(acc.client_id)
+                    continue
 
-        salary_amount = 0
-        if acc.client_id == "11111111-1111-1111-1111-111111111111":  # Иванов (Ваня)
-            salary_amount = random.randint(75000, 150000)
-        elif acc.client_id == "22222222-2222-2222-2222-222222222222":  # Петров (Петя)
-            salary_amount = random.randint(150000, 200000)
-        elif acc.client_id == "33333333-3333-3333-3333-333333333333":  # Васильков (Вася)
-            salary_amount = random.randint(200000, 250000)
-        elif acc.tariff and acc.tariff.name == "Зарплатный":
-            salary_amount = random.randint(50000, 120000)
-        else:
-            continue
+                salary_amount = 0
+                if acc.client_id == "11111111-1111-1111-1111-111111111111":  # Иванов (Ваня)
+                    salary_amount = random.randint(75000, 150000)
+                elif acc.client_id == "22222222-2222-2222-2222-222222222222":  # Петров (Петя)
+                    salary_amount = random.randint(150000, 200000)
+                elif acc.client_id == "33333333-3333-3333-3333-333333333333":  # Васильков (Вася)
+                    salary_amount = random.randint(200000, 250000)
+                elif acc.tariff and acc.tariff.name == "Зарплатный":
+                    salary_amount = random.randint(50000, 120000)
+                else:
+                    continue
 
-        salary_decimal = Decimal(str(salary_amount))
-        acc.balance = Decimal(str(acc.balance)) + salary_decimal
-        tx = Transaction(
-            account_id=acc.id,
-            category="income",
-            operation_type="salary",
-            amount=salary_decimal,
-            description="Поступление зарплаты",
-            status="completed",
-            date=current_date,
-            time=get_moscow_time(),
-        )
-        session.add(tx)
-        paid_clients.add(acc.client_id)
-        processed += 1
+                salary_decimal = Decimal(str(salary_amount))
+                acc.balance = Decimal(str(acc.balance)) + salary_decimal
+                tx = Transaction(
+                    account_id=acc.id,
+                    category="income",
+                    operation_type="salary",
+                    amount=salary_decimal,
+                    description="Поступление зарплаты",
+                    status="completed",
+                    date=current_date,
+                    time=get_moscow_time(),
+                )
+                session.add(tx)
+                paid_clients.add(acc.client_id)
+                processed += 1
+        except Exception as e:
+            log_error("Bank EOD", f"Ошибка при начислении зарплаты для счета {acc.id}: {e}")
+            continue
 
     await session.commit()
     log_info("Bank EOD", f"Начислена зарплата {processed} клиентам")

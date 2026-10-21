@@ -17,15 +17,27 @@ _simulation_revoked_cache: set[str] = set()
 
 def update_simulation_revocation_cache(key: str, is_revoked: bool = True) -> None:
     """Обновляет локальный кэш отозванных сертификатов и агентов по событиям Pub/Sub."""
-    if is_revoked:
-        _simulation_revoked_cache.add(key)
-    else:
-        _simulation_revoked_cache.discard(key)
+    clean_keys = {key}
+    for prefix in ("serial:", "fp:", "agent:", "cert:"):
+        if key.startswith(prefix):
+            clean_keys.add(key[len(prefix):])
+    for k in clean_keys:
+        if is_revoked:
+            _simulation_revoked_cache.add(k)
+        else:
+            _simulation_revoked_cache.discard(k)
 
 
 def is_simulation_entity_revoked(key: str) -> bool:
-    """Проверяет наличие ключа/субъекта в локальном кэше мгновенного отзыва."""
-    return key in _simulation_revoked_cache
+    """Проверяет наличие ключа/субъекта в локальном кэше мгновенного отзыва с поддержкой префиксов."""
+    if key in _simulation_revoked_cache:
+        return True
+    for prefix in ("serial:", "fp:", "agent:", "cert:"):
+        if f"{prefix}{key}" in _simulation_revoked_cache:
+            return True
+        if key.startswith(prefix) and key[len(prefix):] in _simulation_revoked_cache:
+            return True
+    return False
 
 
 async def run_simulation_revocation_listener() -> None:
@@ -234,193 +246,196 @@ async def check_enclave_or_token_auth(
                 detail=f"Обнаружена повторная атака (Replay Attack): nonce '{nonce}' уже был использован",
             )
 
-        chain_val = get_chain_validator()
-        leaf_cert = chain_val.parse_certificate(agent_cert)
-        if not leaf_cert:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Некорректный формат клиентского сертификата X-Agent-Cert",
-            )
-
-        if enclave_cert:
-            enc_cert = chain_val.parse_certificate(enclave_cert)
-            if not enc_cert:
+        try:
+            chain_val = get_chain_validator()
+            leaf_cert = chain_val.parse_certificate(agent_cert)
+            if not leaf_cert:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Некорректный формат сертификата Анклава X-Enclave-Cert",
-                )
-            is_enc_valid, enc_err = chain_val.validate_certificate_chain(enc_cert, is_ca=True)
-            if not is_enc_valid:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail=f"Промежуточный сертификат Анклава не прошел валидацию: {enc_err}",
-                )
-            is_leaf_valid, leaf_err = chain_val.validate_certificate_chain(
-                leaf_cert, issuer_ca_input=enc_cert, is_ca=False
-            )
-            if not is_leaf_valid:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail=f"Сертификат агента не прошел валидацию Анклавом: {leaf_err}",
-                )
-        else:
-            is_leaf_valid, leaf_err = chain_val.validate_certificate_chain(leaf_cert, is_ca=False)
-            if not is_leaf_valid:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail=f"Сертификат агента не прошел валидацию Root CA: {leaf_err}",
+                    detail="Некорректный формат клиентского сертификата X-Agent-Cert",
                 )
 
-        # Проверка 5 (Zero-Trust Pipeline): Проверка отзыва сертификата и агента в Redis CRL и In-Memory Cache
-        serial_str = str(leaf_cert.serial_number)
-        fp_str = f"sha256:{hashlib.sha256(leaf_cert.public_bytes(serialization.Encoding.DER)).hexdigest()}"
-        cn_str = None
-        for attr in leaf_cert.subject:
-            if attr.oid == NameOID.COMMON_NAME:
-                cn_str = str(attr.value)
-                break
-
-        # 5.1 Проверка родительского сертификата Анклава на отзыв (при наличии)
-        if enclave_cert:
-            enc_obj = chain_val.parse_certificate(enclave_cert)
-            if enc_obj:
-                enc_serial = str(enc_obj.serial_number)
-                enc_fp = f"sha256:{hashlib.sha256(enc_obj.public_bytes(serialization.Encoding.DER)).hexdigest()}"
-                enc_cn = None
-                for attr in enc_obj.subject:
-                    if attr.oid == NameOID.COMMON_NAME:
-                        enc_cn = str(attr.value)
-                        break
-
-                if (
-                    is_simulation_entity_revoked(enc_serial)
-                    or is_simulation_entity_revoked(enc_fp)
-                    or (enc_cn and is_simulation_entity_revoked(enc_cn))
-                ):
-                    log_warning(
-                        "Simulation Auth",
-                        f"Доступ заблокирован: родительский Анклав {enc_cn} отозван (In-Memory)",
-                    )
+            if enclave_cert:
+                enc_cert = chain_val.parse_certificate(enclave_cert)
+                if not enc_cert:
                     raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="Доступ заблокирован: родительский сертификат Анклава отозван",
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Некорректный формат сертификата Анклава X-Enclave-Cert",
                     )
-
-                redis_cli = getattr(verifier.nonce_store, "redis_client", None)
-                if redis_cli is not None:
-                    try:
-                        if (
-                            redis_cli.exists(f"revoked:cert:serial:{enc_serial}")
-                            or redis_cli.exists(f"revoked:cert:fp:{enc_fp}")
-                            or (enc_cn and redis_cli.exists(f"revoked:agent:{enc_cn}"))
-                        ):
-                            log_warning(
-                                "Simulation Auth",
-                                f"Доступ заблокирован: родительский Анклав {enc_cn} отозван (Redis)",
-                            )
-                            raise HTTPException(
-                                status_code=status.HTTP_403_FORBIDDEN,
-                                detail="Доступ заблокирован: родительский сертификат Анклава отозван",
-                            )
-                    except HTTPException:
-                        raise
-                    except Exception as e:
-                        log_warning("Simulation Auth", f"Ошибка проверки отзыва Анклава в Redis: {e}")
-
-        # 5.2 Проверка конечного сертификата агента в In-Memory Cache
-        if (
-            is_simulation_entity_revoked(serial_str)
-            or is_simulation_entity_revoked(fp_str)
-            or (cn_str and is_simulation_entity_revoked(cn_str))
-        ):
-            log_warning(
-                "Simulation Auth",
-                f"Доступ заблокирован: агент {cn_str} или сертификат отозван (In-Memory)",
-            )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Доступ заблокирован: агент или сертификат отозван (Certificate has been revoked)",
-            )
-
-        # 5.3 Проверка конечного сертификата агента в Redis
-        redis_cli = getattr(verifier.nonce_store, "redis_client", None)
-        if redis_cli is not None:
-            try:
-                if (
-                    redis_cli.exists(f"revoked:cert:serial:{serial_str}")
-                    or redis_cli.exists(f"revoked:cert:fp:{fp_str}")
-                    or (cn_str and redis_cli.exists(f"revoked:agent:{cn_str}"))
-                ):
-                    log_warning(
-                        "Simulation Auth",
-                        f"Доступ заблокирован: агент {cn_str} или сертификат отозван (Redis)",
-                    )
+                is_enc_valid, enc_err = chain_val.validate_certificate_chain(enc_cert, is_ca=True)
+                if not is_enc_valid:
                     raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="Доступ заблокирован: агент или сертификат отозван (Certificate has been revoked)",
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail=f"Промежуточный сертификат Анклава не прошел валидацию: {enc_err}",
                     )
-            except HTTPException:
-                raise
-            except Exception as e:
-                log_warning("Simulation Auth", f"Ошибка проверки отзыва в Redis: {e}")
+                is_leaf_valid, leaf_err = chain_val.validate_certificate_chain(
+                    leaf_cert, issuer_ca_input=enc_cert, is_ca=False
+                )
+                if not is_leaf_valid:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail=f"Сертификат агента не прошел валидацию Анклавом: {leaf_err}",
+                    )
+            else:
+                is_leaf_valid, leaf_err = chain_val.validate_certificate_chain(leaf_cert, is_ca=False)
+                if not is_leaf_valid:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail=f"Сертификат агента не прошел валидацию Root CA: {leaf_err}",
+                    )
 
-        # Проверка 6 (Zero-Trust Pipeline): Проверка роли субъекта (OU / Role validation)
-        ou_values = [str(attr.value) for attr in leaf_cert.subject if attr.oid == NameOID.ORGANIZATIONAL_UNIT_NAME]
-        valid_roles = {
-            "AI Autonomous Financial Agent",
-            "bank_operator",
-            "Security Operations",
-            "bank_service",
-            "admin_operator",
-            "infrastructure",
-            "agent",
-        }
-        if not ou_values or not any(role in valid_roles for role in ou_values):
-            log_warning("Simulation Auth", f"Недопустимая или отсутствующая роль сертификата: {ou_values}")
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=(
-                    f"Недопустимая или отсутствующая роль в сертификате (OU={ou_values}) "
-                    "для доступа к банковским операциям"
-                ),
-            )
+            # Проверка 5 (Zero-Trust Pipeline): Проверка отзыва сертификата и агента в Redis CRL и In-Memory Cache
+            serial_str = str(leaf_cert.serial_number)
+            fp_str = f"sha256:{hashlib.sha256(leaf_cert.public_bytes(serialization.Encoding.DER)).hexdigest()}"
+            cn_str = None
+            for attr in leaf_cert.subject:
+                if attr.oid == NameOID.COMMON_NAME:
+                    cn_str = str(attr.value)
+                    break
 
-        body = await request.body()
-        canonical_data = chain_val.compute_canonical_digest(
-            timestamp=req_ts,
-            nonce=nonce,
-            body_bytes=body,
-            method=request.method,
-            path=request.url.path,
-        )
-        is_sig_valid, sig_err = chain_val.verify_signature(
-            payload_bytes=canonical_data,
-            signature_b64=signature,
-            leaf_cert_input=leaf_cert,
-            verify_chain=False,
-        )
-        if not is_sig_valid:
-            canonical_data_compat = chain_val.compute_canonical_digest(
+            # 5.1 Проверка родительского сертификата Анклава на отзыв (при наличии)
+            if enclave_cert:
+                enc_obj = chain_val.parse_certificate(enclave_cert)
+                if enc_obj:
+                    enc_serial = str(enc_obj.serial_number)
+                    enc_fp = f"sha256:{hashlib.sha256(enc_obj.public_bytes(serialization.Encoding.DER)).hexdigest()}"
+                    enc_cn = None
+                    for attr in enc_obj.subject:
+                        if attr.oid == NameOID.COMMON_NAME:
+                            enc_cn = str(attr.value)
+                            break
+
+                    if (
+                        is_simulation_entity_revoked(enc_serial)
+                        or is_simulation_entity_revoked(enc_fp)
+                        or (enc_cn and is_simulation_entity_revoked(enc_cn))
+                    ):
+                        log_warning(
+                            "Simulation Auth",
+                            f"Доступ заблокирован: родительский Анклав {enc_cn} отозван (In-Memory)",
+                        )
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Доступ заблокирован: родительский сертификат Анклава отозван",
+                        )
+
+                    redis_cli = getattr(verifier.nonce_store, "redis_client", None)
+                    if redis_cli is not None:
+                        try:
+                            if (
+                                redis_cli.exists(f"revoked:cert:serial:{enc_serial}")
+                                or redis_cli.exists(f"revoked:cert:fp:{enc_fp}")
+                                or (enc_cn and redis_cli.exists(f"revoked:agent:{enc_cn}"))
+                            ):
+                                log_warning(
+                                    "Simulation Auth",
+                                    f"Доступ заблокирован: родительский Анклав {enc_cn} отозван (Redis)",
+                                )
+                                raise HTTPException(
+                                    status_code=status.HTTP_403_FORBIDDEN,
+                                    detail="Доступ заблокирован: родительский сертификат Анклава отозван",
+                                )
+                        except HTTPException:
+                            raise
+                        except Exception as e:
+                            log_warning("Simulation Auth", f"Ошибка проверки отзыва Анклава в Redis: {e}")
+
+            # 5.2 Проверка конечного сертификата агента в In-Memory Cache
+            if (
+                is_simulation_entity_revoked(serial_str)
+                or is_simulation_entity_revoked(fp_str)
+                or (cn_str and is_simulation_entity_revoked(cn_str))
+            ):
+                log_warning(
+                    "Simulation Auth",
+                    f"Доступ заблокирован: агент {cn_str} или сертификат отозван (In-Memory)",
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Доступ заблокирован: агент или сертификат отозван (Certificate has been revoked)",
+                )
+
+            # 5.3 Проверка конечного сертификата агента в Redis
+            redis_cli = getattr(verifier.nonce_store, "redis_client", None)
+            if redis_cli is not None:
+                try:
+                    if (
+                        redis_cli.exists(f"revoked:cert:serial:{serial_str}")
+                        or redis_cli.exists(f"revoked:cert:fp:{fp_str}")
+                        or (cn_str and redis_cli.exists(f"revoked:agent:{cn_str}"))
+                    ):
+                        log_warning(
+                            "Simulation Auth",
+                            f"Доступ заблокирован: агент {cn_str} или сертификат отозван (Redis)",
+                        )
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Доступ заблокирован: агент или сертификат отозван (Certificate has been revoked)",
+                        )
+                except HTTPException:
+                    raise
+                except Exception as e:
+                    log_warning("Simulation Auth", f"Ошибка проверки отзыва в Redis: {e}")
+
+            # Проверка 6 (Zero-Trust Pipeline): Проверка роли субъекта (OU / Role validation)
+            ou_values = [str(attr.value) for attr in leaf_cert.subject if attr.oid == NameOID.ORGANIZATIONAL_UNIT_NAME]
+            valid_roles = {
+                "AI Autonomous Financial Agent",
+                "bank_operator",
+                "Security Operations",
+                "bank_service",
+                "admin_operator",
+                "infrastructure",
+                "agent",
+            }
+            if not ou_values or not any(role in valid_roles for role in ou_values):
+                log_warning("Simulation Auth", f"Недопустимая или отсутствующая роль сертификата: {ou_values}")
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=(
+                        f"Недопустимая или отсутствующая роль в сертификате (OU={ou_values}) "
+                        "для доступа к банковским операциям"
+                    ),
+                )
+
+            body = await request.body()
+            canonical_data = chain_val.compute_canonical_digest(
                 timestamp=req_ts,
                 nonce=nonce,
                 body_bytes=body,
+                method=request.method,
+                path=request.url.path,
             )
             is_sig_valid, sig_err = chain_val.verify_signature(
-                payload_bytes=canonical_data_compat,
+                payload_bytes=canonical_data,
                 signature_b64=signature,
                 leaf_cert_input=leaf_cert,
                 verify_chain=False,
             )
+            if not is_sig_valid:
+                canonical_data_compat = chain_val.compute_canonical_digest(
+                    timestamp=req_ts,
+                    nonce=nonce,
+                    body_bytes=body,
+                )
+                is_sig_valid, sig_err = chain_val.verify_signature(
+                    payload_bytes=canonical_data_compat,
+                    signature_b64=signature,
+                    leaf_cert_input=leaf_cert,
+                    verify_chain=False,
+                )
 
-        if not is_sig_valid:
+            if not is_sig_valid:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail=f"Недействительная цифровая подпись запроса агента: {sig_err}",
+                )
+        except Exception:
             try:
                 verifier.nonce_store.discard_nonce(nonce)
             except Exception:
                 pass
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=f"Недействительная цифровая подпись запроса агента: {sig_err}",
-            )
+            raise
 
         request.state.enclave_nonce = nonce
         request.state.authenticated_entity = "pki_agent"

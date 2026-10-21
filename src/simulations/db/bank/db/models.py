@@ -91,6 +91,7 @@ class Transaction(Base):
     status = Column(String, default="completed")  # Статус: 'completed', 'failed', 'pending'
     date = Column(Date, default=get_moscow_date, index=True)
     time = Column(Time, default=get_moscow_time)
+    idempotency_key = Column(String, nullable=True, index=True)
 
     account = relationship("Account", back_populates="transactions")
 
@@ -106,3 +107,19 @@ class AutoPayment(Base):
     is_active = Column(Boolean, default=True, index=True)
 
     account = relationship("Account", back_populates="auto_payments")
+
+
+class IdempotencyRecord(Base):
+    """
+    Таблица дедупликации и кэширования идемпотентных запросов перевода средств.
+    """
+    __tablename__ = "idempotency_records"
+    id = Column(String, primary_key=True, default=generate_uuid)
+    key = Column(String, unique=True, nullable=False, index=True)
+    from_account_id = Column(String, ForeignKey("accounts.id"), nullable=False, index=True)
+    to_account_id = Column(String, ForeignKey("accounts.id"), nullable=False, index=True)
+    amount = Column(EncryptedDecimal, nullable=False)
+    transaction_id = Column(String, ForeignKey("transactions.id"), nullable=False, index=True)
+    response_payload = Column(EncryptedText, nullable=True)
+    created_at = Column(DateTime, default=get_moscow_now)
+

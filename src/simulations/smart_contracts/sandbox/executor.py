@@ -93,7 +93,7 @@ class SecurityASTVisitor(ast.NodeVisitor):
             raise SandboxExecutionError("Битовые сдвиги запрещены в смарт-контрактах (DoS protection)")
         if isinstance(node.op, ast.Mult):
             for val_node, mul_node in [(node.left, node.right), (node.right, node.left)]:
-                if isinstance(val_node, (ast.List, ast.Tuple)) or (
+                if isinstance(val_node, (ast.List, ast.Tuple, ast.BinOp)) or (
                     isinstance(val_node, ast.Constant) and isinstance(val_node.value, str)
                 ):
                     if (

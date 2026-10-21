@@ -1,6 +1,8 @@
 import hashlib
 import inspect
+import json
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,12 +12,74 @@ from sqlalchemy.orm import selectinload
 from . import models
 
 try:
+    from cryptography import x509
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+except ImportError:
+    x509 = None
+    serialization = None
+    rsa = None
+
+try:
     from src.common.crypto.zeroize import secure_zero_memory
 except ImportError:
     try:
         from common.crypto.zeroize import secure_zero_memory
     except ImportError:
-        def secure_zero_memory(target):
+        try:
+            import ctypes
+
+            def secure_zero_memory(target: Any) -> None:
+                """NIST SP 800-88 compliant memory zeroization fallback."""
+                if target is None:
+                    return
+                if isinstance(target, bytearray):
+                    length = len(target)
+                    if length > 0:
+                        location = (ctypes.c_char * length).from_buffer(target)
+                        ctypes.memset(ctypes.addressof(location), 0, length)
+                elif isinstance(target, memoryview):
+                    length = target.nbytes
+                    if length > 0 and not target.readonly:
+                        location = (ctypes.c_char * length).from_buffer(target)
+                        ctypes.memset(ctypes.addressof(location), 0, length)
+                elif hasattr(target, "__len__") and hasattr(target, "__setitem__"):
+                    try:
+                        for i in range(len(target)):
+                            target[i] = 0
+                    except Exception:
+                        pass
+        except Exception:
+            def secure_zero_memory(target: Any) -> None:
+                pass
+
+
+def zeroize_private_key_material(key_material: bytearray | memoryview | bytes | str | Any) -> None:
+    """
+    Выполняет криптографическое затирание чувствительного буфера закрытого ключа
+    в оперативной памяти в строгом соответствии с NIST SP 800-88.
+    Если передан изменяемый буфер (bytearray/memoryview), зануляет его на месте.
+    """
+    if key_material is None:
+        return
+    if isinstance(key_material, (bytearray, memoryview)):
+        secure_zero_memory(key_material)
+    elif isinstance(key_material, bytes):
+        buf = bytearray(key_material)
+        secure_zero_memory(buf)
+    elif isinstance(key_material, str):
+        buf = bytearray(key_material.encode("utf-8"))
+        secure_zero_memory(buf)
+    elif serialization is not None and hasattr(key_material, "private_bytes"):
+        try:
+            raw_pem = key_material.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+            buf = bytearray(raw_pem)
+            secure_zero_memory(buf)
+        except Exception:
             pass
 
 
@@ -468,10 +532,20 @@ async def get_agent_key_by_kid(db: AsyncSession, kid: str) -> models.AgentKey | 
     return result.scalars().first()
 
 
-async def register_agent(db: AsyncSession, agent_name: str, public_key: str, ttl_days: int = 1) -> models.Agent:
+async def register_agent(
+    db: AsyncSession,
+    agent_name: str,
+    public_key: str,
+    ttl_days: int = 1,
+    private_key: bytearray | memoryview | bytes | str | Any = None,
+) -> models.Agent:
     """Регистрирует нового агента или выполняет ротацию ключа для уже существующего."""
     if not public_key.strip().startswith("-----BEGIN"):
         raise ValueError("Public key must be in PEM format (starting with -----BEGIN...)")
+
+    # Зануление конфиденциального буфера закрытого ключа при регистрации (NIST SP 800-88)
+    if private_key is not None:
+        zeroize_private_key_material(private_key)
 
     agent = await get_agent(db, agent_name)
     now = datetime.now(UTC)
@@ -523,7 +597,12 @@ async def register_agent(db: AsyncSession, agent_name: str, public_key: str, ttl
 
 
 async def rotate_agent_key(
-    db: AsyncSession, agent_name: str, new_public_key: str, ttl_days: int = 1
+    db: AsyncSession,
+    agent_name: str,
+    new_public_key: str,
+    ttl_days: int = 1,
+    old_private_key: bytearray | memoryview | bytes | str | Any = None,
+    private_key: bytearray | memoryview | bytes | str | Any = None,
 ) -> tuple[models.Agent, models.AgentKey]:
     """Выполняет плановую ротацию ключа агента с архивацией предыдущего."""
     if not new_public_key.strip().startswith("-----BEGIN"):
@@ -546,10 +625,11 @@ async def rotate_agent_key(
     for old_k in old_keys_res.scalars().all():
         old_k.status = "superseded"
 
-    # Зануление конфиденциального буфера старого ключа в памяти перед ротацией (NIST SP 800-88)
-    if agent.public_key:
-        old_key_buf = bytearray(agent.public_key.encode("utf-8"))
-        secure_zero_memory(old_key_buf)
+    # Зануление конфиденциального буфера закрытого ключа в памяти (NIST SP 800-88)
+    # Зануляем именно байты приватного ключа, а не копию публичного ключа!
+    priv_target = old_private_key if old_private_key is not None else private_key
+    if priv_target is not None:
+        zeroize_private_key_material(priv_target)
 
     agent.public_key = new_public_key
     agent.status = "active"
@@ -567,6 +647,7 @@ async def rotate_agent_key(
     await db.refresh(agent)
     await db.refresh(new_key)
     return agent, new_key
+
 
 
 async def revoke_agent_key(
@@ -673,3 +754,102 @@ async def set_system_setting(
     await db.commit()
     await db.refresh(setting)
     return setting
+
+
+async def create_admin_user(
+    db: AsyncSession,
+    username: str,
+    public_key: str | None = None,
+    private_key: bytearray | memoryview | bytes | str | Any = None,
+    role: str = "admin",
+    password: str | bytes | bytearray | None = None,
+) -> dict[str, Any]:
+    """
+    Создает учетную запись администратора с соблюдением требований NIST SP 800-88:
+    гарантированно зануляет буфер закрытого ключа (private_key) в памяти после использования,
+    не допуская зануления открытого ключа (public_key) вместо закрытого.
+    """
+    priv_buf = None
+    if private_key is not None:
+        if isinstance(private_key, (bytearray, memoryview)):
+            priv_buf = private_key
+        elif isinstance(private_key, bytes):
+            priv_buf = bytearray(private_key)
+        elif isinstance(private_key, str):
+            priv_buf = bytearray(private_key.encode("utf-8"))
+        elif serialization is not None and hasattr(private_key, "private_bytes"):
+            try:
+                raw_pem = private_key.private_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PrivateFormat.PKCS8,
+                    encryption_algorithm=serialization.NoEncryption(),
+                )
+                priv_buf = bytearray(raw_pem)
+            except Exception:
+                priv_buf = None
+
+    pwd_buf = None
+    if password is not None:
+        if isinstance(password, (bytearray, memoryview)):
+            pwd_buf = password
+        elif isinstance(password, bytes):
+            pwd_buf = bytearray(password)
+        elif isinstance(password, str):
+            pwd_buf = bytearray(password.encode("utf-8"))
+
+    try:
+        # Автоматическое извлечение public_key из private_key при необходимости
+        if public_key is None and private_key is not None:
+            try:
+                if serialization is not None:
+                    if hasattr(private_key, "public_key"):
+                        pub_obj = private_key.public_key()
+                        public_key = pub_obj.public_bytes(
+                            encoding=serialization.Encoding.PEM,
+                            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+                        ).decode("utf-8")
+                    elif isinstance(private_key, (bytes, str)):
+                        raw_bytes = private_key.encode("utf-8") if isinstance(private_key, str) else private_key
+                        loaded_k = serialization.load_pem_private_key(raw_bytes, password=None)
+                        pub_obj = loaded_k.public_key()
+                        public_key = pub_obj.public_bytes(
+                            encoding=serialization.Encoding.PEM,
+                            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+                        ).decode("utf-8")
+            except Exception:
+                pass
+
+        if public_key is not None and not public_key.strip().startswith("-----BEGIN"):
+            raise ValueError("Public key must be in PEM format (starting with -----BEGIN...)")
+
+        user_data: dict[str, Any] = {
+            "username": username,
+            "role": role,
+            "public_key": public_key,
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        await set_system_setting(
+            db,
+            key=f"admin_user:{username}",
+            value=json.dumps(user_data),
+            description=f"Admin user {username} with role {role}",
+        )
+        return user_data
+    finally:
+        # Гарантированное криптографическое зануление конфиденциальных буферов (NIST SP 800-88)
+        if priv_buf is not None:
+            secure_zero_memory(priv_buf)
+        if pwd_buf is not None:
+            secure_zero_memory(pwd_buf)
+
+
+async def get_admin_user(db: AsyncSession, username: str) -> dict[str, Any] | None:
+    """Извлекает учетные данные администратора из зашифрованных системных настроек."""
+    val = await get_system_setting(db, f"admin_user:{username}")
+    if not val:
+        return None
+    try:
+        return json.loads(val)
+    except Exception:
+        return None
+

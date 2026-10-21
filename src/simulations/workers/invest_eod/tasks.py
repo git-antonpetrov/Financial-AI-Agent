@@ -1,4 +1,6 @@
+import inspect
 import random
+from contextlib import asynccontextmanager
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -21,6 +23,26 @@ from src.simulations.db.invest.db.models import (
     Deposit,
     SavingsAccount,
 )
+
+
+@asynccontextmanager
+async def _item_savepoint(session: AsyncSession):
+    """
+    Создает изолированный вложенный savepoint (session.begin_nested()) для обработки отдельного элемента.
+    Предотвращает откат всей транзакции при сбое на одном элементе.
+    """
+    if hasattr(session, "begin_nested"):
+        nested = session.begin_nested()
+        if hasattr(nested, "__aenter__"):
+            async with nested:
+                yield
+            return
+        elif inspect.iscoroutine(nested):
+            nested.close()
+            yield
+            return
+    yield
+
 
 
 async def return_deposit_to_bank(client_id: str, deposit_number: str, amount: Decimal) -> bool:
@@ -111,17 +133,22 @@ async def process_savings_accounts(session: AsyncSession, current_date: date) ->
 
     processed = 0
     for acc in accounts:
-        if acc.next_payment_amount and Decimal(str(acc.next_payment_amount)) > Decimal("0.00"):
-            # Выплачиваем проценты (капитализация)
-            acc.balance = Decimal(str(acc.balance)) + Decimal(str(acc.next_payment_amount))
+        try:
+            async with _item_savepoint(session):
+                if acc.next_payment_amount and Decimal(str(acc.next_payment_amount)) > Decimal("0.00"):
+                    # Выплачиваем проценты (капитализация)
+                    acc.balance = Decimal(str(acc.balance)) + Decimal(str(acc.next_payment_amount))
 
-        # Считаем сумму следующей выплаты: баланс * (ставка / 100) / 12 месяцев
-        monthly_rate = Decimal(str(acc.interest_rate)) / Decimal(100) / Decimal(12)
-        acc.next_payment_amount = (Decimal(str(acc.balance)) * monthly_rate).quantize(Decimal("0.01"))
+                # Считаем сумму следующей выплаты: баланс * (ставка / 100) / 12 месяцев
+                monthly_rate = Decimal(str(acc.interest_rate)) / Decimal(100) / Decimal(12)
+                acc.next_payment_amount = (Decimal(str(acc.balance)) * monthly_rate).quantize(Decimal("0.01"))
 
-        # Сдвигаем дату на 1 месяц вперед
-        acc.next_payment_date = acc.next_payment_date + relativedelta(months=1)
-        processed += 1
+                # Сдвигаем дату на 1 месяц вперед
+                acc.next_payment_date = acc.next_payment_date + relativedelta(months=1)
+                processed += 1
+        except Exception as e:
+            log_error("Invest EOD", f"Ошибка при обработке накопительного счета {acc.id}: {e}")
+            continue
 
     await session.commit()
     log_info("Invest EOD", f"Успешно обработано накопительных счетов: {processed}")
@@ -145,37 +172,42 @@ async def process_deposits(session: AsyncSession, current_date: date) -> None:
     processed = 0
     closed = 0
     for dep in deposits:
-        if dep.next_payment_amount and Decimal(str(dep.next_payment_amount)) > Decimal("0.00"):
-            dep.balance = Decimal(str(dep.balance)) + Decimal(str(dep.next_payment_amount))
+        try:
+            async with _item_savepoint(session):
+                if dep.next_payment_amount and Decimal(str(dep.next_payment_amount)) > Decimal("0.00"):
+                    dep.balance = Decimal(str(dep.balance)) + Decimal(str(dep.next_payment_amount))
 
-        monthly_rate = Decimal(str(dep.interest_rate)) / Decimal(100) / Decimal(12)
-        dep.next_payment_amount = (Decimal(str(dep.balance)) * monthly_rate).quantize(Decimal("0.01"))
+                monthly_rate = Decimal(str(dep.interest_rate)) / Decimal(100) / Decimal(12)
+                dep.next_payment_amount = (Decimal(str(dep.balance)) * monthly_rate).quantize(Decimal("0.01"))
 
-        # Проверяем не истек ли срок вклада
-        if dep.opened_at:
-            maturity_date = dep.opened_at.date() + relativedelta(months=int(dep.term_months))
-        else:
-            maturity_date = current_date + relativedelta(months=1)
+                # Проверяем не истек ли срок вклада
+                if dep.opened_at:
+                    maturity_date = dep.opened_at.date() + relativedelta(months=int(dep.term_months))
+                else:
+                    maturity_date = current_date + relativedelta(months=1)
 
-        if current_date >= maturity_date:
-            amount_to_return = Decimal(str(dep.balance))
-            refund_ok = await return_deposit_to_bank(
-                client_id=dep.client_id,
-                deposit_number=dep.account_number,
-                amount=amount_to_return,
-            )
-            if refund_ok:
-                dep.balance = Decimal("0.00")
-                dep.status = "closed"
-                closed += 1
-            else:
-                log_error(
-                    "Invest EOD",
-                    f"Закрытие вклада {dep.account_number} отложено: не удалось перевести средства на банковский счет",
-                )
-        else:
-            dep.next_payment_date = dep.next_payment_date + relativedelta(months=1)
-        processed += 1
+                if current_date >= maturity_date:
+                    amount_to_return = Decimal(str(dep.balance))
+                    refund_ok = await return_deposit_to_bank(
+                        client_id=dep.client_id,
+                        deposit_number=dep.account_number,
+                        amount=amount_to_return,
+                    )
+                    if refund_ok:
+                        dep.balance = Decimal("0.00")
+                        dep.status = "closed"
+                        closed += 1
+                    else:
+                        log_error(
+                            "Invest EOD",
+                            f"Закрытие вклада {dep.account_number} отложено: ошибка перевода на банковский счет",
+                        )
+                else:
+                    dep.next_payment_date = dep.next_payment_date + relativedelta(months=1)
+                processed += 1
+        except Exception as e:
+            log_error("Invest EOD", f"Ошибка при обработке депозита {dep.id}: {e}")
+            continue
 
     await session.commit()
     log_info(
@@ -205,42 +237,46 @@ async def process_broker_accounts(session: AsyncSession, current_date: date) -> 
 
     processed = 0
     for acc in accounts:
-        if not acc.strategy:
-            # Если нет стратегии, просто сдвигаем дату, деньги лежат мертвым грузом
-            acc.next_commission_date = acc.next_commission_date + relativedelta(months=1)
+        try:
+            async with _item_savepoint(session):
+                if not acc.strategy:
+                    # Если нет стратегии, просто сдвигаем дату, деньги лежат мертвым грузом
+                    acc.next_commission_date = acc.next_commission_date + relativedelta(months=1)
+                    continue
+
+                # Генерация рыночного шума на основе риск-профиля
+                strategy = acc.strategy
+                base_monthly_yield = Decimal(str(strategy.expected_yield)) / Decimal(12)
+
+                # Задаем разброс (шум) в зависимости от риска
+                risk_noise = {
+                    "Low": Decimal("0.5"),  # +- 0.5% колебания
+                    "Medium": Decimal("2.0"),  # +- 2.0% колебания
+                    "High": Decimal("5.0"),  # +- 5.0% колебания (может уйти в сильный минус)
+                }
+                noise_level = risk_noise.get(strategy.risk_level, Decimal("1.0"))
+                noise = Decimal(str(round(random.uniform(-float(noise_level), float(noise_level)), 4)))
+                actual_monthly_yield = base_monthly_yield + noise
+
+                # Считаем доход за прошедший месяц
+                income = (Decimal(str(acc.balance)) * (actual_monthly_yield / Decimal(100))).quantize(Decimal("0.01"))
+                acc.monthly_income = income
+
+                # Применяем доход к балансу (он может быть и отрицательным!)
+                acc.balance = Decimal(str(acc.balance)) + acc.monthly_income
+
+                # Если месяц закрыт в плюс, берем комиссию за успех (Success Fee)
+                if acc.monthly_income > Decimal("0.00"):
+                    rate = Decimal(str(strategy.commission_fee)) / Decimal(100)
+                    fee = (Decimal(str(acc.monthly_income)) * rate).quantize(Decimal("0.01"))
+                    acc.balance = Decimal(str(acc.balance)) - fee
+
+                # Сдвигаем дату следующего расчета
+                acc.next_commission_date = acc.next_commission_date + relativedelta(months=1)
+                processed += 1
+        except Exception as e:
+            log_error("Invest EOD", f"Ошибка при обработке брокерского счета {acc.id}: {e}")
             continue
-
-        # Генерация рыночного шума на основе риск-профиля
-        strategy = acc.strategy
-        base_monthly_yield = Decimal(str(strategy.expected_yield)) / Decimal(12)
-
-        # Задаем разброс (шум) в зависимости от риска
-        risk_noise = {
-            "Low": Decimal("0.5"),  # +- 0.5% колебания
-            "Medium": Decimal("2.0"),  # +- 2.0% колебания
-            "High": Decimal("5.0"),  # +- 5.0% колебания (может уйти в сильный минус)
-        }
-        noise_level = risk_noise.get(strategy.risk_level, Decimal("1.0"))
-        noise = Decimal(str(round(random.uniform(-float(noise_level), float(noise_level)), 4)))
-        actual_monthly_yield = base_monthly_yield + noise
-
-        # Считаем доход за прошедший месяц
-        income = (Decimal(str(acc.balance)) * (actual_monthly_yield / Decimal(100))).quantize(Decimal("0.01"))
-        acc.monthly_income = income
-
-        # Применяем доход к балансу (он может быть и отрицательным!)
-        acc.balance = Decimal(str(acc.balance)) + acc.monthly_income
-
-        # Если месяц закрыт в плюс, берем комиссию за успех (Success Fee)
-        if acc.monthly_income > Decimal("0.00"):
-            fee = (Decimal(str(acc.monthly_income)) * (Decimal(str(strategy.commission_fee)) / Decimal(100))).quantize(
-                Decimal("0.01")
-            )
-            acc.balance = Decimal(str(acc.balance)) - fee
-
-        # Сдвигаем дату следующего расчета
-        acc.next_commission_date = acc.next_commission_date + relativedelta(months=1)
-        processed += 1
 
     await session.commit()
     log_info("Invest EOD", f"Обработано брокерских счетов (по стратегиям): {processed}")

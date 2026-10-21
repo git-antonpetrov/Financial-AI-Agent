@@ -198,7 +198,8 @@ class X509ChainValidator:
                     "сертификатов (KeyUsage: key_cert_sign=False)"
                 )
         except x509.ExtensionNotFound:
-            pass
+            if is_ca:
+                return False, "Сертификат издателя не содержит обязательного расширения KeyUsage (key_cert_sign)"
 
         # 4. Проверка статуса CA для проверяемого сертификата (Leaf vs Intermediate CA)
         try:
@@ -235,6 +236,14 @@ class X509ChainValidator:
                         False,
                         "Сертификат конечного узла должен обладать "
                         "полномочием цифровой подписи (digital_signature=True)",
+                    )
+                if getattr(leaf_ku, "key_cert_sign", False):
+                    return (
+                        False,
+                        (
+                            "Сертификат конечного узла не может обладать полномочиями "
+                            "подписи сертификатов (key_cert_sign=True запрещен)"
+                        ),
                     )
         except x509.ExtensionNotFound:
             if is_ca:

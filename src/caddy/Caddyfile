@@ -42,7 +42,7 @@
         header_up X-Real-IP {remote_host}
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto https
-        header_up X-Proxy-Secret "{$PROXY_INTERNAL_SECRET:financial-core-proxy-token-2026}"
+        header_up X-Proxy-Secret "{$PROXY_INTERNAL_SECRET}"
         header_up X-Client-Cert-Verify {tls_client_verified}
         header_up X-Client-Cert-Subject {tls_client_subject}
         header_up X-Client-Cert-Issuer {tls_client_issuer}
@@ -64,7 +64,7 @@ simulation-api.internal, bank-service.internal {
     @external not remote_ip 172.16.0.0/12 10.0.0.0/8 192.168.0.0/16 127.0.0.1 ::1
     abort @external
 
-    tls {
+    tls internal {
         protocols tls1.3
         client_auth {
             mode {$CADDY_CLIENT_AUTH_MODE:require_and_verify}
@@ -90,7 +90,7 @@ simulation-api.internal, bank-service.internal {
         header_up X-Real-IP {remote_host}
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto https
-        header_up X-Proxy-Secret "{$PROXY_INTERNAL_SECRET:financial-core-proxy-token-2026}"
+        header_up X-Proxy-Secret "{$PROXY_INTERNAL_SECRET}"
 
         transport http {
             response_header_timeout 60s
@@ -106,7 +106,7 @@ admin-server.internal {
     @external not remote_ip 172.16.0.0/12 10.0.0.0/8 192.168.0.0/16 127.0.0.1 ::1
     abort @external
 
-    tls {
+    tls internal {
         protocols tls1.3
         client_auth {
             mode {$CADDY_CLIENT_AUTH_MODE:require_and_verify}
@@ -133,7 +133,7 @@ admin-server.internal {
         header_up X-Real-IP {remote_host}
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto https
-        header_up X-Proxy-Secret "{$PROXY_INTERNAL_SECRET:financial-core-proxy-token-2026}"
+        header_up X-Proxy-Secret "{$PROXY_INTERNAL_SECRET}"
         header_up X-Client-Cert-Verify {tls_client_verified}
         header_up X-Client-Cert-Subject {tls_client_subject}
         header_up X-Client-Cert-Issuer {tls_client_issuer}

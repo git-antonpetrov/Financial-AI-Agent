@@ -596,7 +596,11 @@ async def login(
             try:
                 await crud.set_system_setting(
                     db,
-                    key="ADMIN_TOTP_SECRET",
+                    key=(
+                        "ADMIN_TOTP_SECRET"
+                        if form_data.username.lower() == "admin"
+                        else f"{form_data.username.upper()}_TOTP_SECRET"
+                    ),
                     value=pending_secret,
                     description="Admin TOTP 2FA secret (AES-256-GCM encrypted)",
                 )
@@ -605,7 +609,8 @@ async def login(
                     "Auth",
                     f"Не удалось персистентно сохранить 2FA секрет в БД (fallback): {e}",
                 )
-            settings.ADMIN_TOTP_SECRET = pending_secret
+            if form_data.username.lower() == "admin":
+                settings.ADMIN_TOTP_SECRET = pending_secret
             clear_pending_totp_secret(form_data.username, redis_conn=redis_client)
             await audit.log_audit_event(
                 db,
@@ -747,8 +752,14 @@ async def pair_2fa(
     ЛИБО если передан валидный токен восстановления / bootstrap-токен.
     Защищен ограничением частоты запросов (rate limiting) и аудитом.
     """
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = get_client_ip(request)
     failed_key = f"failed_logins:{client_ip}"
+    if not check_rate_limit(f"2fa_pair:{client_ip}", max_requests=10, window_seconds=60):
+        log_warning("Auth", f"Too many 2FA pair attempts from IP: {client_ip} (In-Memory)")
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many requests. Please try again later.",
+        )
 
     # Защита от брутфорса
     if redis_client:

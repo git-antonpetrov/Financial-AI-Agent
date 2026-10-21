@@ -1,8 +1,9 @@
+import json
 import random
 from datetime import date
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +25,7 @@ from src.simulations.db.bank.db.models import (
     Account,
     AutoPayment,
     Card,
+    IdempotencyRecord,
     Tariff,
     Transaction,
 )
@@ -75,10 +77,13 @@ class TransferRequest(BaseModel):
     """
 
     from_account_id: str
+    to_account_id: str | None = None
     amount: Decimal = Field(..., gt=Decimal("0.00"), description="Сумма перевода (строго больше нуля)")
     transfer_type: str  # Типы: 'account', 'phone', 'card'
     destination: str  # Номер счета, номер телефона или номер карты
     description: str | None = None
+    idempotency_key: str | None = None
+
 
 
 class AutoPaymentCreate(BaseModel):
@@ -332,27 +337,77 @@ async def transfer_money(
     data: TransferRequest,
     request: Request = None,
     response: Response = None,
+    x_idempotency_key: str | None = Header(None, alias="X-Idempotency-Key"),
 ):
     """
     Универсальный эндпоинт для перевода средств внутри банка.
     Поддерживает переводы по номеру счета, карты или телефона.
+    Реализует строгую идемпотентность через заголовок X-Idempotency-Key или поле idempotency_key.
     Использует пессимистическую блокировку строк (SELECT FOR UPDATE)
     в детерминированном порядке ID для защиты от состояния гонки и взаимных блокировок.
+    Проверка и валидация счета получателя выполняются безопасно внутри заблокированной транзакции.
     Подписывает сформированный чек-ответ приватным ключом Банка (Блок 5 схемы arch.txt).
     """
+    effective_idempotency_key = None
+    if data.idempotency_key:
+        effective_idempotency_key = str(data.idempotency_key).strip()
+    elif request is not None and request.headers.get("X-Idempotency-Key"):
+        effective_idempotency_key = str(request.headers.get("X-Idempotency-Key")).strip()
+    elif isinstance(x_idempotency_key, str) and x_idempotency_key:
+        effective_idempotency_key = x_idempotency_key.strip()
+
     async with get_db() as db:
+        # 1. Проверка идемпотентности: возврат кэшированного ответа без повторного списания
+        if effective_idempotency_key:
+            existing_rec = await db.scalar(
+                select(IdempotencyRecord).where(IdempotencyRecord.key == effective_idempotency_key)
+            )
+            if existing_rec:
+                log_info(
+                    "BankAPI",
+                    f"Идемпотентный повтор запроса: кэш для ключа {effective_idempotency_key}",
+                )
+                cached_data = json.loads(existing_rec.response_payload)
+                if response is not None and "signed_receipt" in cached_data:
+                    receipt = cached_data["signed_receipt"]
+                    if isinstance(receipt, dict):
+                        if "signature" in receipt:
+                            response.headers["X-Bank-Signature"] = receipt["signature"]
+                        if receipt.get("cert_fingerprint"):
+                            response.headers["X-Bank-Cert-Fingerprint"] = receipt["cert_fingerprint"]
+                        if receipt.get("bank_cert_serial"):
+                            response.headers["X-Bank-Cert-Serial"] = str(receipt["bank_cert_serial"])
+                return cached_data
+
+            existing_tx = await db.scalar(
+                select(Transaction).where(
+                    Transaction.idempotency_key == effective_idempotency_key,
+                    Transaction.category == "expense",
+                )
+            )
+            if existing_tx:
+                log_info(
+                    "BankAPI",
+                    f"Идемпотентный повтор: найдена транзакция {existing_tx.id} для ключа {effective_idempotency_key}",
+                )
+                return {
+                    "status": "success",
+                    "transaction_id": existing_tx.id,
+                    "idempotent_replay": True,
+                }
+
         receiver_acc = None
 
-        # Поиск счета получателя в зависимости от типа перевода
-        if data.transfer_type == "account":
+        # Определение целевого счета для взаимной блокировки
+        if data.to_account_id:
+            receiver_acc = await db.scalar(select(Account).where(Account.id == data.to_account_id))
+        elif data.transfer_type == "account":
             receiver_acc = await db.scalar(select(Account).where(Account.account_number == data.destination))
         elif data.transfer_type == "card":
             card = await db.scalar(select(Card).where(Card.card_number == data.destination))
             if card:
                 receiver_acc = await db.scalar(select(Account).where(Account.id == card.account_id))
         elif data.transfer_type == "phone":
-            # Для симуляции предполагаем, что номер телефона совпадает с client_id
-            # Выбираем активный рублевый счет клиента
             receiver_acc = await db.scalar(
                 select(Account)
                 .where(
@@ -363,7 +418,6 @@ async def transfer_money(
                 .order_by(Account.created_at.asc())
             )
             if not receiver_acc:
-                # Проверяем, существует ли клиент вообще
                 client_exists = await db.scalar(select(Account.id).where(Account.client_id == data.destination))
                 if client_exists:
                     log_error(
@@ -386,6 +440,7 @@ async def transfer_money(
             log_error("BankAPI", f"Попытка самоперевода на счет {data.from_account_id}")
             raise HTTPException(400, "Перевод на тот же самый счет невозможен")
 
+        # Детерминированный порядок блокировки для предотвращения взаимных блокировок (deadlocks)
         lock_ids = sorted([str(data.from_account_id), str(receiver_acc.id)])
         accounts_res = await db.execute(
             select(Account).where(Account.id.in_(lock_ids)).order_by(Account.id).with_for_update()
@@ -400,6 +455,10 @@ async def transfer_money(
         if not receiver:
             raise HTTPException(404, "Счет получателя не найден")
 
+        # Повторная валидация состояния обоих счетов строго внутри атомарной блокировки (with_for_update)
+        if str(sender.id) == str(receiver.id):
+            raise HTTPException(400, "Перевод на тот же самый счет невозможен")
+
         if sender.status and sender.status != "active":
             raise HTTPException(
                 400,
@@ -411,6 +470,14 @@ async def transfer_money(
                 400,
                 f"Счет получателя недоступен для перевода (статус: {receiver.status})",
             )
+
+        # Валидация неизменности реквизитов получателя под блокировкой
+        if data.transfer_type == "phone":
+            if receiver.currency != "RUB" or receiver.status != "active":
+                raise HTTPException(
+                    400,
+                    "У получателя отсутствуют активные рублевые счета для зачисления перевода",
+                )
 
         if sender.currency != receiver.currency:
             raise HTTPException(
@@ -431,13 +498,14 @@ async def transfer_money(
         sender.balance = sender_balance - data.amount
         receiver.balance = Decimal(str(receiver.balance)) + data.amount
 
-        # Запись транзакций для истории
+        # Запись транзакций для истории с фиксацией ключа идемпотентности
         tx_out = Transaction(
             account_id=sender.id,
             category="expense",
             operation_type=f"transfer_out_{data.transfer_type}",
             amount=data.amount,
             description=data.description or f"Перевод получателю: {data.destination}",
+            idempotency_key=effective_idempotency_key,
         )
         tx_in = Transaction(
             account_id=receiver.id,
@@ -445,13 +513,11 @@ async def transfer_money(
             operation_type=f"transfer_in_{data.transfer_type}",
             amount=data.amount,
             description=data.description or f"Перевод от: {sender.account_number}",
+            idempotency_key=effective_idempotency_key,
         )
 
         db.add(tx_out)
         db.add(tx_in)
-        await db.commit()
-
-        log_success("BankAPI", f"Успешный перевод {data.amount} от {sender.id} к {receiver.id}")
 
         # Криптографическое подписание чека приватным ключом Банка (Блок 5 схемы arch.txt)
         request_nonce = None
@@ -469,14 +535,35 @@ async def transfer_money(
             },
             request_nonce=request_nonce,
         )
+
+        result_payload = {
+            "status": "success",
+            "transaction_id": tx_out.id,
+            "signed_receipt": receipt,
+        }
+
+        # Сохранение записи идемпотентности в выделенную таблицу
+        if effective_idempotency_key:
+            idemp_rec = IdempotencyRecord(
+                key=effective_idempotency_key,
+                from_account_id=sender.id,
+                to_account_id=receiver.id,
+                amount=data.amount,
+                transaction_id=tx_out.id,
+                response_payload=json.dumps(result_payload),
+            )
+            db.add(idemp_rec)
+
+        await db.commit()
+
+        log_success("BankAPI", f"Успешный перевод {data.amount} от {sender.id} к {receiver.id}")
+
         if response is not None:
             response.headers["X-Bank-Signature"] = receipt["signature"]
             if receipt.get("cert_fingerprint"):
                 response.headers["X-Bank-Cert-Fingerprint"] = receipt["cert_fingerprint"]
             if receipt.get("bank_cert_serial"):
                 response.headers["X-Bank-Cert-Serial"] = str(receipt["bank_cert_serial"])
-        return {
-            "status": "success",
-            "transaction_id": tx_out.id,
-            "signed_receipt": receipt,
-        }
+
+        return result_payload
+

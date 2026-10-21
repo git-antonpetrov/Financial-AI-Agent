@@ -290,6 +290,32 @@ def bootstrap_pki(
     if (export_path / "enclave_ca.key").exists():
         shutil.copyfile(export_path / "enclave_ca.key", enclave_dir / "enclave_ca.key")
 
+    # postgres_certs: изолированное хранилище ключей и сертификатов PostgreSQL (SEC-02)
+    postgres_dir = export_path / "postgres_certs"
+    postgres_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(export_path / "ca.crt", postgres_dir / "ca.crt")
+    shutil.copyfile(export_path / "postgres.crt", postgres_dir / "postgres.crt")
+    shutil.copyfile(export_path / "postgres.key", postgres_dir / "postgres.key")
+
+    # redis_certs: изолированное хранилище ключей и сертификатов Redis (SEC-02)
+    redis_dir = export_path / "redis_certs"
+    redis_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(export_path / "ca.crt", redis_dir / "ca.crt")
+    shutil.copyfile(export_path / "redis.crt", redis_dir / "redis.crt")
+    shutil.copyfile(export_path / "redis.key", redis_dir / "redis.key")
+
+    # minio_certs: изолированное хранилище ключей и сертификатов MinIO (SEC-02)
+    minio_export_dir = export_path / "minio_certs"
+    minio_export_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(export_path / "ca.crt", minio_export_dir / "ca.crt")
+    minio_sub = minio_export_dir / "minio"
+    minio_sub.mkdir(parents=True, exist_ok=True)
+    minio_sub_cas = minio_sub / "CAs"
+    minio_sub_cas.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(export_path / "minio.crt", minio_sub / "public.crt")
+    shutil.copyfile(export_path / "minio.key", minio_sub / "private.key")
+    shutil.copyfile(export_path / "ca.crt", minio_sub_cas / "ca.crt")
+
     # admin_client_certs: изолированное хранилище ключей супер-администратора
     admin_client_dir = export_path / "admin_client_certs"
     admin_client_dir.mkdir(parents=True, exist_ok=True)
@@ -313,6 +339,18 @@ def bootstrap_pki(
             admin_client_dir,
             ["ca.crt", "admin_client.crt", "admin_client.key"],
         ),
+        "POSTGRES_CERTS_DIR": (
+            postgres_dir,
+            ["ca.crt", "postgres.crt", "postgres.key"],
+        ),
+        "REDIS_CERTS_DIR": (
+            redis_dir,
+            ["ca.crt", "redis.crt", "redis.key"],
+        ),
+        "MINIO_CERTS_DIR": (
+            minio_export_dir,
+            ["ca.crt"],
+        ),
     }
     for env_var, (src_d, file_list) in dedicated_mounts.items():
         dst_path_str = os.getenv(env_var)
@@ -334,6 +372,9 @@ def bootstrap_pki(
             "bank.key",
             "admin_server.key",
             "server.key",
+            "postgres.key",
+            "redis.key",
+            "minio.key",
         ]:
             target_f = export_path / f_to_remove
             if target_f.exists():

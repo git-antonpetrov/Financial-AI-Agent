@@ -233,90 +233,96 @@ async def submit_rag_document(
         )
 
     # 3. Разрешение и строгая Zero-Trust валидация клиентского сертификата X.509
-    raw_cert = (
-        x_agent_cert
-        or x_cert
-        or request.headers.get("x-agent-cert")
-        or request.headers.get("x-client-cert")
-        or request.headers.get("x-client-cert-pem")
-    )
-    if not raw_cert:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Клиентский сертификат X.509 обязателен (отсутствует заголовок X-Cert / X-Agent-Cert)",
+    try:
+        raw_cert = (
+            x_agent_cert
+            or x_cert
+            or request.headers.get("x-agent-cert")
+            or request.headers.get("x-client-cert")
+            or request.headers.get("x-client-cert-pem")
+        )
+        if not raw_cert:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Клиентский сертификат X.509 обязателен (отсутствует заголовок X-Cert / X-Agent-Cert)",
+            )
+
+        # Строгая серверная проверка:
+        # 1. Формат X.509
+        # 2. Срок действия (NotBefore <= now <= NotAfter)
+        # 3. Запрет самоподписанных (Subject == Issuer)
+        # 4. Проверка цепочки доверия Root CA
+        # 5. Проверка отзыва в Redis (CRL: serial dec/hex, fingerprint, subject CN)
+        leaf_cert, client_pub_key = validate_x509_certificate_chain(
+            cert_input=raw_cert, enclave_cert_input=x_enclave_cert, redis_conn=redis_client
         )
 
-    # Строгая серверная проверка:
-    # 1. Формат X.509
-    # 2. Срок действия (NotBefore <= now <= NotAfter)
-    # 3. Запрет самоподписанных (Subject == Issuer)
-    # 4. Проверка цепочки доверия Root CA
-    # 5. Проверка отзыва в Redis (CRL: serial dec/hex, fingerprint, subject CN)
-    leaf_cert, client_pub_key = validate_x509_certificate_chain(
-        cert_input=raw_cert, enclave_cert_input=x_enclave_cert, redis_conn=redis_client
-    )
+        # 3.1. Zero-Trust авторизация роли и субъекта сертификата
+        from cryptography.x509.oid import NameOID
 
-    # 3.1. Zero-Trust авторизация роли и субъекта сертификата
-    from cryptography.x509.oid import NameOID
+        leaf_subject_str = leaf_cert.subject.rfc4514_string()
+        leaf_ous = [attr.value for attr in leaf_cert.subject.get_attributes_for_oid(NameOID.ORGANIZATIONAL_UNIT_NAME)]
+        leaf_cns = [attr.value for attr in leaf_cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)]
 
-    leaf_subject_str = leaf_cert.subject.rfc4514_string()
-    leaf_ous = [attr.value for attr in leaf_cert.subject.get_attributes_for_oid(NameOID.ORGANIZATIONAL_UNIT_NAME)]
-    leaf_cns = [attr.value for attr in leaf_cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)]
-
-    allowed_roles = {"admin_operator", "Security Operations"}
-    has_valid_role = (
-        any(ou in allowed_roles for ou in leaf_ous)
-        or any(cn in ("superadmin-workstation", "admin-server") for cn in leaf_cns)
-    )
-    is_enclave_agent = bool(x_enclave_cert) and any(
-        "agent" in cn.lower() or ou in ("bank_operator", "agent") for cn in leaf_cns for ou in (leaf_ous or ["agent"])
-    )
-
-    if not (has_valid_role or is_enclave_agent):
-        log_warning(
-            "RAG Security",
-            f"Отказ в доступе: роль/субъект сертификата '{leaf_subject_str}' не авторизованы для RAG (HTTP 403)",
+        allowed_roles = {"admin_operator", "Security Operations"}
+        has_valid_role = (
+            any(ou in allowed_roles for ou in leaf_ous)
+            or any(cn in ("superadmin-workstation", "admin-server") for cn in leaf_cns)
         )
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
-                f"Недостаточно прав: роль субъекта '{leaf_subject_str}' не авторизована "
-                "(требуется admin_operator или Security Operations)"
-            ),
+        is_enclave_agent = bool(x_enclave_cert) and any(
+            "agent" in cn.lower() or ou in ("bank_operator", "agent")
+            for cn in leaf_cns
+            for ou in (leaf_ous or ["agent"])
         )
 
-    # 4. Верификация цифровой подписи (X-Signature)
-    raw_body = await request.body()
-    canonical_bytes = compute_rag_canonical_digest(timestamp=int(req_ts), nonce=x_nonce, body_bytes=raw_body)
+        if not (has_valid_role or is_enclave_agent):
+            log_warning(
+                "RAG Security",
+                f"Отказ в доступе: роль/субъект сертификата '{leaf_subject_str}' не авторизованы для RAG (HTTP 403)",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"Недостаточно прав: роль субъекта '{leaf_subject_str}' не авторизована "
+                    "(требуется admin_operator или Security Operations)"
+                ),
+            )
 
-    sig_verified = verify_digital_signature(
-        public_key_or_cert=client_pub_key,
-        signature_b64=x_signature,
-        data_bytes=canonical_bytes,
-    )
+        # 4. Верификация цифровой подписи (X-Signature)
+        raw_body = await request.body()
+        canonical_bytes = compute_rag_canonical_digest(timestamp=int(req_ts), nonce=x_nonce, body_bytes=raw_body)
 
-    # Запасная проверка на случай различий в сериализации JSON
-    if not sig_verified:
-        normalized_body = json.dumps(doc_req.model_dump(), sort_keys=True, ensure_ascii=False).encode("utf-8")
-        canonical_fallback = compute_rag_canonical_digest(
-            timestamp=int(req_ts), nonce=x_nonce, body_bytes=normalized_body
-        )
         sig_verified = verify_digital_signature(
             public_key_or_cert=client_pub_key,
             signature_b64=x_signature,
-            data_bytes=canonical_fallback,
+            data_bytes=canonical_bytes,
         )
 
-    if not sig_verified:
+        # Запасная проверка на случай различий в сериализации JSON
+        if not sig_verified:
+            normalized_body = json.dumps(doc_req.model_dump(), sort_keys=True, ensure_ascii=False).encode("utf-8")
+            canonical_fallback = compute_rag_canonical_digest(
+                timestamp=int(req_ts), nonce=x_nonce, body_bytes=normalized_body
+            )
+            sig_verified = verify_digital_signature(
+                public_key_or_cert=client_pub_key,
+                signature_b64=x_signature,
+                data_bytes=canonical_fallback,
+            )
+
+        if not sig_verified:
+            discard_admin_nonce(x_nonce, redis_conn=redis_client)
+            log_warning(
+                "RAG Security",
+                f"Цифровая подпись X-Signature не прошла валидацию для документа '{doc_req.document_title}'",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Недействительная цифровая подпись запроса (X-Signature verification failed)",
+            )
+    except Exception:
         discard_admin_nonce(x_nonce, redis_conn=redis_client)
-        log_warning(
-            "RAG Security",
-            f"Цифровая подпись X-Signature не прошла валидацию для документа '{doc_req.document_title}'",
-        )
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Недействительная цифровая подпись запроса (X-Signature verification failed)",
-        )
+        raise
 
     # 4. Сохранение сырого документа в PostgreSQL с шифрованием AES-256-GCM
     content_bytes = doc_req.content.encode("utf-8")
@@ -418,6 +424,11 @@ async def submit_rag_document(
             log_success("Redis", f"Задача векторизации для {filename} поставлена в очередь")
         except Exception as e:
             log_warning("Redis", f"Предупреждение: отправка задачи в Redis не удалась ({e})")
+            if getattr(settings, "STRICT_SECURITY", False):
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Ошибка постановки задачи векторизации в очередь: {e}",
+                )
 
     # 7. Формирование и подписание квитанции сервера (AckReceipt)
     receipt_id = str(uuid.uuid4())

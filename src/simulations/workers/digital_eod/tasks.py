@@ -82,6 +82,19 @@ async def process_single_contract(session: AsyncSession, contract: SmartContract
 
     elif is_completed:
         # Контракт успешно выполнен и запросил расчет
+        # Строгая проверка финансового инварианта: общий объем переводов не должен превышать залог контракта
+        requested_total = sum((Decimal(str(tx.get("amount", "0"))) for tx in transfers), Decimal("0.00"))
+        if requested_total > contract_amount:
+            contract.status = "failed"
+            contract.error_message = (
+                f"Превышен лимит средств смарт-контракта: запрошено {requested_total:.2f}, "
+                f"доступно {contract_amount:.2f}"
+            )
+            refund_amount = min(creator_frozen, contract_amount)
+            creator.frozen_balance = creator_frozen - refund_amount
+            creator.balance = creator_bal + refund_amount
+            return "failed"
+
         transferred_total = Decimal("0.00")
 
         # Применяем переводы, списав средства из замороженного залога создателя

@@ -14,6 +14,9 @@ services:
       - BANK_CERTS_DIR=/export/bank_certs
       - ADMIN_CLIENT_CERTS_DIR=/export/admin_client_certs
       - ENCLAVE_CERTS_DIR=/export/enclave_certs
+      - POSTGRES_CERTS_DIR=/export/postgres_certs
+      - REDIS_CERTS_DIR=/export/redis_certs
+      - MINIO_CERTS_DIR=/export/minio_certs
       - ISOLATE_ADMIN_CLIENT_KEY=true
       - ISOLATE_PRIVATE_KEYS=true
       - FORCE_REGENERATE=${FORCE_REGENERATE:-false}
@@ -26,6 +29,9 @@ services:
       - bank_certs:/export/bank_certs
       - admin_client_certs:/export/admin_client_certs
       - enclave_certs:/export/enclave_certs
+      - postgres_certs:/export/postgres_certs
+      - redis_certs:/export/redis_certs
+      - minio_certs:/export/minio_certs
     networks:
       - pki_net
     restart: "no"
@@ -54,7 +60,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./src/simulations/db/init_databases.sql:/docker-entrypoint-initdb.d/init_databases.sql:ro
-      - certs_data:/certs:ro
+      - postgres_certs:/certs:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
@@ -298,7 +304,7 @@ services:
       - MINIO_KMS_SECRET_KEY=${MINIO_KMS_SECRET_KEY}
     volumes:
       - minio_data:/data
-      - certs_data:/certs:ro
+      - minio_certs:/certs:ro
     command: server /data --certs-dir /certs/minio --console-address ":9001"
     networks:
       - data_net
@@ -336,7 +342,7 @@ services:
       --requirepass ${REDIS_PASSWORD}
     volumes:
       - redis_data:/data
-      - certs_data:/certs:ro
+      - redis_certs:/certs:ro
     healthcheck:
       test: ["CMD-SHELL", "redis-cli --tls --cacert /certs/ca.crt -a $$REDIS_PASSWORD ping || exit 1"]
       interval: 5s
@@ -585,6 +591,9 @@ networks:
 volumes:
   root_ca_data:
   certs_data:
+  postgres_certs:
+  redis_certs:
+  minio_certs:
   ca_public:
   admin_certs:
   bank_certs:

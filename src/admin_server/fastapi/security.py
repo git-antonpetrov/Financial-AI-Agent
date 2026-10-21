@@ -1410,9 +1410,9 @@ def parse_mtls_client_certificate(request: Request) -> dict[str, Any]:
     Обеспечивает валидацию X-Proxy-Secret для исключения спуфинга mTLS-заголовков внутри сети.
     """
     proxy_secret = settings.PROXY_INTERNAL_SECRET or os.getenv("PROXY_INTERNAL_SECRET", "").strip()
-    if proxy_secret:
-        client_secret = request.headers.get("x-proxy-secret", "").strip()
-        if not client_secret or not hmac.compare_digest(client_secret, proxy_secret):
+    client_secret = request.headers.get("x-proxy-secret", "").strip()
+    if proxy_secret or client_secret:
+        if not proxy_secret or not client_secret or not hmac.compare_digest(client_secret, proxy_secret):
             return {
                 "verified": False,
                 "raw_verify_status": "UNTRUSTED_PROXY",
@@ -1470,6 +1470,10 @@ def revoke_certificate_in_redis(
             try:
                 client.setex(f"revoked:cert:serial:{s_clean}", ttl_seconds, "revoked")
                 client.setex(f"revoked:cert:{s_clean}", ttl_seconds, "revoked")
+                try:
+                    client.publish("security:revocations", f"serial:{s_clean}")
+                except Exception:
+                    pass
             except Exception as e:
                 log_warning(
                     "PKI",
@@ -1481,6 +1485,10 @@ def revoke_certificate_in_redis(
             _revoked_certs_memory.add(f"serial:{hex_val}")
             if client:
                 client.setex(f"revoked:cert:serial:{hex_val}", ttl_seconds, "revoked")
+                try:
+                    client.publish("security:revocations", f"serial:{hex_val}")
+                except Exception:
+                    pass
         except ValueError:
             pass
 
@@ -1491,6 +1499,10 @@ def revoke_certificate_in_redis(
             try:
                 client.setex(f"revoked:cert:fp:{fp_clean}", ttl_seconds, "revoked")
                 client.setex(f"revoked:cert:{fp_clean}", ttl_seconds, "revoked")
+                try:
+                    client.publish("security:revocations", f"fp:{fp_clean}")
+                except Exception:
+                    pass
             except Exception as e:
                 log_warning(
                     "PKI",

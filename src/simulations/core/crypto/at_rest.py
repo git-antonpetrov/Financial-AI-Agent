@@ -14,6 +14,15 @@ from typing import Any
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from sqlalchemy.types import Text, TypeDecorator
 
+try:
+    from src.common.crypto.zeroize import secure_zero_memory
+except ImportError:
+    try:
+        from common.crypto.zeroize import secure_zero_memory
+    except ImportError:
+        def secure_zero_memory(target: Any) -> None:
+            pass
+
 MAGIC_ENCRYPTION_V1 = b"ENC1"
 
 
@@ -84,16 +93,20 @@ def encrypt_data_at_rest(
         raise TypeError(f"Ожидались bytes или str, получено: {type(data).__name__}")
 
     resolved_key = resolve_encryption_key(key)
+    key_buf = bytearray(resolved_key)
 
-    if deterministic:
-        # Детерминированный IV для обеспечения поиска WHERE по зашифрованным полям (searchable encryption)
-        nonce = hmac.new(resolved_key, b"det_iv:" + bytes(data), hashlib.sha256).digest()[:12]
-    else:
-        nonce = os.urandom(12)
+    try:
+        if deterministic:
+            # Детерминированный IV для обеспечения поиска WHERE по зашифрованным полям (searchable encryption)
+            nonce = hmac.new(bytes(key_buf), b"det_iv:" + bytes(data), hashlib.sha256).digest()[:12]
+        else:
+            nonce = os.urandom(12)
 
-    aesgcm = AESGCM(resolved_key)
-    ciphertext_and_tag = aesgcm.encrypt(nonce, bytes(data), associated_data)
-    return MAGIC_ENCRYPTION_V1 + nonce + ciphertext_and_tag
+        aesgcm = AESGCM(bytes(key_buf))
+        ciphertext_and_tag = aesgcm.encrypt(nonce, bytes(data), associated_data)
+        return MAGIC_ENCRYPTION_V1 + nonce + ciphertext_and_tag
+    finally:
+        secure_zero_memory(key_buf)
 
 
 def decrypt_data_at_rest(
@@ -119,12 +132,14 @@ def decrypt_data_at_rest(
     ciphertext_and_tag = encrypted_payload[header_len + 12 :]
 
     resolved_key = resolve_encryption_key(key)
-    aesgcm = AESGCM(resolved_key)
-
+    key_buf = bytearray(resolved_key)
     try:
+        aesgcm = AESGCM(bytes(key_buf))
         return aesgcm.decrypt(nonce, ciphertext_and_tag, associated_data)
     except Exception as e:
         raise ValueError("Ошибка расшифровки данных: неверный ключ или поврежденный шифротекст") from e
+    finally:
+        secure_zero_memory(key_buf)
 
 
 def encrypt_text_at_rest(

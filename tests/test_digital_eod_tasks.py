@@ -189,3 +189,45 @@ def test_process_contract_condition_not_met_pending():
         assert receiver.balance == Decimal("20.00")
 
     asyncio.run(_test())
+
+
+def test_process_contract_exceeding_escrow_fails_and_refunds():
+    """Тест защиты от превышения лимита залога смарт-контракта (эмиссия из воздуха блокируется)."""
+    async def _test():
+        creator = DummyWallet(id=1, balance=Decimal("100.00"), frozen_balance=Decimal("50.00"))
+        receiver = DummyWallet(id=2, balance=Decimal("20.00"), frozen_balance=Decimal("0.00"))
+
+        # Контракт пытается перевести 100 при залоге 50
+        code = """def execute(context):
+    context._requested_transfers.append({'from': context.creator_id, 'to': context.receiver_id, 'amount': Decimal('100.00')})
+    context.complete()
+"""
+        contract = DummyContract(
+            id=14,
+            creator_wallet_id=1,
+            receiver_wallet_id=2,
+            amount=Decimal("50.00"),
+            contract_code=code,
+            condition_status="active"
+        )
+
+        mock_session = AsyncMock()
+        mock_session.add = MagicMock()
+        creator_res = MagicMock()
+        creator_res.scalars.return_value.first.return_value = creator
+        receiver_res = MagicMock()
+        receiver_res.scalars.return_value.first.return_value = receiver
+        mock_session.execute.side_effect = [creator_res, receiver_res]
+
+        status = await process_single_contract(mock_session, contract)
+
+        # Контракт должен завершиться failed из-за нарушения финансового инварианта
+        assert status == "failed"
+        assert contract.status == "failed"
+        assert "Превышен лимит средств смарт-контракта" in contract.error_message or "запрещен" in contract.error_message.lower()
+        # Замороженные средства безопасно возвращены создателю
+        assert creator.frozen_balance == Decimal("0.00")
+        assert creator.balance == Decimal("150.00")
+        assert receiver.balance == Decimal("20.00")
+
+    asyncio.run(_test())

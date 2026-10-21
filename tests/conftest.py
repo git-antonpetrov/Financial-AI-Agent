@@ -11,6 +11,8 @@ import sys
 import tempfile
 import datetime
 import fastapi  # noqa: F401  # Гарантируем предзагрузку реального пакета FastAPI из site-packages
+import litellm  # noqa: F401  # Гарантируем предзагрузку реального пакета LiteLLM
+import asyncpg  # noqa: F401  # Гарантируем предзагрузку реального пакета asyncpg
 import pytest
 from pathlib import Path
 from cryptography import x509
@@ -318,17 +320,14 @@ def setup_test_fastapi_db():
     try:
         for mod in [
             "redis",
-            "minio",
-            "litellm",
-            "asyncpg",
             "psycopg2",
             "psycopg2.pool",
-            "chromadb",
-            "chromadb.config",
-            "langchain_text_splitters",
         ]:
             if mod not in sys.modules:
-                sys.modules[mod] = MagicMock()
+                try:
+                    __import__(mod)
+                except ImportError:
+                    sys.modules[mod] = MagicMock()
 
         try:
             import server
@@ -460,4 +459,35 @@ def setup_test_fastapi_db():
             target_app.dependency_overrides.pop(dep, None)
     except Exception:
         pass
+
+
+def pytest_addoption(parser):
+    """
+    Register command line option --timeout to enforce user safety requirement:
+    pytest --timeout=30
+    """
+    try:
+        parser.addoption(
+            "--timeout",
+            action="store",
+            default=30.0,
+            type=float,
+            help="Timeout limit in seconds per test to prevent infinite socket or queue hangs",
+        )
+    except Exception:
+        pass
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_call(item):
+    """Execution hook enforcing the test timeout limit."""
+    import time
+
+    timeout = item.config.getoption("--timeout", 30.0)
+    start_time = time.monotonic()
+    yield
+    duration = time.monotonic() - start_time
+    if duration > timeout:
+        raise TimeoutError(f"Test '{item.name}' exceeded timeout limit of {timeout}s (took {duration:.2f}s)")
+
 

@@ -17,10 +17,13 @@ from unittest.mock import MagicMock
 # Предварительный импорт fastapi до модификаций sys.path
 from fastapi.testclient import TestClient
 
-# Моки внешних сервисов
-for mod in ["redis", "minio", "litellm", "asyncpg"]:
+# Моки внешних сервисов (только те, которые не установлены в окружении)
+for mod in ["redis", "psycopg2", "psycopg2.pool"]:
     if mod not in sys.modules:
-        sys.modules[mod] = MagicMock()
+        try:
+            __import__(mod)
+        except ImportError:
+            sys.modules[mod] = MagicMock()
 
 # Настройка путей
 sys.path.insert(0, os.path.abspath("src/admin_server"))
@@ -115,11 +118,26 @@ class MockAuditSession:
 
 @pytest.fixture(autouse=True)
 def setup_mock_db():
-    from db.database import get_db
     mock_session = MockAuditSession()
-    app.dependency_overrides[get_db] = lambda: mock_session
+    overridden_keys = []
+    if hasattr(server, "get_db"):
+        app.dependency_overrides[server.get_db] = lambda: mock_session
+        overridden_keys.append(server.get_db)
+    try:
+        from db.database import get_db as db_get_db
+        app.dependency_overrides[db_get_db] = lambda: mock_session
+        overridden_keys.append(db_get_db)
+    except Exception:
+        pass
+    try:
+        from src.admin_server.fastapi.db.database import get_db as src_get_db
+        app.dependency_overrides[src_get_db] = lambda: mock_session
+        overridden_keys.append(src_get_db)
+    except Exception:
+        pass
     yield mock_session
-    app.dependency_overrides.pop(get_db, None)
+    for key in overridden_keys:
+        app.dependency_overrides.pop(key, None)
 
 
 @pytest.fixture(autouse=True)

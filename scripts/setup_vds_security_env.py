@@ -119,7 +119,12 @@ def setup_vds(project_dir: str | None = None) -> dict[str, str]:
     # 1. Генерация RSA пары для асимметричной подписи JWT в оперативной памяти (RS256)
     cur_jwt_priv = env_dict.get("JWT_PRIVATE_KEY", "").strip()
     cur_jwt_pub = env_dict.get("JWT_PUBLIC_KEY", "").strip()
-    if not cur_jwt_priv or not cur_jwt_pub or "BEGIN RSA PRIVATE KEY" in cur_jwt_priv:
+    if (
+        not cur_jwt_priv
+        or not cur_jwt_pub
+        or "change_this_rsa_private_key" in cur_jwt_priv
+        or "BEGIN RSA PRIVATE KEY" in cur_jwt_priv
+    ):
         priv_pem, pub_pem = generate_rsa_keypair()
         generated_info["JWT_KEY_ALGORITHM"] = "RS256 (2048-bit in-memory)"
     else:
@@ -152,6 +157,7 @@ def setup_vds(project_dir: str | None = None) -> dict[str, str]:
         "AGENT_MAIN_BOOTSTRAP_TOKEN": ("bootstrap_token_main_agent_secret", lambda: secrets.token_urlsafe(32)),
         "ORACLE_BOOTSTRAP_TOKEN": ("bootstrap_token_oracle_secret", lambda: secrets.token_urlsafe(32)),
         "AGENT_ORACLE_BOOTSTRAP_TOKEN": ("bootstrap_token_oracle_agent_secret", lambda: secrets.token_urlsafe(32)),
+        "PROXY_INTERNAL_SECRET": ("financial-core-proxy-token-2026", lambda: secrets.token_urlsafe(32)),
     }
 
     for key, (placeholder_val, gen_fn) in placeholders.items():
@@ -163,7 +169,12 @@ def setup_vds(project_dir: str | None = None) -> dict[str, str]:
 
     # 5. MinIO KMS ключ (32 байта в кодировке Base64)
     cur_kms = env_dict.get("MINIO_KMS_SECRET_KEY", "")
-    if not cur_kms or "0123456789abcdef" in cur_kms or (":" in cur_kms and len(cur_kms.split(":")[-1]) == 64):
+    if (
+        not cur_kms
+        or "0123456789abcdef" in cur_kms
+        or "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=" in cur_kms
+        or (":" in cur_kms and len(cur_kms.split(":")[-1]) in (44, 64))
+    ):
         kms_b64 = base64.b64encode(secrets.token_bytes(32)).decode("ascii")
         env_dict["MINIO_KMS_SECRET_KEY"] = f"financial-kms-key:{kms_b64}"
         generated_info["MINIO_KMS_SECRET_KEY"] = "Сгенерирован ключ MinIO KMS SSE-S3 (32 байта Base64)"

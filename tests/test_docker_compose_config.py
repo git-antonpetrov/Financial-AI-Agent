@@ -52,7 +52,7 @@ def test_docker_compose_zero_trust_in_transit_encryption():
     pg = services["postgres-db"]
     assert "-c ssl=on" in pg.get("command", "")
     assert "-c ssl_cert_file=/certs/postgres.crt" in pg.get("command", "")
-    assert "certs_data:/certs:ro" in pg.get("volumes", [])
+    assert any("postgres_certs:/certs:ro" in v or "certs_data:/certs:ro" in v for v in pg.get("volumes", []))
 
     # 2. Redis
     redis_svc = services["redis"]
@@ -60,11 +60,11 @@ def test_docker_compose_zero_trust_in_transit_encryption():
     assert "--tls-port 6379" in redis_cmd
     assert "--port 0" in redis_cmd
     assert "--tls-cert-file /certs/redis.crt" in redis_cmd
-    assert "certs_data:/certs:ro" in redis_svc.get("volumes", [])
+    assert any("redis_certs:/certs:ro" in v or "certs_data:/certs:ro" in v for v in redis_svc.get("volumes", []))
 
     # 3. MinIO
     minio_svc = services["minio"]
-    assert "certs_data:/certs:ro" in minio_svc.get("volumes", [])
+    assert any("minio_certs:/certs:ro" in v or "certs_data:/certs:ro" in v for v in minio_svc.get("volumes", []))
     assert "--certs-dir /certs/minio" in minio_svc.get("command", "")
 
     # 4. Клиентские сервисы с изолированными томами PKI (SEC-02)

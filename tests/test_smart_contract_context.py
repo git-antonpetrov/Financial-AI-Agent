@@ -51,3 +51,16 @@ def test_transfer_negative_or_zero_amount():
         ctx.transfer("w-creator", "w-receiver", 0.0)
     with pytest.raises(ValueError, match="строго больше нуля"):
         ctx.transfer("w-creator", "w-receiver", -10.0)
+
+
+def test_context_amount_and_identifiers_immutable():
+    """Тест защиты от модификации лимита суммы контракта и идентификаторов (SEC-04)."""
+    ctx = ContractContext("c-1", "w-creator", "w-receiver", 100.0, "fulfilled")
+    with pytest.raises(AttributeError, match="Модификация защищенного атрибута"):
+        ctx.amount = 999999.0
+
+    with pytest.raises(AttributeError, match="Модификация защищенного атрибута"):
+        ctx.creator_id = "w-attacker"
+
+    with pytest.raises(AttributeError, match="Модификация защищенного атрибута"):
+        ctx._amount = 999999.0
