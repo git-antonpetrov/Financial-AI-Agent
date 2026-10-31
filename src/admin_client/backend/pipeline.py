@@ -153,7 +153,7 @@ class DocumentPipeline:
             self.signer = signer
         elif ZeroTrustClientSigner is not None and self.use_zero_trust:
             try:
-                signer_mode = "software" if self.client_key_path else "hardware"
+                signer_mode = "hardware"
                 self.signer = ZeroTrustClientSigner(
                     mode=signer_mode,
                     cert_path=self.client_cert_path,

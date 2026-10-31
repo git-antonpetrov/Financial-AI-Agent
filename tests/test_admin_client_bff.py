@@ -36,6 +36,14 @@ except ImportError:
     )
 from fastapi.testclient import TestClient
 
+IPC_SECRET = "unit-ipc-secret"
+
+
+@pytest.fixture(autouse=True)
+def bind_ipc_secret(monkeypatch):
+    """Подставляет IPC-секрет, потому что sidecar без секрета отклоняет запросы."""
+    monkeypatch.setattr(main, "SIDECAR_IPC_SECRET", IPC_SECRET)
+
 
 def test_remote_admin_client_login_success():
     """Проверяет успешную авторизацию RemoteAdminClient и сохранение сессии в оперативной памяти."""
@@ -248,7 +256,7 @@ def test_frontend_zero_trust_strict_static_analysis():
 def test_bff_process_endpoint_injects_credentials():
     """Проверяет прозрачную подстановку server_url, токена и паролей OCR в /api/local/process."""
     import io
-    test_client = TestClient(main.app)
+    test_client = TestClient(main.app, headers={"X-Local-Secret": IPC_SECRET})
 
     # Настраиваем сессию в remote_client
     with patch.object(main.remote_client, "server_url", "https://localhost:8000"), \

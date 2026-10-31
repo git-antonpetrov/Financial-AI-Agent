@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -6,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.future import select
 
+from src.simulations.api.bank_claims import begin_bank_movement, release_bank_claim, remember_bank_movement
 from src.simulations.api.core.auth import verify_digital_token, verify_oracle_token
 from src.simulations.api.schemas.responses import (
     RubleTransactionResponse,
@@ -44,6 +46,202 @@ def bank_db():
     return get_bank_session()()
 
 
+def _require_ruble_key(request: Request | None, explicit: str | None) -> str:
+    """Возвращает ключ идемпотентности рублёвой межкнижной проводки.
+
+    Аргументы:
+        request: HTTP-запрос. В модульном тесте может отсутствовать.
+        explicit: Ключ из тела запроса, если заголовка нет.
+
+    Возвращает:
+        Непустой ключ.
+
+    Вызывает:
+        HTTPException: Ключ не передан.
+    """
+    header = None
+    if request is not None:
+        raw_header = request.headers.get("X-Idempotency-Key")
+        if isinstance(raw_header, str) and raw_header.strip():
+            header = raw_header.strip()
+    body = explicit.strip() if isinstance(explicit, str) and explicit.strip() else None
+    key = header or body
+    if not key:
+        raise HTTPException(400, "Требуется заголовок X-Idempotency-Key")
+    return key
+
+
+def _signed_ruble_response(row: object, key: str) -> dict | None:
+    """Возвращает сохранённый подписанный ответ рублёвой проводки.
+
+    Аргументы:
+        row: Транзакция с ключом идемпотентности. Пустая строка означает, что повтора нет.
+        key: Ключ текущего запроса.
+
+    Возвращает:
+        Словарь ответа с полем signed_receipt либо None.
+
+    Вызывает:
+        ValueError: Сохранённый JSON не содержит чек.
+    """
+    if getattr(row, "idempotency_key", None) != key:
+        return None
+    raw = getattr(row, "response_payload", None)
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("signed_receipt"), dict):
+        raise ValueError("Сохранённый ответ не содержит подписанный чек")
+    return parsed
+
+
+def _apply_ruble_receipt(response: Response | None, receipt: dict) -> None:
+    """Записывает подпись сохранённого чека в заголовки ответа.
+
+    Аргументы:
+        response: HTTP-ответ. В модульном тесте может отсутствовать.
+        receipt: Чек первого выполнения.
+    """
+    if response is None:
+        return
+    signature = receipt.get("signature")
+    if isinstance(signature, str) and signature:
+        response.headers["X-Bank-Signature"] = signature
+
+
+async def _store_ruble_response(key: str, payload: dict) -> None:
+    """Сохраняет подписанный ответ на рублёвой транзакции с этим ключом.
+
+    Аргументы:
+        key: Ключ идемпотентности.
+        payload: Ответ, который получит клиент.
+
+    Побочные эффекты:
+        Обновляет response_payload. Не записывает чужую строку, если повторная загрузка её не находит.
+    """
+    raw = json.dumps(payload, ensure_ascii=False)
+    async with ruble_db() as rdb:
+        row = await rdb.scalar(select(RubleTransaction).where(RubleTransaction.idempotency_key == key))
+        if getattr(row, "idempotency_key", None) != key:
+            return
+        row.response_payload = raw
+        await rdb.commit()
+
+
+async def _debit_bank_for_ruble(
+    account_id: str,
+    amount: Decimal,
+    key: str,
+    owner_client_id: str | None,
+) -> None:
+    """Списывает банк один раз после зачисления на кошелёк.
+
+    Аргументы:
+        account_id: Счёт списания.
+        amount: Сумма.
+        key: Ключ идемпотентности.
+        owner_client_id: Клиент счёта, сверенный до закрытия сессии проверки.
+    """
+    async with bank_db() as bdb:
+        should_post = await begin_bank_movement(
+            bdb,
+            key=key,
+            operation_type="transfer_out_ruble",
+            account_id=account_id,
+            amount=amount,
+            direction="expense",
+        )
+        if not should_post:
+            return
+        acc = await bdb.scalar(select(Account).where(Account.id == account_id).with_for_update())
+        if not acc:
+            raise HTTPException(404, "Банковский счет не найден")
+        if owner_client_id and acc.client_id and str(acc.client_id) != owner_client_id:
+            raise HTTPException(403, "Банковский счет и кошелек принадлежат разным клиентам")
+        balance = Decimal(str(acc.balance))
+        if balance < amount:
+            raise HTTPException(400, "Недостаточно средств на банковском счете")
+        acc.balance = balance - amount
+        bdb.add(
+            Transaction(
+                account_id=acc.id,
+                category="expense",
+                operation_type="transfer_out_ruble",
+                amount=amount,
+                description="Пополнение кошелька цифрового рубля",
+                idempotency_key=key,
+            )
+        )
+        remember_bank_movement(
+            bdb,
+            key=key,
+            operation_type="transfer_out_ruble",
+            account_id=str(acc.id),
+            amount=amount,
+            direction="expense",
+        )
+        await bdb.commit()
+
+
+async def _credit_bank_for_ruble(
+    account_id: str,
+    amount: Decimal,
+    key: str,
+    wallet_client_id: str | None,
+) -> None:
+    """Зачисляет вывод на банковский счёт один раз.
+
+    Аргументы:
+        account_id: Счёт зачисления.
+        amount: Сумма.
+        key: Ключ идемпотентности.
+        wallet_client_id: Владелец кошелька, снятый до закрытия сессии кошелька.
+
+    Вызывает:
+        HTTPException: Счёт не найден, чужой или не в рублях.
+    """
+    async with bank_db() as bdb:
+        should_post = await begin_bank_movement(
+            bdb,
+            key=key,
+            operation_type="transfer_in_ruble",
+            account_id=account_id,
+            amount=amount,
+            direction="income",
+        )
+        if not should_post:
+            return
+        acc = await bdb.scalar(select(Account).where(Account.id == account_id).with_for_update())
+        if not acc:
+            raise HTTPException(404, "Банковский счет не найден")
+        if acc.status and acc.status != "active":
+            raise HTTPException(400, f"Банковский счет недоступен (статус: {acc.status})")
+        if acc.currency and acc.currency != "RUB":
+            raise HTTPException(400, "Вывод цифрового рубля возможен только на рублевый банковский счет")
+        if acc.client_id and wallet_client_id and str(acc.client_id) != wallet_client_id:
+            raise HTTPException(403, "Банковский счет и кошелек принадлежат разным клиентам")
+        acc.balance = Decimal(str(acc.balance)) + amount
+        bdb.add(
+            Transaction(
+                account_id=acc.id,
+                category="income",
+                operation_type="transfer_in_ruble",
+                amount=amount,
+                description="Вывод из кошелька цифрового рубля",
+                idempotency_key=key,
+            )
+        )
+        remember_bank_movement(
+            bdb,
+            key=key,
+            operation_type="transfer_in_ruble",
+            account_id=str(acc.id),
+            amount=amount,
+            direction="income",
+        )
+        await bdb.commit()
+
+
 # --- Схемы данных (Pydantic) ---
 
 
@@ -52,6 +250,7 @@ class FundWithdrawRequest(BaseModel):
 
     bank_account_id: str
     amount: Decimal = Field(..., gt=Decimal("0.00"), description="Сумма операции (строго больше нуля)")
+    idempotency_key: str | None = None
 
 
 class RubleTransferRequest(BaseModel):
@@ -59,6 +258,7 @@ class RubleTransferRequest(BaseModel):
 
     to_wallet_id: str
     amount: Decimal = Field(..., gt=Decimal("0.00"), description="Сумма P2P перевода (строго больше нуля)")
+    idempotency_key: str | None = None
 
 
 class CreateContractRequest(BaseModel):
@@ -72,6 +272,7 @@ class CreateContractRequest(BaseModel):
     )
     condition_type: str
     contract_code: str
+    idempotency_key: str | None = None
 
 
 class ConditionUpdateRequest(BaseModel):
@@ -88,56 +289,62 @@ class ConditionUpdateRequest(BaseModel):
 # --- Вспомогательные функции компенсации (Saga pattern) ---
 
 
-async def _compensate_bank_transfer(
-    bank_account_id: str,
-    amount: Decimal,
-    reason: str,
-    op_type: str = "transfer_in_compensation",
-) -> None:
+async def _reverse_bank_credit(account_id: str, amount: Decimal, key: str) -> None:
+    """Снимает зачисление банка, если списание кошелька после него не прошло.
+
+    Кошелёк не меняет.
+
+    Аргументы:
+        account_id: Счёт, на который только что зачислили вывод.
+        amount: Сумма этого зачисления.
+        key: Ключ идемпотентности вывода.
+
+    Вызывает:
+        RuntimeError: Счёт не найден или баланса не хватает на откат.
+
+    Побочные эффекты:
+        Уменьшает баланс на сумму зачисления и удаляет проводку с этим ключом.
     """
-    Компенсационная транзакция: возвращает средства на банковский счет при сбое в кошельке цифрового рубля.
-    """
-    try:
-        async with bank_db() as bdb:
-            acc = await bdb.scalar(select(Account).where(Account.id == bank_account_id).with_for_update())
-            if acc:
-                acc.balance = Decimal(str(acc.balance)) + amount
-                tx = Transaction(
-                    account_id=acc.id,
-                    category="income",
-                    operation_type=op_type,
-                    amount=amount,
-                    description=f"Компенсация: {reason}",
-                )
-                bdb.add(tx)
-                await bdb.commit()
-                log_info(
-                    "RubleAPI",
-                    f"Успешная компенсация {amount} на счет {bank_account_id} ({reason})",
-                )
-    except Exception as comp_err:
-        log_error(
-            "RubleAPI",
-            f"КРИТИЧЕСКИЙ СБОЙ КОМПЕНСАЦИИ на счете {bank_account_id}: {comp_err}",
-        )
+    async with bank_db() as bdb:
+        acc = await bdb.scalar(select(Account).where(Account.id == account_id).with_for_update())
+        if acc is None:
+            raise RuntimeError("Откат зачисления вывода не выполнен: счёт не найден")
+        balance = Decimal(str(acc.balance))
+        if balance < amount:
+            raise RuntimeError("Откат зачисления вывода не выполнен: на счёте меньше суммы зачисления")
+        acc.balance = balance - amount
+        await release_bank_claim(bdb, key)
+        await bdb.commit()
 
 
-async def _compensate_wallet_withdraw(wallet_id: str, amount: Decimal, reason: str) -> None:
+async def _reverse_wallet_funding(wallet_id: str, amount: Decimal, key: str) -> None:
+    """Возвращает кошелёк к состоянию до этого пополнения.
+
+    Банк не меняет: списание с банковского счёта не прошло.
+
+    Аргументы:
+        wallet_id: Кошелёк, на который только что зачислили сумму.
+        amount: Сумма этого пополнения.
+        key: Ключ идемпотентности пополнения.
+
+    Вызывает:
+        RuntimeError: Кошелёк не найден или баланса не хватает, чтобы снять пополнение.
+
+    Побочные эффекты:
+        Уменьшает баланс кошелька на сумму пополнения и удаляет рублёвую проводку с этим ключом.
     """
-    Компенсационная транзакция: возвращает средства в кошелек цифрового рубля при сбое зачисления на банковский счет.
-    """
-    try:
-        async with ruble_db() as rdb:
-            wallet = await rdb.scalar(select(Wallet).where(Wallet.id == wallet_id).with_for_update())
-            if wallet:
-                wallet.balance = Decimal(str(wallet.balance)) + amount
-                await rdb.commit()
-                log_info(
-                    "RubleAPI",
-                    f"Успешная компенсация: возвращено {amount} в кошелек {wallet_id} ({reason})",
-                )
-    except Exception as comp_err:
-        log_error("RubleAPI", f"КРИТИЧЕСКИЙ СБОЙ КОМПЕНСАЦИИ кошелька {wallet_id}: {comp_err}")
+    async with ruble_db() as rdb:
+        wallet = await rdb.scalar(select(Wallet).where(Wallet.id == wallet_id).with_for_update())
+        if wallet is None:
+            raise RuntimeError("Откат пополнения кошелька не выполнен: кошелёк не найден")
+        balance = Decimal(str(wallet.balance))
+        if balance < amount:
+            raise RuntimeError("Откат пополнения кошелька не выполнен: на кошельке меньше суммы пополнения")
+        wallet.balance = balance - amount
+        existing = await rdb.scalar(select(RubleTransaction).where(RubleTransaction.idempotency_key == key))
+        if getattr(existing, "idempotency_key", None) == key:
+            await rdb.delete(existing)
+        await rdb.commit()
 
 
 # --- Эндпоинты ---
@@ -179,14 +386,17 @@ async def fund_wallet(
     request: Request = None,
     response: Response = None,
 ):
+    """Зачисляет сумму на кошелёк до списания с банковского счёта.
+
+    Повтор с тем же ключом возвращает подписанный ответ первого выполнения и не списывает сумму второй раз.
     """
-    Пополнить кошелек цифрового рубля со счета в банке.
-    Кросс-доменная операция: Банк -> Цифровой Рубль.
-    Использует with_for_update() для блокировки счета и кошелька.
-    Реализует Saga-паттерн с автоматической компенсацией на банковский счет при сбое.
-    Подписывает сформированный чек-ответ приватным ключом Банка (Блок 5 схемы arch.txt).
-    """
-    # 1. Списание из банка
+    idem_key = _require_ruble_key(request, req.idempotency_key)
+    async with ruble_db() as rdb:
+        existing = await rdb.scalar(select(RubleTransaction).where(RubleTransaction.idempotency_key == idem_key))
+        stored = _signed_ruble_response(existing, idem_key)
+    if stored is not None:
+        _apply_ruble_receipt(response, stored["signed_receipt"])
+        return stored
     async with bank_db() as bdb:
         acc = await bdb.scalar(select(Account).where(Account.id == req.bank_account_id).with_for_update())
         if not acc:
@@ -195,52 +405,48 @@ async def fund_wallet(
             raise HTTPException(400, f"Банковский счет недоступен (статус: {acc.status})")
         if acc.currency and acc.currency != "RUB":
             raise HTTPException(400, "Пополнение кошелька цифрового рубля возможно только с рублевого счета")
-
-        acc_balance = Decimal(str(acc.balance))
-        if acc_balance < req.amount:
+        if Decimal(str(acc.balance)) < req.amount:
             raise HTTPException(400, "Недостаточно средств на банковском счете")
-
-        acc.balance = acc_balance - req.amount
-        tx = Transaction(
-            account_id=acc.id,
-            category="expense",
-            operation_type="transfer_out_ruble",
-            amount=req.amount,
-            description="Пополнение кошелька цифрового рубля",
-        )
-        bdb.add(tx)
-        await bdb.commit()
-
-    # 2. Пополнение кошелька с Saga-компенсацией
+        bank_client_id = str(acc.client_id) if acc.client_id else None
+    credited = False
     try:
         async with ruble_db() as rdb:
+            existing = await rdb.scalar(
+                select(RubleTransaction).where(RubleTransaction.idempotency_key == idem_key)
+            )
             wallet = await rdb.scalar(select(Wallet).where(Wallet.id == wallet_id).with_for_update())
             if not wallet:
                 raise HTTPException(404, "Кошелек не найден")
             if wallet.status and wallet.status != "active":
                 raise HTTPException(400, f"Кошелек недоступен (статус: {wallet.status})")
-            if acc.client_id and wallet.client_id and str(acc.client_id) != str(wallet.client_id):
+            if bank_client_id and wallet.client_id and str(bank_client_id) != str(wallet.client_id):
                 raise HTTPException(403, "Банковский счет и кошелек принадлежат разным клиентам")
+            if getattr(existing, "idempotency_key", None) != idem_key:
+                wallet.balance = Decimal(str(wallet.balance)) + req.amount
+                rdb.add(
+                    RubleTransaction(
+                        receiver_wallet_id=wallet.id,
+                        amount=req.amount,
+                        idempotency_key=idem_key,
+                        status="completed",
+                    )
+                )
+                await rdb.commit()
+                credited = True
+    except Exception as exc:
+        log_error("RubleAPI", f"Ошибка зачисления на кошелёк {wallet_id} до списания: {exc}")
+        if isinstance(exc, HTTPException):
+            raise exc
+        raise HTTPException(500, f"Ошибка пополнения цифрового кошелька: {exc}") from exc
 
-            wallet.balance = Decimal(str(wallet.balance)) + req.amount
-            await rdb.commit()
-    except Exception as e:
-        log_error(
-            "RubleAPI",
-            f"Ошибка пополнения кошелька {wallet_id}: {e}. Запуск компенсационной транзакции...",
-        )
-        await _compensate_bank_transfer(
-            bank_account_id=req.bank_account_id,
-            amount=req.amount,
-            reason="Сбой пополнения цифрового кошелька",
-            op_type="compensation_ruble_fund",
-        )
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(
-            500,
-            f"Ошибка пополнения цифрового кошелька. Средства компенсированы на банковский счет: {e}",
-        )
+    try:
+        await _debit_bank_for_ruble(req.bank_account_id, req.amount, idem_key, bank_client_id)
+    except Exception as exc:
+        if credited:
+            await _reverse_wallet_funding(wallet_id, req.amount, idem_key)
+        if isinstance(exc, HTTPException):
+            raise exc
+        raise HTTPException(500, f"Списание за пополнение кошелька не выполнено: {exc}") from exc
 
     log_success(
         "RubleAPI",
@@ -258,9 +464,10 @@ async def fund_wallet(
         },
         request_nonce=request_nonce,
     )
-    if response is not None:
-        response.headers["X-Bank-Signature"] = receipt["signature"]
-    return {"status": "success", "signed_receipt": receipt}
+    payload = {"status": "success", "signed_receipt": receipt}
+    await _store_ruble_response(idem_key, payload)
+    _apply_ruble_receipt(response, receipt)
+    return payload
 
 
 @router.post("/wallets/{wallet_id}/withdraw")
@@ -270,67 +477,66 @@ async def withdraw_wallet(
     request: Request = None,
     response: Response = None,
 ):
+    """Зачисляет вывод на банковский счёт до списания с кошелька.
+
+    Повтор с тем же ключом возвращает подписанный ответ первого выполнения
+    и не зачисляет сумму на банковский счёт второй раз.
     """
-    Вывести цифровые рубли на банковский счет.
-    Кросс-доменная операция: Цифровой Рубль -> Банк.
-    Использует with_for_update() для блокировки кошелька и счета.
-    Реализует Saga-паттерн с автоматической компенсацией в кошелек при сбое зачисления в банк.
-    Подписывает сформированный чек-ответ приватным ключом Банка (Блок 5 схемы arch.txt).
-    """
-    # 1. Списание из кошелька
+    idem_key = _require_ruble_key(request, req.idempotency_key)
     async with ruble_db() as rdb:
-        wallet = await rdb.scalar(select(Wallet).where(Wallet.id == wallet_id).with_for_update())
-        if not wallet:
-            raise HTTPException(404, "Кошелек не найден")
-        if wallet.status and wallet.status != "active":
-            raise HTTPException(400, f"Кошелек недоступен (статус: {wallet.status})")
-
-        wallet_balance = Decimal(str(wallet.balance))
-        if wallet_balance < req.amount:
-            raise HTTPException(400, "Недостаточно цифровых рублей")
-
-        wallet.balance = wallet_balance - req.amount
-        await rdb.commit()
-
-    # 2. Зачисление в банк с Saga-компенсацией
+        existing = await rdb.scalar(select(RubleTransaction).where(RubleTransaction.idempotency_key == idem_key))
+        stored = _signed_ruble_response(existing, idem_key)
+        if stored is not None:
+            wallet_client_id = None
+        else:
+            wallet = await rdb.scalar(select(Wallet).where(Wallet.id == wallet_id).with_for_update())
+            if not wallet:
+                raise HTTPException(404, "Кошелек не найден")
+            if wallet.status and wallet.status != "active":
+                raise HTTPException(400, f"Кошелек недоступен (статус: {wallet.status})")
+            if Decimal(str(wallet.balance)) < req.amount:
+                raise HTTPException(400, "Недостаточно цифровых рублей")
+            wallet_client_id = str(wallet.client_id) if wallet.client_id else None
+    if stored is not None:
+        _apply_ruble_receipt(response, stored["signed_receipt"])
+        return stored
+    credited = False
     try:
-        async with bank_db() as bdb:
-            acc = await bdb.scalar(select(Account).where(Account.id == req.bank_account_id).with_for_update())
-            if not acc:
-                raise HTTPException(404, "Банковский счет не найден")
-            if acc.status and acc.status != "active":
-                raise HTTPException(400, f"Банковский счет недоступен (статус: {acc.status})")
-            if acc.currency and acc.currency != "RUB":
-                raise HTTPException(400, "Вывод цифрового рубля возможен только на рублевый банковский счет")
-            if acc.client_id and wallet.client_id and str(acc.client_id) != str(wallet.client_id):
-                raise HTTPException(403, "Банковский счет и кошелек принадлежат разным клиентам")
-
-            acc.balance = Decimal(str(acc.balance)) + req.amount
-            tx = Transaction(
-                account_id=acc.id,
-                category="income",
-                operation_type="transfer_in_ruble",
-                amount=req.amount,
-                description="Вывод из кошелька цифрового рубля",
+        await _credit_bank_for_ruble(req.bank_account_id, req.amount, idem_key, wallet_client_id)
+        credited = True
+    except Exception as exc:
+        if isinstance(exc, HTTPException):
+            raise exc
+        raise HTTPException(500, f"Зачисление вывода на банковский счёт не выполнено: {exc}") from exc
+    try:
+        async with ruble_db() as rdb:
+            existing = await rdb.scalar(
+                select(RubleTransaction).where(RubleTransaction.idempotency_key == idem_key)
             )
-            bdb.add(tx)
-            await bdb.commit()
-    except Exception as e:
-        log_error(
-            "RubleAPI",
-            f"Ошибка зачисления при выводе из кошелька {wallet_id}: {e}. Компенсация цифровых рублей...",
-        )
-        await _compensate_wallet_withdraw(
-            wallet_id=wallet_id,
-            amount=req.amount,
-            reason="Сбой зачисления на банковский счет",
-        )
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(
-            500,
-            f"Ошибка зачисления на банковский счет. Цифровые рубли возвращены в кошелек: {e}",
-        )
+            if getattr(existing, "idempotency_key", None) != idem_key:
+                wallet = await rdb.scalar(select(Wallet).where(Wallet.id == wallet_id).with_for_update())
+                if not wallet:
+                    raise HTTPException(404, "Кошелек не найден")
+                balance = Decimal(str(wallet.balance))
+                if balance < req.amount:
+                    raise HTTPException(400, "Недостаточно цифровых рублей")
+                wallet.balance = balance - req.amount
+                rdb.add(
+                    RubleTransaction(
+                        sender_wallet_id=wallet.id,
+                        receiver_wallet_id=wallet.id,
+                        amount=req.amount,
+                        idempotency_key=idem_key,
+                        status="completed",
+                    )
+                )
+                await rdb.commit()
+    except Exception as exc:
+        if credited:
+            await _reverse_bank_credit(req.bank_account_id, req.amount, idem_key)
+        if isinstance(exc, HTTPException):
+            raise exc
+        raise HTTPException(500, f"Списание с кошелька после зачисления не выполнено: {exc}") from exc
 
     log_success(
         "RubleAPI",
@@ -348,9 +554,10 @@ async def withdraw_wallet(
         },
         request_nonce=request_nonce,
     )
-    if response is not None:
-        response.headers["X-Bank-Signature"] = receipt["signature"]
-    return {"status": "success", "signed_receipt": receipt}
+    payload = {"status": "success", "signed_receipt": receipt}
+    await _store_ruble_response(idem_key, payload)
+    _apply_ruble_receipt(response, receipt)
+    return payload
 
 
 @router.post("/wallets/{wallet_id}/transfers", response_model=RubleTransactionResponse)
@@ -368,8 +575,15 @@ async def transfer_rubles(
     """
     if str(wallet_id) == str(req.to_wallet_id):
         raise HTTPException(400, "Перевод на тот же самый кошелек невозможен")
+    idem_key = _require_ruble_key(request, req.idempotency_key)
 
     async with ruble_db() as db:
+        existing = await db.scalar(select(RubleTransaction).where(RubleTransaction.idempotency_key == idem_key))
+        if getattr(existing, "idempotency_key", None) == idem_key:
+            stored = _signed_ruble_response(existing, idem_key)
+            if stored is None:
+                raise HTTPException(409, "Ключ идемпотентности уже использован другой операцией")
+            return RubleTransactionResponse.model_validate(stored["body"])
         lock_ids = sorted([str(wallet_id), str(req.to_wallet_id)])
         wallets_res = await db.execute(
             select(Wallet).where(Wallet.id.in_(lock_ids)).order_by(Wallet.id).with_for_update()
@@ -405,15 +619,30 @@ async def transfer_rubles(
             timestamp=sig_ts,
         )
 
+        result = RubleTransactionResponse.model_validate(
+            {
+                "sender_wallet_id": str(sender.id),
+                "receiver_wallet_id": str(receiver.id),
+                "amount": req.amount,
+                "status": "completed",
+                "signature": sig,
+            }
+        )
         rtx = RubleTransaction(
             sender_wallet_id=sender.id,
             receiver_wallet_id=receiver.id,
             amount=req.amount,
             signature=sig,
+            idempotency_key=idem_key,
+            response_payload=json.dumps(
+                {"body": result.model_dump(mode="json"), "signed_receipt": {"signature": sig}},
+                ensure_ascii=False,
+            ),
         )
         db.add(rtx)
         await db.commit()
         await db.refresh(rtx)
+        result = RubleTransactionResponse.model_validate(rtx)
 
         if response is not None:
             response.headers["X-Bank-Signature"] = sig
@@ -421,7 +650,7 @@ async def transfer_rubles(
             "RubleAPI",
             f"P2P Перевод ЦР: {req.amount} от {wallet_id} к {req.to_wallet_id} (sig={sig[:16]}...)",
         )
-        return RubleTransactionResponse.model_validate(rtx)
+        return result
 
 
 @router.post("/wallets/{wallet_id}/smart-contracts", response_model=SmartContractResponse)
@@ -433,8 +662,16 @@ async def create_smart_contract(wallet_id: str, req: CreateContractRequest) -> S
     """
     if str(wallet_id) == str(req.receiver_wallet_id):
         raise HTTPException(400, "Создатель и получатель смарт-контракта не могут совпадать")
+    idem_key = _require_ruble_key(None, req.idempotency_key)
 
     async with ruble_db() as db:
+        existing = await db.scalar(select(SmartContract).where(SmartContract.idempotency_key == idem_key))
+        if getattr(existing, "idempotency_key", None) == idem_key:
+            raw = getattr(existing, "response_payload", None)
+            if not isinstance(raw, str) or not raw.strip():
+                raise HTTPException(409, "Ключ идемпотентности уже использован другой операцией")
+            stored = json.loads(raw)
+            return SmartContractResponse.model_validate(stored["body"])
         creator = await db.scalar(select(Wallet).where(Wallet.id == wallet_id).with_for_update())
         if not creator:
             raise HTTPException(404, "Создатель контракта не найден")
@@ -455,8 +692,15 @@ async def create_smart_contract(wallet_id: str, req: CreateContractRequest) -> S
             amount=req.amount,
             condition_type=req.condition_type,
             contract_code=req.contract_code,
+            idempotency_key=idem_key,
         )
         db.add(contract)
+        await db.flush()
+        stored_contract = SmartContractResponse.model_validate(contract)
+        contract.response_payload = json.dumps(
+            {"body": stored_contract.model_dump(mode="json"), "signed_receipt": {"signature": idem_key}},
+            ensure_ascii=False,
+        )
         await db.commit()
         await db.refresh(contract)
 
@@ -504,7 +748,7 @@ async def update_contract_condition(
     if req.signature:
         nonce = req.nonce or (request.headers.get("X-Nonce") if request else None)
         timestamp = req.timestamp or (request.headers.get("X-Timestamp") if request else None)
-        strict_sec = os.getenv("STRICT_SECURITY", "false").lower() in ("true", "1")
+        strict_sec = os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1")
         default_req = "true" if strict_sec else "false"
         require_nonce_ts = os.getenv("REQUIRE_ORACLE_NONCE_TIMESTAMP", default_req).lower() in ("true", "1")
         if require_nonce_ts and (not nonce or not timestamp):

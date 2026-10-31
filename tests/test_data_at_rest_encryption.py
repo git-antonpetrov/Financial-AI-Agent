@@ -396,6 +396,7 @@ def test_upload_document_passes_minio_sse():
         "X-Signature": sig_b64,
         "X-Cert": client_cert_pem,
         "Content-Type": "application/json",
+        "X-Proxy-Secret": os.environ["PROXY_INTERNAL_SECRET"],
         "X-Client-Cert-Verify": "SUCCESS",
         "X-Client-Cert-Subject": "CN=superadmin-workstation,OU=admin_operator"
     }

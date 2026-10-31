@@ -51,7 +51,9 @@ except ImportError:
                         pass
         except Exception:
             def secure_zero_memory(target: Any) -> None:
-                pass
+                raise RuntimeError(
+                    "Модуль затирания ключей недоступен. Запуск без NIST SP 800-88 запрещён."
+                )
 
 
 def zeroize_private_key_material(key_material: bytearray | memoryview | bytes | str | Any) -> None:

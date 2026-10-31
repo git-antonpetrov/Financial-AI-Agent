@@ -84,6 +84,23 @@ else
 fi
 log_success "Обнаружен Docker Compose: $($DOCKER_COMPOSE_CMD version --short 2>/dev/null || echo 'доступен')"
 
+# Каталог данных Docker обязан лежать на открытом томе LUKS. Иначе стек не стартует.
+DOCKER_ROOT="$($DOCKER_BIN info -f '{{.DockerRootDir}}' 2>/dev/null || true)"
+if [[ -z "${DOCKER_ROOT}" ]]; then
+    DOCKER_ROOT="/var/lib/docker"
+fi
+if [[ ! -e "${DOCKER_ROOT}" ]]; then
+    log_error "Каталог данных Docker не найден: ${DOCKER_ROOT}"
+    exit 1
+fi
+DOCKER_SOURCE="$(findmnt -no SOURCE -T "${DOCKER_ROOT}" 2>/dev/null || df -P "${DOCKER_ROOT}" | awk 'NR==2 {print $1}')"
+LUKS_NAME="${DOCKER_SOURCE#/dev/mapper/}"
+if [[ "${DOCKER_SOURCE}" != /dev/mapper/* ]] || ! cryptsetup status "${LUKS_NAME}" >/dev/null 2>&1; then
+    log_error "Тома Docker (${DOCKER_ROOT} на ${DOCKER_SOURCE}) не находятся на расшифрованном LUKS. Запуск остановлен."
+    exit 1
+fi
+log_success "Каталог Docker находится на LUKS-устройстве ${DOCKER_SOURCE}."
+
 
 # Определение Python интерпретатора
 PYTHON_CMD=""

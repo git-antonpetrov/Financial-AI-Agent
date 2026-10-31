@@ -1,0 +1,14 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "financial-postgres",
+      "Group": "Servers",
+      "Host": "postgres-db",
+      "Port": 5432,
+      "MaintenanceDB": "postgres",
+      "Username": "financial_ai_agent",
+      "SSLMode": "verify-full",
+      "SSLRootCert": "/certs/ca.crt"
+    }
+  }
+}

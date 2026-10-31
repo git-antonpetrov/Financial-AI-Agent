@@ -78,7 +78,12 @@ class ContentCaptureRecognizer:
         api_uri: str = "",
     ):
         self.username = username or os.getenv("CONTENTAI_USERNAME")
-        self.password = password or os.getenv("CONTENTAI_PASSWORD")
+        candidate = password or os.getenv("CONTENTAI_PASSWORD")
+        if candidate == "********":
+            candidate = os.getenv("CONTENTAI_PASSWORD")
+        if candidate == "********":
+            candidate = ""
+        self.password = candidate
         if not self.username or not self.password:
             raise ValueError("Не заданы CONTENTAI_USERNAME или CONTENTAI_PASSWORD")
 

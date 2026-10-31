@@ -7,13 +7,25 @@
 - Генерация криптостойких паролей для БД, Redis, MinIO и ChromaDB (при отсутствии или небезопасных значениях);
 - Настройка параметров сквозного Zero-Trust шифрования (POSTGRES_SSLMODE=require, REDIS_SSL=true, MINIO_SECURE=true);
 - Настройка параметров Caddy и mTLS.
+
+Не изменяет исходники admin-server и security.py: список субъектов mTLS
+записывает только в файл окружения.
 """
 
-import os
-import sys
 import base64
+import os
 import secrets
 import subprocess
+import sys
+from pathlib import Path
+
+_REPEATED_HEX_BLOCK = "0123456789abcdef"
+_WEAK_TOTP_BLOCK = "JBSWY3DPEHPK3PXP"
+_SUPERADMIN_CLIENT_CN = "superadmin-workstation"
+_KNOWN_KMS_PLACEHOLDER = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+_EXTRA_WEAK_SECRETS = {
+    "PROXY_INTERNAL_SECRET": "financial-core-proxy-token-2026",
+}
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -79,14 +91,104 @@ def generate_rsa_keypair(priv_path: str | None = None, pub_path: str | None = No
         raise RuntimeError("Ошибка генерации RSA ключей подписи JWT в памяти.")
 
 
-def setup_vds(project_dir: str | None = None) -> dict[str, str]:
+def is_repeated_token(value: str, block: str) -> bool:
+    """Сообщает, что значение пустое или состоит только из повторов известного блока.
+
+    Аргументы:
+        value: Текущее значение переменной окружения.
+        block: Известный слабый фрагмент из шаблона.
+
+    Возвращает:
+        True, если значение нужно заменить. Случайная строка той же длины остаётся.
     """
-    Выполняет инициализацию параметров безопасности в .env:
-    - Создает .env из .env.example, если файл отсутствует;
-    - Генерирует асимметричную пару RSA-2048 для подписи JWT в памяти и сохраняет в .env;
-    - Заменяет плейсхолдеры на криптографически стойкие секреты;
-    - Устанавливает флаги Zero-Trust TLS;
-    - Возвращает словарь с ключевыми сгенерированными учетными данными.
+    if not value:
+        return True
+    if not block or len(value) % len(block) != 0:
+        return False
+    return value == block * (len(value) // len(block))
+
+
+def is_known_weak_kms(value: str) -> bool:
+    """Сообщает, что ключ MinIO KMS пустой или совпадает с известным плейсхолдером.
+
+    Длина хвоста 44 или 64 сама по себе не считается слабостью: столько же
+    символов у нормального Base64 и hex.
+
+    Аргументы:
+        value: Текущее значение MINIO_KMS_SECRET_KEY.
+
+    Возвращает:
+        True, если ключ нужно сгенерировать заново.
+    """
+    raw = value.strip().strip('"').strip("'")
+    if not raw or _KNOWN_KMS_PLACEHOLDER in raw:
+        return True
+    tail = raw.split(":")[-1]
+    return is_repeated_token(tail, _REPEATED_HEX_BLOCK)
+
+
+def common_name_from_certificate(path: Path) -> str:
+    """Читает CN из PEM-сертификата.
+
+    Аргументы:
+        path: Путь к файлу сертификата.
+
+    Возвращает:
+        CN либо пустую строку, если файл отсутствует или не читается.
+    """
+    if not path.is_file():
+        return ""
+    try:
+        from cryptography import x509
+        from cryptography.x509.oid import NameOID
+
+        certificate = x509.load_pem_x509_certificate(path.read_bytes())
+        attributes = certificate.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+    except Exception:
+        return ""
+    if not attributes:
+        return ""
+    return str(attributes[0].value).replace("\n", "").replace("\r", "").strip()
+
+
+def issued_superadmin_common_name(project_dir: str) -> str:
+    """Возвращает CN выпущенного клиента superadmin-workstation.
+
+    Аргументы:
+        project_dir: Корень проекта, где может лежать уже выпущенный сертификат.
+
+    Возвращает:
+        CN из admin_client.crt, если файл читается. Иначе CN, который
+        bootstrap PKI назначает рабочей станции супер-администратора.
+    """
+    root = Path(project_dir)
+    candidates = (
+        root / "certs" / "admin_client.crt",
+        root / "certs" / "admin_client_certs" / "admin_client.crt",
+        root / "certs" / "client.crt",
+    )
+    for path in candidates:
+        common_name = common_name_from_certificate(path)
+        if common_name:
+            return common_name
+    return _SUPERADMIN_CLIENT_CN
+
+
+def setup_vds(project_dir: str | None = None) -> dict[str, str]:
+    """Заполняет .env криптостойкими секретами и не трогает исходники admin-server.
+
+    Заменяет известные плейсхолдеры из шаблона и оставляет уже случайные значения.
+    Пустой ALLOWED_MTLS_SUBJECTS получает CN клиента superadmin-workstation.
+    Сравнение субъектов в security.py не меняет.
+
+    Аргументы:
+        project_dir: Корень проекта. Пустое значение означает каталог над scripts.
+
+    Возвращает:
+        Словарь с описанием значений, которые функция сгенерировала в этот запуск.
+
+    Побочные эффекты:
+        Создаёт или перезаписывает .env и выставляет права 0600, если ОС позволяет.
     """
     if project_dir is None:
         project_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -133,19 +235,22 @@ def setup_vds(project_dir: str | None = None) -> dict[str, str]:
 
     # 2. Мастер-ключ шифрования Data at Rest (AES-256-GCM)
     cur_enc_key = env_dict.get("DATA_ENCRYPTION_KEY", "")
-    if not cur_enc_key or cur_enc_key.startswith("0123456789abcdef"):
+    if is_repeated_token(cur_enc_key, _REPEATED_HEX_BLOCK):
         env_dict["DATA_ENCRYPTION_KEY"] = secrets.token_hex(32)
         generated_info["DATA_ENCRYPTION_KEY"] = "Сгенерирован новый 256-битный ключ AES-GCM"
 
     # 3. TOTP секрет для 2FA (RFC 6238)
     cur_totp = env_dict.get("ADMIN_TOTP_SECRET", "")
-    if not cur_totp or cur_totp.startswith("JBSWY3DPEHPK3PXP"):
+    if is_repeated_token(cur_totp, _WEAK_TOTP_BLOCK):
         env_dict["ADMIN_TOTP_SECRET"] = base64.b32encode(secrets.token_bytes(20)).decode("utf-8").rstrip("=")
         generated_info["ADMIN_TOTP_SECRET"] = "Сгенерирован новый Base32 TOTP секрет"
 
     # 4. Пароли инфраструктурных сервисов
     placeholders = {
         "POSTGRES_PASSWORD": ("change_this_strong_password_in_production", lambda: secrets.token_urlsafe(24)),
+        "BANK_DB_PASSWORD": ("change_this_bank_db_password", lambda: secrets.token_hex(24)),
+        "INVEST_DB_PASSWORD": ("change_this_invest_db_password", lambda: secrets.token_hex(24)),
+        "DIGITAL_DB_PASSWORD": ("change_this_digital_db_password", lambda: secrets.token_hex(24)),
         "REDIS_PASSWORD": ("change_this_redis_password", lambda: secrets.token_urlsafe(24)),
         "PGADMIN_DEFAULT_PASSWORD": ("change_this_pgadmin_password", lambda: secrets.token_urlsafe(24)),
         "MINIO_ACCESS_KEY": ("minio_access_key_placeholder", lambda: secrets.token_hex(12)),
@@ -157,27 +262,28 @@ def setup_vds(project_dir: str | None = None) -> dict[str, str]:
         "AGENT_MAIN_BOOTSTRAP_TOKEN": ("bootstrap_token_main_agent_secret", lambda: secrets.token_urlsafe(32)),
         "ORACLE_BOOTSTRAP_TOKEN": ("bootstrap_token_oracle_secret", lambda: secrets.token_urlsafe(32)),
         "AGENT_ORACLE_BOOTSTRAP_TOKEN": ("bootstrap_token_oracle_agent_secret", lambda: secrets.token_urlsafe(32)),
-        "PROXY_INTERNAL_SECRET": ("financial-core-proxy-token-2026", lambda: secrets.token_urlsafe(32)),
+        "PROXY_INTERNAL_SECRET": ("change_this_proxy_internal_secret", lambda: secrets.token_urlsafe(32)),
     }
 
     for key, (placeholder_val, gen_fn) in placeholders.items():
         cur_val = env_dict.get(key, "")
-        if not cur_val or cur_val == placeholder_val:
+        if not cur_val or cur_val == placeholder_val or cur_val == _EXTRA_WEAK_SECRETS.get(key):
             new_val = gen_fn()
             env_dict[key] = new_val
             generated_info[key] = "Сгенерирован надежный случайный пароль/токен"
 
     # 5. MinIO KMS ключ (32 байта в кодировке Base64)
     cur_kms = env_dict.get("MINIO_KMS_SECRET_KEY", "")
-    if (
-        not cur_kms
-        or "0123456789abcdef" in cur_kms
-        or "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=" in cur_kms
-        or (":" in cur_kms and len(cur_kms.split(":")[-1]) in (44, 64))
-    ):
+    if is_known_weak_kms(cur_kms):
         kms_b64 = base64.b64encode(secrets.token_bytes(32)).decode("ascii")
         env_dict["MINIO_KMS_SECRET_KEY"] = f"financial-kms-key:{kms_b64}"
         generated_info["MINIO_KMS_SECRET_KEY"] = "Сгенерирован ключ MinIO KMS SSE-S3 (32 байта Base64)"
+
+    # Записывает CN в окружение и не меняет сравнение субъектов в security.py,
+    # потому что этот модуль правит другой проход.
+    if not env_dict.get("ALLOWED_MTLS_SUBJECTS", "").strip():
+        env_dict["ALLOWED_MTLS_SUBJECTS"] = issued_superadmin_common_name(project_dir)
+        generated_info["ALLOWED_MTLS_SUBJECTS"] = "Заполнен CN клиента superadmin-workstation"
 
     # 6. Хэш пароля администратора
     cur_admin_hash = env_dict.get("ADMIN_PASSWORD_HASH", "")
@@ -202,7 +308,7 @@ def setup_vds(project_dir: str | None = None) -> dict[str, str]:
     # 8. Принудительные параметры Zero-Trust In-Transit TLS & RSA JWT
     env_dict["JWT_PRIVATE_KEY"] = f'"{priv_pem}"' if not priv_pem.startswith('"') else priv_pem
     env_dict["JWT_PUBLIC_KEY"] = f'"{pub_pem}"' if not pub_pem.startswith('"') else pub_pem
-    env_dict["POSTGRES_SSLMODE"] = "require"
+    env_dict["POSTGRES_SSLMODE"] = "verify-full"
     env_dict["REDIS_SSL"] = "true"
     env_dict["MINIO_SECURE"] = "true"
     env_dict["MINIO_SSE_ENABLED"] = "true"

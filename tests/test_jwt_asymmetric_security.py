@@ -97,7 +97,7 @@ def test_tampered_payload_rejected():
 async def test_get_current_admin_valid_and_invalid():
     """Проверяет dependency get_current_admin на валидном и невалидном токене."""
 
-    if security.redis_blacklist is not None:
+    if isinstance(getattr(security.redis_blacklist, "exists", None), MagicMock):
         security.redis_blacklist.exists.return_value = False
 
     valid_token = create_access_token({"sub": "admin"})

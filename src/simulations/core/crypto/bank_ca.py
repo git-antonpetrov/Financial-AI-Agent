@@ -414,6 +414,12 @@ def get_bank_ca() -> BankCertificateAuthority:
 
 
 def reset_bank_ca_for_tests() -> None:
-    """Сбрасывает синглтон (для изолированного тестирования)."""
+    """Сбрасывает синглтон только при явном тестовом флаге.
+
+    Вызывает:
+        RuntimeError: Вызов сделан без FINANCIAL_AI_ALLOW_TEST_BRIDGES.
+    """
     global _BANK_CA_INSTANCE
+    if os.getenv("FINANCIAL_AI_ALLOW_TEST_BRIDGES", "").lower() not in ("1", "true", "yes"):
+        raise RuntimeError("Сброс банковского CA запрещён без FINANCIAL_AI_ALLOW_TEST_BRIDGES")
     _BANK_CA_INSTANCE = None

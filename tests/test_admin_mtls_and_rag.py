@@ -167,6 +167,7 @@ def test_mtls_blocks_revoked_certificate():
     scope = {
         "type": "http",
         "headers": [
+            (b"x-proxy-secret", os.environ["PROXY_INTERNAL_SECRET"].encode()),
             (b"x-client-cert-verify", b"SUCCESS"),
             (b"x-client-cert-subject", b"CN=superadmin-workstation,O=FinancialAI"),
             (b"x-client-cert-serial", revoked_serial.encode("utf-8")),
@@ -309,7 +310,10 @@ def mock_db_session(monkeypatch):
         import routers.rag_documents as rag_docs
         mock_minio = MagicMock()
         mock_minio.bucket_exists.return_value = True
-        monkeypatch.setattr(rag_docs, "_get_external_services", lambda: (mock_minio, None))
+        from tests.memory_redis import MemoryRedis
+
+        queue = MemoryRedis()
+        monkeypatch.setattr(rag_docs, "_get_external_services", lambda: (mock_minio, queue))
     except Exception:
         pass
     return MockDbSession()
@@ -361,7 +365,8 @@ def test_submit_rag_document_success(client_keypair, client_x509_cert, mock_db_s
             "X-Nonce": nonce,
             "X-Timestamp": str(now_ts),
             "X-Cert": cert_pem,
-            "X-Client-Cert-Verify": "SUCCESS",
+            "X-Proxy-Secret": os.environ["PROXY_INTERNAL_SECRET"],
+        "X-Client-Cert-Verify": "SUCCESS",
             "X-Client-Cert-Subject": "CN=superadmin-workstation,O=FinancialAI",
             "X-Client-Cert-Serial": "100500",
         }

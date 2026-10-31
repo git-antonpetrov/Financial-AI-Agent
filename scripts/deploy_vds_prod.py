@@ -7,11 +7,12 @@
 - Контроль запуска и проверка здоровья (Healthcheck).
 """
 
+import argparse
+import os
+import shutil
+import subprocess
 import sys
 import time
-import shutil
-import argparse
-import subprocess
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -47,7 +48,101 @@ def find_docker_compose_cmd() -> list[str]:
     return []
 
 
-def run_deployment(skip_build: bool = False, no_docker: bool = False, timeout: int = 90):
+def command_output(args: list[str]) -> tuple[int, str]:
+    """Запускает команду и возвращает код выхода вместе со стандартным выводом.
+
+    Аргументы:
+        args: Аргументы процесса, начиная с имени программы.
+
+    Возвращает:
+        Пара из кода выхода и stdout. Если программы нет, код равен 127,
+        а текст пустой.
+
+    Побочные эффекты:
+        Запускает внешний процесс и не меняет файловую систему.
+    """
+    try:
+        completed = subprocess.run(args, capture_output=True, text=True, check=False)
+    except OSError:
+        return 127, ""
+    return completed.returncode, completed.stdout
+
+
+def block_source(path: str) -> str:
+    """Возвращает блочное устройство, на котором расположен каталог.
+
+    Аргументы:
+        path: Каталог данных Docker.
+
+    Возвращает:
+        Источник из findmnt либо первая колонка df. Пустая строка, если
+        устройство определить не удалось.
+    """
+    code, output = command_output(["findmnt", "-no", "SOURCE", "-T", path])
+    if code == 0 and output.strip():
+        return output.splitlines()[0].strip()
+    code, output = command_output(["df", "-P", path])
+    lines = [line for line in output.splitlines() if line.strip()]
+    if code == 0 and len(lines) >= 2:
+        parts = lines[1].split()
+        if parts:
+            return parts[0]
+    return ""
+
+
+def assert_docker_root_on_open_luks(docker_bin: str = "docker") -> None:
+    """Останавливает запуск, если каталог Docker не лежит на открытом томе LUKS.
+
+    Повторяет проверку scripts/deploy_vds_prod.sh: корень берётся из docker info,
+    источник блока — из findmnt или df, а cryptsetup status подтверждает, что
+    mapper открыт. Функция не монтирует каталоги и не накрывает живые тома.
+
+    Аргументы:
+        docker_bin: Имя исполняемого файла Docker.
+
+    Вызывает:
+        SystemExit: Каталог не найден или устройство не является открытым LUKS.
+    """
+    code, output = command_output([docker_bin, "info", "-f", "{{.DockerRootDir}}"])
+    docker_root = output.strip() if code == 0 else ""
+    if not docker_root:
+        docker_root = "/var/lib/docker"
+    if not os.path.exists(docker_root):
+        print(f"[-] Каталог данных Docker не найден: {docker_root}")
+        sys.exit(1)
+
+    source = block_source(docker_root)
+    mapper_prefix = "/dev/mapper/"
+    luks_name = source[len(mapper_prefix):] if source.startswith(mapper_prefix) else ""
+    crypt_ok = False
+    if luks_name:
+        status_code, _status_text = command_output(["cryptsetup", "status", luks_name])
+        crypt_ok = status_code == 0
+    if not source.startswith(mapper_prefix) or not crypt_ok:
+        print(
+            f"[-] Тома Docker ({docker_root} на {source}) не находятся на расшифрованном LUKS. "
+            "Запуск остановлен."
+        )
+        sys.exit(1)
+    print(f"      Каталог Docker находится на LUKS-устройстве {source}.")
+
+
+def run_deployment(skip_build: bool = False, no_docker: bool = False, timeout: int = 90) -> None:
+    """Готовит окружение и поднимает стек, если каталог Docker лежит на открытом LUKS.
+
+    Аргументы:
+        skip_build: Не передаёт --build в docker compose up.
+        no_docker: Готовит только .env и не запускает контейнеры.
+        timeout: Сколько секунд ждать готовности сервисов.
+
+    Вызывает:
+        SystemExit: Docker Compose недоступен, конфигурация невалидна,
+            каталог Docker не на LUKS или compose up завершился с ошибкой.
+
+    Побочные эффекты:
+        Записывает .env и при запуске контейнеров не монтирует тома поверх
+        живого каталога Docker.
+    """
     print("=" * 78)
     print("    FINANCIAL AI AGENT — ZERO-TRUST PRODUCTION DEPLOYMENT (ONLY-DOCKER)")
     print("=" * 78)
@@ -81,6 +176,9 @@ def run_deployment(skip_build: bool = False, no_docker: bool = False, timeout: i
         print("[-] Ошибка валидации конфигурации docker-compose.yml.")
         sys.exit(1)
     print("      Конфигурация docker-compose.yml успешно валидирована.")
+
+    print("      Проверка LUKS для каталога данных Docker...")
+    assert_docker_root_on_open_luks()
 
     # Запуск контейнеров
     up_cmd = compose_cmd + ["up", "-d"]

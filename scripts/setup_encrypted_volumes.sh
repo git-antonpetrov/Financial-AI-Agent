@@ -6,7 +6,7 @@
 set -euo pipefail
 
 VOLUME_NAME=${1:-"fin_agent_secure_data"}
-MOUNT_POINT=${2:-"/var/lib/docker/volumes"}
+MOUNT_POINT=${2:-"/mnt/fin_agent_encrypted_volumes"}
 KEYFILE=${3:-"/etc/security/luks_keys/fin_agent.key"}
 SIZE_GB=${4:-20}
 STORAGE_DIR="/var/lib/secure_volumes"
@@ -27,6 +27,37 @@ for cmd in cryptsetup dd mkfs.ext4 blkid; do
         exit 1
     fi
 done
+
+# Останавливает монтирование поверх уже занятого каталога Docker, потому что
+# такой mount скрывает существующие тома.
+if [[ "$MOUNT_POINT" == "/var/lib/docker/volumes" || "$MOUNT_POINT" == "/var/lib/docker" ]]; then
+    if [[ "${FIN_AGENT_FORCE_MOUNT:-}" != "1" ]]; then
+        echo "[-] Ошибка: точка монтирования ${MOUNT_POINT} совпадает с каталогом Docker."
+        echo "    Укажите отдельный каталог и перенесите data-root Docker на расшифрованный том."
+        echo "    Повторный запуск поверх живых томов требует FIN_AGENT_FORCE_MOUNT=1."
+        exit 1
+    fi
+fi
+
+if [[ -d "$MOUNT_POINT" ]] && [[ -n "$(ls -A "$MOUNT_POINT" 2>/dev/null || true)" ]]; then
+    if [[ "${FIN_AGENT_FORCE_MOUNT:-}" != "1" ]]; then
+        echo "[-] Ошибка: каталог ${MOUNT_POINT} не пуст. Монтирование прервано."
+        exit 1
+    fi
+fi
+
+mkdir -p "$STORAGE_DIR"
+mkdir -p "$(dirname "$KEYFILE")"
+
+# Отклоняет ключ на том же блочном устройстве, что и контейнер LUKS, потому что
+# снимок диска хостера тогда содержит и ключ, и шифротекст.
+container_fs=$(df -P "$STORAGE_DIR" | awk 'NR==2 {print $1}')
+key_fs=$(df -P "$(dirname "$KEYFILE")" | awk 'NR==2 {print $1}')
+if [[ "$container_fs" == "$key_fs" && "${FIN_AGENT_ALLOW_SAME_DISK_LUKS_KEY:-}" != "1" ]]; then
+    echo "[-] Ошибка: ключ ${KEYFILE} и контейнер ${STORAGE_DIR} лежат на одном устройстве ${container_fs}."
+    echo "    Передайте ключ с носителя вне снимка виртуальной машины или через TPM."
+    exit 1
+fi
 
 # 2. Создание защищенного каталога ключей
 mkdir -p "$(dirname "$KEYFILE")"

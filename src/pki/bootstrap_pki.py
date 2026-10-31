@@ -28,10 +28,42 @@ except ImportError:
         from core.passphrase_vault import resolve_root_ca_passphrase
 
 
+PUBLIC_ADMIN_DNS_NAME = "admin.fin-ai-agent.ru"
+_REUSE_MIN_REMAINING = datetime.timedelta(days=30)
+
+
 def get_cert_fingerprint(cert: x509.Certificate) -> str:
     """Возвращает форматированный SHA-256 отпечаток сертификата."""
     raw_digest = cert.fingerprint(hashes.SHA256())
     return ":".join(f"{b:02X}" for b in raw_digest)
+
+
+def certificate_remains_usable(
+    certificate: x509.Certificate,
+    required_dns_names: list[str] | None,
+    now: datetime.datetime,
+) -> bool:
+    """Сообщает, можно ли оставить уже выпущенный сертификат без перевыпуска.
+
+    Аргументы:
+        certificate: Сертификат, прочитанный с диска.
+        required_dns_names: Имена DNS, которые обязаны присутствовать в SAN.
+            Пустой список не требует расширения SAN.
+        now: Текущий момент в UTC.
+
+    Возвращает:
+        True, если до истечения больше 30 суток и SAN покрывает требуемые имена.
+    """
+    if certificate.not_valid_after_utc <= now + _REUSE_MIN_REMAINING:
+        return False
+    if not required_dns_names:
+        return True
+    try:
+        san = certificate.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+    except x509.ExtensionNotFound:
+        return False
+    present = set(san.get_values_for_type(x509.DNSName))
+    return set(required_dns_names).issubset(present)
 
 
 def bootstrap_pki(
@@ -40,8 +72,22 @@ def bootstrap_pki(
     passphrase: str | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
-    """
-    Выполняет полный цикл инициализации Root CA и выпуска сертификатов для всех сервисов.
+    """Выполняет полный цикл инициализации Root CA и выпуска сертификатов сервисов.
+
+    Повторный запуск оставляет сертификат, если до истечения больше 30 суток
+    и SAN содержит все имена из спецификации, включая публичное имя администратора.
+
+    Аргументы:
+        data_dir: Каталог закрытых данных Root CA.
+        export_dir: Каталог, куда экспортируются сертификаты сервисов.
+        passphrase: Парольная фраза ключа Root CA. Пустое значение берётся из окружения.
+        force: Перевыпускает сертификаты, даже если текущие ещё действительны.
+
+    Возвращает:
+        Манифест с серийными номерами и статусом VALID или ISSUED.
+
+    Побочные эффекты:
+        Создаёт каталоги и записывает сертификаты.
     """
     data_path = Path(data_dir).resolve()
     export_path = Path(export_dir).resolve()
@@ -137,6 +183,7 @@ def bootstrap_pki(
                 "admin-server",
                 "admin-server.internal",
                 "admin.fin-ai-agent.local",
+                PUBLIC_ADMIN_DNS_NAME,
                 "localhost",
             ],
             "san_ip": ["127.0.0.1"],
@@ -203,13 +250,11 @@ def bootstrap_pki(
         cert_file = export_path / spec["cert_filename"]
         key_file = export_path / spec["key_filename"]
 
-        # Если сертификат уже существует и не требуется force — проверяем валидность
         if cert_file.exists() and key_file.exists() and not force:
             try:
                 existing_cert = x509.load_pem_x509_certificate(cert_file.read_bytes())
-                # Проверяем, не истекает ли в ближайшие 30 дней
                 now = datetime.datetime.now(datetime.UTC)
-                if existing_cert.not_valid_after_utc > now + datetime.timedelta(days=30):
+                if certificate_remains_usable(existing_cert, spec.get("san_dns"), now):
                     expire_str = existing_cert.not_valid_after_utc.strftime("%Y-%m-%d")
                     print(f"  [✓] {spec['name']:<14} Сертификат валиден (до {expire_str})")
                     manifest["services"][spec["name"]] = {
@@ -219,7 +264,7 @@ def bootstrap_pki(
                     }
                     continue
             except Exception:
-                pass  # При повреждении или протухании перевыпускаем
+                pass
 
         cert, key = issuer.issue_certificate(
             common_name=spec["cn"],
@@ -234,6 +279,8 @@ def bootstrap_pki(
         )
 
         issuer.save_cert_and_key(cert, key, cert_file, key_file)
+        if spec["name"] == "enclave-ca" and key_file.exists():
+            key_file.unlink()
         fp = get_cert_fingerprint(cert)
         print(f"  [+] {spec['name']:<14} Выпущен новый сертификат (Serial: {cert.serial_number}, FP: {fp[:17]}...)")
 
@@ -287,8 +334,6 @@ def bootstrap_pki(
     enclave_dir.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(export_path / "ca.crt", enclave_dir / "ca.crt")
     shutil.copyfile(export_path / "enclave_ca.crt", enclave_dir / "enclave_ca.crt")
-    if (export_path / "enclave_ca.key").exists():
-        shutil.copyfile(export_path / "enclave_ca.key", enclave_dir / "enclave_ca.key")
 
     # postgres_certs: изолированное хранилище ключей и сертификатов PostgreSQL (SEC-02)
     postgres_dir = export_path / "postgres_certs"
@@ -330,7 +375,7 @@ def bootstrap_pki(
     dedicated_mounts = {
         "CA_PUBLIC_DIR": (ca_public_dir, ["ca.crt"]),
         "BANK_CERTS_DIR": (bank_dir, ["ca.crt", "bank.crt", "bank.key"]),
-        "ENCLAVE_CERTS_DIR": (enclave_dir, ["ca.crt", "enclave_ca.crt", "enclave_ca.key"]),
+        "ENCLAVE_CERTS_DIR": (enclave_dir, ["ca.crt", "enclave_ca.crt"]),
         "ADMIN_CERTS_DIR": (
             admin_dir,
             ["ca.crt", "admin_server.crt", "admin_server.key"],
@@ -360,6 +405,16 @@ def bootstrap_pki(
             for fname in file_list:
                 shutil.copyfile(src_d / fname, dst_p / fname)
 
+    minio_dst_env = os.getenv("MINIO_CERTS_DIR")
+    if minio_dst_env:
+        minio_dst_root = Path(minio_dst_env).resolve()
+        minio_src_tree = minio_export_dir / "minio"
+        if minio_src_tree.is_dir() and minio_dst_root != minio_export_dir.resolve():
+            minio_target = minio_dst_root / "minio"
+            if minio_target.exists():
+                shutil.rmtree(minio_target)
+            shutil.copytree(minio_src_tree, minio_target)
+
     # Изоляция закрытых ключей от общего корня раздела certs_data в Docker (SEC-02: Zero-Trust Key Isolation)
     # Закрытые ключи сервисов доступны исключительно через специализированные изолированные тома:
     # bank_certs, admin_certs, enclave_certs, admin_client_certs.
@@ -379,6 +434,9 @@ def bootstrap_pki(
             target_f = export_path / f_to_remove
             if target_f.exists():
                 target_f.unlink()
+        for key_path in export_path.rglob("*"):
+            if key_path.is_file() and key_path.name.endswith(".key"):
+                key_path.unlink()
         dedicated_client_dir = os.getenv("ADMIN_CLIENT_CERTS_DIR")
         if dedicated_client_dir and Path(dedicated_client_dir).resolve() != admin_client_dir.resolve():
             if admin_client_dir.exists():

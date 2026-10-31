@@ -11,12 +11,14 @@ from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
 from src.simulations.db.invest.db.client import get_async_session_maker
+from src.simulations.workers.advisory_lock import acquire_advisory_lock, release_advisory_lock
 
 AsyncSessionLocal = get_async_session_maker()
 from src.simulations.core.utils.console_logger import log_error, log_info
 from src.simulations.db.bank.db.client import (
     get_async_session_maker as get_bank_session_maker,
 )
+from src.simulations.api.bank_claims import begin_bank_movement, canonical_amount, remember_bank_movement
 from src.simulations.db.bank.db.models import Account, Transaction, get_moscow_date
 from src.simulations.db.invest.db.models import (
     BrokerAccount,
@@ -45,7 +47,12 @@ async def _item_savepoint(session: AsyncSession):
 
 
 
-async def return_deposit_to_bank(client_id: str, deposit_number: str, amount: Decimal) -> bool:
+async def return_deposit_to_bank(
+    client_id: str,
+    deposit_number: str,
+    amount: Decimal,
+    payout_key: str | None = None,
+) -> bool:
     """
     Возвращает тело вклада и начисленные проценты на активный банковский счет клиента.
     Возвращает True в случае успешного зачисления, False если счет не найден или произошла ошибка.
@@ -73,15 +80,16 @@ async def return_deposit_to_bank(client_id: str, deposit_number: str, amount: De
                 )
                 return False
 
-            # Проверка идемпотентности: не начислять повторно, если возврат уже был выполнен ранее
-            existing_tx = await b_session.scalar(
-                select(Transaction.id).where(
-                    Transaction.account_id == acc.id,
-                    Transaction.operation_type == "transfer_in_invest",
-                    Transaction.description == f"Возврат вклада {deposit_number} по истечении срока",
-                ).limit(1)
+            claim_key = payout_key or f"eod-mature:{deposit_number}"
+            should_post = await begin_bank_movement(
+                b_session,
+                key=claim_key,
+                operation_type="eod_deposit_return",
+                account_id=str(acc.id),
+                amount=amount,
+                direction="income",
             )
-            if existing_tx is not None:
+            if not should_post:
                 log_info(
                     "Invest EOD",
                     f"Вклад {deposit_number} уже был зачислен на счет {acc.account_number} ранее (идемпотентность)",
@@ -97,6 +105,14 @@ async def return_deposit_to_bank(client_id: str, deposit_number: str, amount: De
                 description=f"Возврат вклада {deposit_number} по истечении срока",
             )
             b_session.add(tx)
+            remember_bank_movement(
+                b_session,
+                key=claim_key,
+                operation_type="eod_deposit_return",
+                account_id=str(acc.id),
+                amount=amount,
+                direction="income",
+            )
             await b_session.commit()
             log_info(
                 "Invest EOD",
@@ -188,10 +204,17 @@ async def process_deposits(session: AsyncSession, current_date: date) -> None:
 
                 if current_date >= maturity_date:
                     amount_to_return = Decimal(str(dep.balance))
+                    client_id = str(dep.client_id) if dep.client_id else ""
+                    deposit_number = str(dep.account_number) if dep.account_number else str(dep.id)
+                    payout_key = dep.payout_key or f"eod-mature:{dep.id}"
+                    if not dep.payout_key:
+                        dep.payout_key = payout_key
+                        dep.payout_amount = canonical_amount(amount_to_return)
                     refund_ok = await return_deposit_to_bank(
-                        client_id=dep.client_id,
-                        deposit_number=dep.account_number,
+                        client_id=client_id,
+                        deposit_number=deposit_number,
                         amount=amount_to_return,
+                        payout_key=payout_key,
                     )
                     if refund_ok:
                         dep.balance = Decimal("0.00")
@@ -287,8 +310,8 @@ async def run_invest_eod() -> None:
     Запускает весь цикл EOD для инвестиций по реальному системному времени.
     """
     async with AsyncSessionLocal() as session:
-        lock = await session.scalar(text("SELECT pg_try_advisory_lock(84920482)"))
-        if not lock:
+        lock_conn, locked = await acquire_advisory_lock(session, 84920482)
+        if not locked:
             log_info("Invest EOD", "Параллельный процесс Invest EOD уже выполняется. Пропуск итерации.")
             return
 
@@ -303,5 +326,4 @@ async def run_invest_eod() -> None:
 
             log_info("Invest EOD", "=== EOD ИНВЕСТИЦИЙ ЗАВЕРШЕН ===")
         finally:
-            await session.execute(text("SELECT pg_advisory_unlock(84920482)"))
-            await session.commit()
+            await release_advisory_lock(lock_conn, session, 84920482)

@@ -40,6 +40,12 @@ class SavingsAccount(Base):
     next_payment_date = Column(DateTime, nullable=True, index=True)
     next_payment_amount = Column(EncryptedDecimal, default=Decimal("0.00"))
     opened_at = Column(DateTime, default=get_moscow_now)
+    idempotency_key = Column(String, nullable=True, unique=True, index=True)
+    response_payload = Column(EncryptedText, nullable=True)
+    close_idempotency_key = Column(String, nullable=True, unique=True, index=True)
+    close_response_payload = Column(EncryptedText, nullable=True)
+    payout_key = Column(String, nullable=True, index=True)
+    payout_amount = Column(String, nullable=True)
 
 
 class Deposit(Base):
@@ -54,6 +60,11 @@ class Deposit(Base):
     next_payment_date = Column(DateTime, nullable=True, index=True)
     next_payment_amount = Column(EncryptedDecimal, default=Decimal("0.00"))
     opened_at = Column(DateTime, default=get_moscow_now)
+    idempotency_key = Column(String, nullable=True, unique=True, index=True)
+    close_idempotency_key = Column(String, nullable=True, unique=True, index=True)
+    close_response_payload = Column(EncryptedText, nullable=True)
+    payout_key = Column(String, nullable=True, index=True)
+    payout_amount = Column(String, nullable=True)
 
 
 class BrokerAccount(Base):
@@ -67,5 +78,7 @@ class BrokerAccount(Base):
     status = Column(String, default="active", index=True)  # Возможные значения: active, blocked, closed
     next_commission_date = Column(DateTime, nullable=True, index=True)  # Дата списания комиссии
     opened_at = Column(DateTime, default=get_moscow_now)
+    idempotency_key = Column(String, nullable=True, unique=True, index=True)
+    response_payload = Column(EncryptedText, nullable=True)
 
     strategy = relationship("InvestmentStrategy", back_populates="broker_accounts")

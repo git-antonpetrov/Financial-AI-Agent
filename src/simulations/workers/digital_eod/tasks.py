@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from src.simulations.db.digital_ruble.db.client import get_async_session_maker
+from src.simulations.workers.advisory_lock import acquire_advisory_lock, release_advisory_lock
 
 AsyncSessionLocal = get_async_session_maker()
 
@@ -222,8 +223,8 @@ async def run_ruble_eod() -> None:
     Защищена распределенной блокировкой PostgreSQL для исключения параллельного запуска воркеров.
     """
     async with AsyncSessionLocal() as session:
-        lock = await session.scalar(text("SELECT pg_try_advisory_lock(84920483)"))
-        if not lock:
+        lock_conn, locked = await acquire_advisory_lock(session, 84920483)
+        if not locked:
             log_info("Ruble EOD", "Параллельный процесс Ruble EOD уже выполняется. Пропуск итерации.")
             return
 
@@ -232,5 +233,4 @@ async def run_ruble_eod() -> None:
             await process_smart_contracts(session)
             log_info("Ruble EOD", "=== EOD ЦИФРОВОГО РУБЛЯ ЗАВЕРШЕН ===")
         finally:
-            await session.execute(text("SELECT pg_advisory_unlock(84920483)"))
-            await session.commit()
+            await release_advisory_lock(lock_conn, session, 84920483)

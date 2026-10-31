@@ -159,6 +159,7 @@ def test_ingress_mtls_verification_matrix():
         "method": "POST",
         "url": "http://testserver/api/v1/rag/documents",
         "headers": [
+            (b"x-proxy-secret", os.environ["PROXY_INTERNAL_SECRET"].encode()),
             (b"x-client-cert-verify", b"SUCCESS"),
             (b"x-client-cert-subject", b"CN=superadmin-workstation"),
             (b"x-client-cert-issuer", b"CN=Zero-Trust Root CA"),
@@ -177,6 +178,7 @@ def test_ingress_mtls_verification_matrix():
         "method": "POST",
         "url": "http://testserver/api/v1/rag/documents",
         "headers": [
+            (b"x-proxy-secret", os.environ["PROXY_INTERNAL_SECRET"].encode()),
             (b"x-client-cert-verify", b"FAILED: self-signed certificate in chain"),
             (b"x-client-cert-subject", b"CN=superadmin-workstation"),
         ]
@@ -202,6 +204,7 @@ def test_ingress_mtls_verification_matrix():
         "method": "POST",
         "url": "http://testserver/api/v1/rag/documents",
         "headers": [
+            (b"x-proxy-secret", os.environ["PROXY_INTERNAL_SECRET"].encode()),
             (b"x-client-cert-verify", b"SUCCESS"),
             (b"x-client-cert-subject", b"CN=untrusted-client-device"),
             (b"x-client-cert-issuer", b"CN=Zero-Trust Root CA"),

@@ -32,8 +32,6 @@ async def main():
 
 if __name__ == "__main__":
     try:
-        # При запуске вручную можно раскомментировать вызов EOD для тестирования:
-        # asyncio.run(run_invest_eod())
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         log_info("Invest EOD Worker", "Воркер остановлен.")

@@ -200,7 +200,8 @@ def test_caddyfile_ingress_invariants():
     assert caddy_path.exists(), "Caddyfile does not exist"
     content = caddy_path.read_text(encoding="utf-8")
 
-    assert "protocols tls1.2 tls1.3" in content
+    assert "protocols tls1.3" in content
+    assert "protocols tls1.2 tls1.3" not in content
     assert "client_auth" in content
     assert "trusted_ca_cert_file /etc/caddy/certs/ca.crt" in content
     assert "header_up -X-Client-Cert-*" in content
@@ -249,7 +250,8 @@ def test_bank_transfer_nominal_execution(monkeypatch):
             transfer_type="account",
             destination="40817810000000000002",
             description="E2E test transfer",
-        )
+        
+            idempotency_key="idem-test")
 
         result = await transfer_money(req)
 

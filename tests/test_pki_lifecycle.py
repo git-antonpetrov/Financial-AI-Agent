@@ -3,13 +3,16 @@
 Проверяет выпуск, валидацию X.509 расширений, цепочек доверия, изоляцию ключей CA и отзыв сертификатов (CRL).
 """
 
+import datetime
 import os
 import sys
 from unittest.mock import MagicMock
 import pytest
 
 from cryptography import x509
-from cryptography.x509.oid import ExtendedKeyUsageOID
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from fastapi import HTTPException, Request
 
 # Моки внешних сервисов
@@ -23,7 +26,7 @@ sys.path.insert(0, os.path.abspath("src/admin_server"))
 sys.path.insert(0, os.path.abspath("src/admin_server/fastapi"))
 sys.path.insert(0, os.path.abspath("src/simulations/core/crypto"))
 
-from src.pki.bootstrap_pki import bootstrap_pki
+from src.pki.bootstrap_pki import PUBLIC_ADMIN_DNS_NAME, bootstrap_pki, certificate_remains_usable
 from src.simulations.core.crypto.chain_validator import X509ChainValidator
 from src.simulations.core.crypto.bank_ca import BankCertificateAuthority
 from security import (
@@ -114,6 +117,13 @@ def test_pki_x509_extensions_and_key_usage(pki_test_env):
 
     server_eku = server_cert.extensions.get_extension_for_oid(x509.ExtensionOID.EXTENDED_KEY_USAGE).value
     assert ExtendedKeyUsageOID.SERVER_AUTH in server_eku
+    server_san = server_cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+    assert PUBLIC_ADMIN_DNS_NAME in server_san.get_values_for_type(x509.DNSName)
+    admin_dir = export_dir / "admin_certs"
+    assert (admin_dir / "admin_server.crt").exists()
+    assert (admin_dir / "admin_server.key").exists()
+    assert not (admin_dir / "admin_client.key").exists()
+    assert not (admin_dir / "bank.key").exists()
 
     # 3. Клиентский сертификат (admin_client.crt)
     client_bytes = (export_dir / "admin_client.crt").read_bytes()
@@ -154,6 +164,7 @@ def test_pki_crl_revocation_blocks_access(pki_test_env):
         "method": "POST",
         "url": "http://testserver/api/v1/rag/documents",
         "headers": [
+            (b"x-proxy-secret", os.environ["PROXY_INTERNAL_SECRET"].encode()),
             (b"x-client-cert-verify", b"SUCCESS"),
             (b"x-client-cert-subject", b"CN=superadmin-workstation"),
             (b"x-client-cert-serial", serial.encode("utf-8")),
@@ -180,3 +191,51 @@ def test_pki_zero_trust_key_isolation(pki_test_env):
     assert bank_ca.ca_private_key is None
     assert bank_ca.bank_private_key is not None
     assert bank_ca.bank_cert is not None
+
+
+def _self_signed_certificate(dns_names: list[str], days: int) -> x509.Certificate:
+    """Выпускает самоподписанный сертификат для проверки решения о перевыпуске."""
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "admin-server")])
+    now = datetime.datetime.now(datetime.UTC)
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(1)
+        .not_valid_before(now)
+        .not_valid_after(now + datetime.timedelta(days=days))
+    )
+    if dns_names:
+        builder = builder.add_extension(
+            x509.SubjectAlternativeName([x509.DNSName(item) for item in dns_names]),
+            critical=False,
+        )
+    return builder.sign(key, hashes.SHA256())
+
+
+def test_certificate_without_public_name_is_reissued():
+    """Проверяет, что сертификат без публичного имени администратора не остаётся в обороте."""
+    now = datetime.datetime.now(datetime.UTC)
+    missing_name = _self_signed_certificate(["admin-server", "localhost"], days=200)
+    assert certificate_remains_usable(missing_name, [PUBLIC_ADMIN_DNS_NAME, "localhost"], now) is False
+
+    covered = _self_signed_certificate([PUBLIC_ADMIN_DNS_NAME, "localhost"], days=200)
+    assert certificate_remains_usable(covered, [PUBLIC_ADMIN_DNS_NAME], now) is True
+
+    expiring = _self_signed_certificate([PUBLIC_ADMIN_DNS_NAME], days=10)
+    assert certificate_remains_usable(expiring, [PUBLIC_ADMIN_DNS_NAME], now) is False
+
+
+def test_admin_certificate_with_public_name_is_reused(pki_test_env):
+    """Проверяет, что повторный выпуск оставляет сертификат с публичным именем."""
+    second = bootstrap_pki(
+        data_dir=pki_test_env["data_dir"],
+        export_dir=pki_test_env["export_dir"],
+        passphrase=pki_test_env["passphrase"],
+        force=False,
+    )
+    first_serial = pki_test_env["manifest"]["services"]["admin-server"]["serial"]
+    assert second["services"]["admin-server"]["status"] == "VALID"
+    assert second["services"]["admin-server"]["serial"] == first_serial

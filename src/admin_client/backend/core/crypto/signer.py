@@ -73,7 +73,11 @@ class ZeroTrustClientSigner:
                 cert_pem=cert_pem,
                 ca_cert_path=ca_cert_path,
             )
-        elif mode == "simulated_tpm":
+        elif mode == "simulated_tpm" and os.getenv("FINANCIAL_AI_ALLOW_TEST_BRIDGES", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
             self._active_bridge = SimulatedTPMBridge(
                 key_path=key_path,
                 key_pem=key_pem,
@@ -82,7 +86,11 @@ class ZeroTrustClientSigner:
                 ca_cert_path=ca_cert_path,
                 ca_cert_pem=ca_cert_pem,
             )
-        elif mode == "software":
+        elif mode == "software" and os.getenv("FINANCIAL_AI_ALLOW_TEST_BRIDGES", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
             self._active_bridge = SoftwareSigningBridge(
                 cert_path=cert_path,
                 key_path=key_path,

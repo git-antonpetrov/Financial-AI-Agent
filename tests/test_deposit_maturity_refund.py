@@ -3,7 +3,7 @@ from datetime import datetime, date
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
-from src.simulations.db.bank.db.models import Account
+from src.simulations.db.bank.db.models import Account, BankIdempotencyClaim, Transaction
 from src.simulations.db.invest.db.models import Deposit
 from src.simulations.workers.invest_eod.tasks import process_deposits
 
@@ -73,8 +73,9 @@ def test_process_deposits_maturity_refunds_to_bank_account(monkeypatch):
         assert bank_acc.balance == Decimal("106000.00")
 
         # 2. Проверяем транзакцию в банке
-        assert len(added_bank_txs) == 1
-        tx = added_bank_txs[0]
+        posted = [row for row in added_bank_txs if isinstance(row, Transaction)]
+        assert len(posted) == 1
+        tx = posted[0]
         assert tx.category == "income"
         assert tx.operation_type == "transfer_in_invest"
         assert tx.amount == Decimal("101000.00")
@@ -204,7 +205,18 @@ def test_process_deposits_maturity_refund_idempotent(monkeypatch):
 
         bank_session = AsyncMock()
         # Первый вызов возвращает bank_acc, второй вызов (select Transaction.id) возвращает уже существующий ID
-        bank_session.scalar = AsyncMock(side_effect=[bank_acc, "tx_already_created_123"])
+        bank_session.scalar = AsyncMock(
+            side_effect=[
+                bank_acc,
+                BankIdempotencyClaim(
+                    key="eod-mature:dep_mature_idempotent",
+                    operation_type="eod_deposit_return",
+                    account_id="bank_acc_idemp",
+                    amount="101000.00",
+                    direction="income",
+                ),
+            ]
+        )
         bank_session.add = MagicMock(side_effect=lambda tx: added_bank_txs.append(tx))
         bank_session.commit = AsyncMock()
 

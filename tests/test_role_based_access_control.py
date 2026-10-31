@@ -152,6 +152,22 @@ def test_current_user_compatibility():
     assert not user.has_permission("nonexistent:perm")
 
 
+def test_current_user_requires_explicit_role():
+    """Не создаёт пользователя без роли и не повышает неизвестную роль до SUPERADMIN."""
+    with pytest.raises(TypeError):
+        CurrentUser("admin")
+
+    with pytest.raises(ValueError):
+        CurrentUser("admin", role=None)
+
+    with pytest.raises(ValueError):
+        CurrentUser("admin", role="root")
+
+    operator = CurrentUser("operator", role="operator")
+    assert operator.role == Role.OPERATOR
+    assert operator.role != Role.SUPERADMIN
+
+
 # --- 2. ТЕСТЫ JWT-ТОКЕНОВ С ПОДДЕРЖКОЙ RBAC ---
 
 def test_create_access_token_with_roles():
@@ -182,7 +198,7 @@ def test_create_access_token_with_roles():
 
 def test_refresh_token_rotation_preserves_role():
     """Проверяет сохранение роли пользователя при ротации refresh-токена (RTR)."""
-    if security.redis_blacklist is not None:
+    if isinstance(getattr(security.redis_blacklist, "exists", None), MagicMock):
         security.redis_blacklist.exists.return_value = False
         security.redis_blacklist.setex.return_value = True
 

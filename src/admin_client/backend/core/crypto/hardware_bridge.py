@@ -381,7 +381,12 @@ class SimulatedTPMBridge:
         ca_cert_pem: str | None = None,
     ):
         self.key_name = key_name
-        self.biometric_prompt_callback = biometric_prompt_callback or (lambda: True)
+        if biometric_prompt_callback is not None:
+            self.biometric_prompt_callback = biometric_prompt_callback
+        elif os.getenv("FINANCIAL_AI_ALLOW_TEST_BRIDGES", "").lower() in ("1", "true", "yes"):
+            self.biometric_prompt_callback = lambda: True
+        else:
+            self.biometric_prompt_callback = lambda: False
         self.cert_path = cert_path
         self.key_path = key_path
         self.ca_cert_path = ca_cert_path

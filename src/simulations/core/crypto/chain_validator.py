@@ -462,7 +462,16 @@ def get_chain_validator(
 
 
 def reset_chain_validator_for_tests() -> X509ChainValidator:
-    """Сбрасывает синглтон валидатора для тестов."""
+    """Сбрасывает синглтон валидатора только при явном тестовом флаге.
+
+    Вызывает:
+        RuntimeError: Вызов сделан без FINANCIAL_AI_ALLOW_TEST_BRIDGES.
+
+    Возвращает:
+        Новый экземпляр валидатора.
+    """
     global _CHAIN_VALIDATOR_INSTANCE
+    if os.getenv("FINANCIAL_AI_ALLOW_TEST_BRIDGES", "").lower() not in ("1", "true", "yes"):
+        raise RuntimeError("Сброс валидатора цепочки запрещён без FINANCIAL_AI_ALLOW_TEST_BRIDGES")
     _CHAIN_VALIDATOR_INSTANCE = X509ChainValidator()
     return _CHAIN_VALIDATOR_INSTANCE

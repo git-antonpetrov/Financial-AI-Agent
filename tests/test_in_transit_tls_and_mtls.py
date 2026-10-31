@@ -93,8 +93,9 @@ def test_docker_compose_network_microsegmentation():
     assert services["minio"].get("networks") == ["data_net"]
     assert services["chromadb"].get("networks") == ["data_net"]
 
-    # 6. Redis подключен к admin_backend_net и изолирован от simulation_net
-    assert services["redis"].get("networks") == ["admin_backend_net"]
+    # 6. Redis доступен контуру управления и шлюзу симуляции для канала отзыва
+    redis_nets = services["redis"].get("networks", [])
+    assert set(redis_nets) == {"admin_backend_net", "simulation_net"}
 
     # 7. PostgreSQL подключен исключительно к изолированной data_net
     assert services["postgres-db"].get("networks") == ["data_net"], "PostgreSQL должен быть строго в data_net (internal: true)"
@@ -119,8 +120,8 @@ def test_caddyfile_tls_and_mtls_configuration():
     content = caddyfile_path.read_text(encoding="utf-8")
 
     # Проверка строгих версий TLS
-    assert ("protocols tls1.2 tls1.3" in content or "protocols tls1.3 tls1.2" in content), "Caddyfile должен требовать протоколы tls1.2 и tls1.3"
-    assert "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256" in content, "Caddyfile должен содержать безопасные TLS шифры"
+    assert ("protocols tls1.3" in content), "Caddyfile должен требовать TLS 1.3"
+    assert "protocols tls1.2 tls1.3" not in content
 
     # Проверка client_auth
     assert "client_auth" in content, "Caddyfile должен содержать блок client_auth"
@@ -156,6 +157,7 @@ def test_parse_mtls_client_certificate():
     scope = {
         "type": "http",
         "headers": [
+            (b"x-proxy-secret", os.environ["PROXY_INTERNAL_SECRET"].encode()),
             (b"x-client-cert-verify", b"SUCCESS"),
             (b"x-client-cert-subject", b"CN=admin-client,O=FinancialAI,C=RU"),
             (b"x-client-cert-issuer", b"CN=FinancialAI Internal Root CA,O=FinancialAI"),
@@ -180,6 +182,7 @@ def test_parse_mtls_client_certificate_unverified_or_missing():
     scope = {
         "type": "http",
         "headers": [
+            (b"x-proxy-secret", os.environ["PROXY_INTERNAL_SECRET"].encode()),
             (b"x-client-cert-verify", b"FAILED:certificate expired"),
         ]
     }
@@ -229,6 +232,7 @@ def test_verify_mtls_strict_mode_allowed_subjects(monkeypatch):
     auth_scope = {
         "type": "http",
         "headers": [
+            (b"x-proxy-secret", os.environ["PROXY_INTERNAL_SECRET"].encode()),
             (b"x-client-cert-verify", b"SUCCESS"),
             (b"x-client-cert-subject", b"CN=admin-client,O=FinancialAI"),
         ]
@@ -241,6 +245,7 @@ def test_verify_mtls_strict_mode_allowed_subjects(monkeypatch):
     unauth_scope = {
         "type": "http",
         "headers": [
+            (b"x-proxy-secret", os.environ["PROXY_INTERNAL_SECRET"].encode()),
             (b"x-client-cert-verify", b"SUCCESS"),
             (b"x-client-cert-subject", b"CN=untrusted-client,O=FinancialAI"),
         ]
@@ -263,6 +268,7 @@ def test_verify_mtls_strict_mode_allowed_issuers(monkeypatch):
     auth_scope = {
         "type": "http",
         "headers": [
+            (b"x-proxy-secret", os.environ["PROXY_INTERNAL_SECRET"].encode()),
             (b"x-client-cert-verify", b"SUCCESS"),
             (b"x-client-cert-subject", b"CN=admin-client"),
             (b"x-client-cert-issuer", b"CN=FinancialAI Internal Root CA,O=FinancialAI"),
@@ -275,6 +281,7 @@ def test_verify_mtls_strict_mode_allowed_issuers(monkeypatch):
     unauth_scope = {
         "type": "http",
         "headers": [
+            (b"x-proxy-secret", os.environ["PROXY_INTERNAL_SECRET"].encode()),
             (b"x-client-cert-verify", b"SUCCESS"),
             (b"x-client-cert-subject", b"CN=admin-client"),
             (b"x-client-cert-issuer", b"CN=Attacker Rogue CA"),
@@ -307,6 +314,7 @@ def test_api_auth_mtls_status_endpoint(monkeypatch):
 
     # 2. Запрос с mTLS-заголовками от Caddy
     headers = {
+        "X-Proxy-Secret": os.environ["PROXY_INTERNAL_SECRET"],
         "X-Client-Cert-Verify": "SUCCESS",
         "X-Client-Cert-Subject": "CN=admin-client,O=FinancialAI",
         "X-Client-Cert-Issuer": "CN=FinancialAI Internal Root CA",
@@ -333,6 +341,10 @@ def test_in_transit_ssl_settings():
     assert hasattr(settings, "MINIO_SECURE")
     assert hasattr(settings, "REDIS_SSL")
     assert hasattr(settings, "POSTGRES_SSLMODE")
+    security_source = (Path(__file__).parent.parent / "src" / "admin_server" / "fastapi" / "security.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'os.getenv("POSTGRES_SSLMODE", "verify-full")' in security_source
 
     from db import database
     assert hasattr(database, "POSTGRES_SSLMODE")

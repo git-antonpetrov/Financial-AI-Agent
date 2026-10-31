@@ -38,7 +38,7 @@ except ImportError:
             is_envelope_encryption_enabled,
         )
 
-_strict_sec = os.getenv("STRICT_SECURITY", "false").lower() in ("true", "1")
+_strict_sec = os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1")
 # Redis
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
@@ -127,18 +127,20 @@ CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
 log_info("Worker Init", "Инициализация клиентов...")
 
 REDIS_SSL_CA = os.getenv("REDIS_SSL_CA_CERTS", "/certs/ca.crt")
-redis_kwargs = {
-    "host": REDIS_HOST,
-    "port": REDIS_PORT,
-    "password": REDIS_PASSWORD,
-    "ssl": REDIS_SSL,
-    "decode_responses": True,
-}
-if REDIS_SSL and os.path.exists(REDIS_SSL_CA):
-    redis_kwargs["ssl_ca_certs"] = REDIS_SSL_CA
-    redis_kwargs["ssl_cert_reqs"] = "required"
+try:
+    from src.common.redis_factory import open_redis_or_none, redis_connection_kwargs
+except ImportError:
+    from common.redis_factory import open_redis_or_none, redis_connection_kwargs
 
-redis_client = redis.Redis(**redis_kwargs)
+redis_client = open_redis_or_none(
+    **redis_connection_kwargs(
+        REDIS_HOST,
+        REDIS_PORT,
+        REDIS_PASSWORD,
+        use_ssl=bool(REDIS_SSL and os.path.exists(REDIS_SSL_CA)),
+        ca_file=REDIS_SSL_CA,
+    )
+)
 
 
 minio_http_client = None
@@ -225,9 +227,15 @@ def get_db_pool() -> SimpleConnectionPool:
         "password": POSTGRES_PASSWORD,
         "dbname": POSTGRES_DB,
     }
-    if POSTGRES_SSLMODE:
-        pool_kwargs["sslmode"] = POSTGRES_SSLMODE
-        ca_cert_path = os.getenv("SSL_CERT_FILE", "/certs/ca.crt")
+    try:
+        from src.common.db.asyncpg_ssl import libpq_sslmode
+    except ImportError:
+        from common.db.asyncpg_ssl import libpq_sslmode
+
+    ca_cert_path = os.getenv("SSL_CERT_FILE", "/certs/ca.crt")
+    resolved_mode = libpq_sslmode(POSTGRES_SSLMODE, ca_cert_path)
+    if resolved_mode:
+        pool_kwargs["sslmode"] = resolved_mode
         if os.path.exists(ca_cert_path):
             pool_kwargs["sslrootcert"] = ca_cert_path
     db_pool = SimpleConnectionPool(**pool_kwargs)

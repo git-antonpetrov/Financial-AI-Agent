@@ -64,7 +64,9 @@ except ImportError:
         from common.crypto.zeroize import secure_zero_memory
     except ImportError:
         def secure_zero_memory(target: Any) -> None:
-            pass
+            raise RuntimeError(
+                "Модуль затирания ключей недоступен. Запуск без NIST SP 800-88 запрещён."
+            )
 
 VALID_ADMIN_USERS: set[str] = {"admin", "operator", "auditor"}
 
@@ -102,7 +104,7 @@ class Settings:
             return self.AUDITOR_PASSWORD_HASH
         return ""
     ADMIN_TOTP_SECRET: str = os.getenv("ADMIN_TOTP_SECRET", "").strip()
-    REQUIRE_2FA: bool = os.getenv("REQUIRE_2FA", "false").lower() in (
+    REQUIRE_2FA: bool = os.getenv("REQUIRE_2FA", "true").lower() in (
         "true",
         "1",
         "yes",
@@ -110,7 +112,7 @@ class Settings:
 
     # Параметры шифрования при хранении (Data at Rest / AES-256-GCM / MinIO SSE)
     DATA_ENCRYPTION_KEY: str = os.getenv("DATA_ENCRYPTION_KEY", "").strip()
-    MINIO_SSE_ENABLED: bool = os.getenv("MINIO_SSE_ENABLED", "false").lower() in (
+    MINIO_SSE_ENABLED: bool = os.getenv("MINIO_SSE_ENABLED", "true").lower() in (
         "true",
         "1",
         "yes",
@@ -120,7 +122,7 @@ class Settings:
     MINIO_KMS_SECRET_KEY: str = os.getenv("MINIO_KMS_SECRET_KEY", "").strip()
 
     # Параметры взаимного TLS (mTLS) и защиты сетевого трафика (In-Transit Encryption)
-    REQUIRE_MTLS: bool = os.getenv("REQUIRE_MTLS", "false").lower() in (
+    REQUIRE_MTLS: bool = os.getenv("REQUIRE_MTLS", "true").lower() in (
         "true",
         "1",
         "yes",
@@ -129,13 +131,14 @@ class Settings:
         s.strip() for s in os.getenv("ALLOWED_MTLS_SUBJECTS", "").split(",") if s.strip()
     ]
     ALLOWED_MTLS_ISSUERS: list[str] = [s.strip() for s in os.getenv("ALLOWED_MTLS_ISSUERS", "").split(",") if s.strip()]
-    MINIO_SECURE: bool = os.getenv("MINIO_SECURE", "false").lower() in (
+    MINIO_SECURE: bool = os.getenv("MINIO_SECURE", "true").lower() in (
         "true",
         "1",
         "yes",
     )
-    REDIS_SSL: bool = os.getenv("REDIS_SSL", "false").lower() in ("true", "1", "yes")
-    POSTGRES_SSLMODE: str = os.getenv("POSTGRES_SSLMODE", "prefer").strip()
+    REDIS_SSL: bool = os.getenv("REDIS_SSL", "true").lower() in ("true", "1", "yes")
+    STRICT_SECURITY: bool = os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1", "yes")
+    POSTGRES_SSLMODE: str = os.getenv("POSTGRES_SSLMODE", "verify-full").strip()
     PROXY_INTERNAL_SECRET: str = os.getenv("PROXY_INTERNAL_SECRET", "").strip()
 
     AGENT_DIGITAL_BOOTSTRAP_TOKEN: str = os.getenv("AGENT_DIGITAL_BOOTSTRAP_TOKEN", "")
@@ -411,13 +414,20 @@ class Settings:
             raise RuntimeError(f"Отсутствуют обязательные переменные окружения безопасности: {', '.join(missing)}")
 
         # SEC-10: Строгая валидация STRICT_SECURITY
-        if os.getenv("STRICT_SECURITY", "false").lower() == "true":
+        if os.getenv("STRICT_SECURITY", "true").lower() == "true":
             if self.REQUIRE_MTLS is not True:
                 raise RuntimeError("STRICT_SECURITY: REQUIRE_MTLS must be true")
             if self.REQUIRE_2FA is not True:
                 raise RuntimeError("STRICT_SECURITY: REQUIRE_2FA must be true")
 
-            forbidden_passwords = {"change_me", "secret", "admin123", "minioadmin"}
+            forbidden_passwords = {
+                "change_me",
+                "secret",
+                "admin123",
+                "minioadmin",
+                "financial-core-proxy-token-2026",
+                "change_this_proxy_internal_secret",
+            }
             for key, val in os.environ.items():
                 k_lower = key.lower()
                 if any(term in k_lower for term in ("password", "secret", "token", "key")):
@@ -432,6 +442,14 @@ class Settings:
             ]:
                 if sec_val and str(sec_val).strip().lower() in forbidden_passwords:
                     raise RuntimeError(f"STRICT_SECURITY: insecure default password or secret detected in {sec_name}")
+
+            proxy_secret = os.getenv("PROXY_INTERNAL_SECRET", "").strip()
+            if not proxy_secret:
+                raise RuntimeError("STRICT_SECURITY: PROXY_INTERNAL_SECRET must be set")
+            if proxy_secret.lower() in forbidden_passwords:
+                raise RuntimeError(
+                    "STRICT_SECURITY: insecure default password or secret detected in PROXY_INTERNAL_SECRET"
+                )
 
         if not self.ADMIN_TOTP_SECRET:
             log_info(
@@ -461,19 +479,20 @@ REDIS_SSL_CA = os.getenv("REDIS_SSL_CA_CERTS", "/certs/ca.crt")
 
 try:
     if redis is not None:
-        redis_kwargs = {
-            "host": REDIS_HOST,
-            "port": REDIS_PORT,
-            "password": REDIS_PASSWORD,
-            "ssl": settings.REDIS_SSL,
-            "decode_responses": True,
-            "socket_timeout": 2.0,
-            "socket_connect_timeout": 2.0,
-        }
-        if settings.REDIS_SSL and os.path.exists(REDIS_SSL_CA):
-            redis_kwargs["ssl_ca_certs"] = REDIS_SSL_CA
-            redis_kwargs["ssl_cert_reqs"] = "required"
+        from src.common.redis_factory import redis_connection_kwargs
+
+        redis_kwargs = redis_connection_kwargs(
+            REDIS_HOST,
+            REDIS_PORT,
+            REDIS_PASSWORD,
+            use_ssl=settings.REDIS_SSL and os.path.exists(REDIS_SSL_CA),
+            ca_file=REDIS_SSL_CA,
+        )
         redis_blacklist = redis.Redis(**redis_kwargs)
+        try:
+            redis_blacklist.ping()
+        except Exception:
+            redis_blacklist = None
     else:
         redis_blacklist = None
 except Exception as e:
@@ -618,7 +637,9 @@ async def get_current_admin(token: str = Depends(oauth2_scheme)) -> CurrentUser:
                 "Аутентификация",
                 f"Предупреждение безопасности: сбой проверки черного списка в Redis: {e}",
             )
-            if os.getenv("AUTH_FAIL_CLOSED", "false").lower() == "true":
+            if os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1", "yes") or os.getenv(
+                "AUTH_FAIL_CLOSED", "false"
+            ).lower() == "true":
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail="Authentication service temporarily unavailable",
@@ -629,6 +650,14 @@ async def get_current_admin(token: str = Depends(oauth2_scheme)) -> CurrentUser:
             "Аутентификация",
             "Черный список Redis не инициализирован; проверка отзыва токена невозможна",
         )
+        if os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1", "yes") or os.getenv(
+            "AUTH_FAIL_CLOSED", "false"
+        ).lower() == "true":
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Authentication service temporarily unavailable",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
 
     if is_revoked:
         raise HTTPException(
@@ -716,7 +745,9 @@ def verify_and_rotate_refresh_token(refresh_token: str) -> tuple[str, str]:
                 "Безопасность",
                 f"Сбой проверки черного списка Redis при ротации refresh-токена: {e}",
             )
-            if os.getenv("AUTH_FAIL_CLOSED", "false").lower() == "true":
+            if os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1", "yes") or os.getenv(
+                "AUTH_FAIL_CLOSED", "false"
+            ).lower() == "true":
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail="Authentication service temporarily unavailable",
@@ -731,7 +762,22 @@ def verify_and_rotate_refresh_token(refresh_token: str) -> tuple[str, str]:
             redis_blacklist.setex(f"blacklist:{refresh_token}", ttl, "rotated")
         except Exception as e:
             log_error("Безопасность", f"Сбой инвалидации старого refresh-токена в Redis: {e}")
-
+            if os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1", "yes") or os.getenv(
+                "AUTH_FAIL_CLOSED", "false"
+            ).lower() == "true":
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Authentication service temporarily unavailable",
+                ) from e
+    else:
+        if os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1", "yes") or os.getenv(
+            "AUTH_FAIL_CLOSED", "false"
+        ).lower() == "true":
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Authentication service temporarily unavailable",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
     role_str = payload.get("role")
     if not role_str or str(role_str).lower().strip() not in [r.value for r in Role]:
         raise HTTPException(
@@ -775,23 +821,6 @@ async def get_current_user(
             role=role_enum,
             permissions=perms,
         )
-    if isinstance(current_admin, str):
-        uname = current_admin.strip().lower()
-        if uname == "admin":
-            role_enum = Role.SUPERADMIN
-        elif uname == "operator":
-            role_enum = Role.OPERATOR
-        elif uname == "auditor":
-            role_enum = Role.AUDITOR
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid username or unrecognized role",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        perms = ROLE_PERMISSIONS.get(role_enum, set()).copy()
-        return CurrentUser(username=uname, role=role_enum, permissions=perms)
-
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -1409,20 +1438,23 @@ def parse_mtls_client_certificate(request: Request) -> dict[str, Any]:
     Извлекает и нормализует метаданные mTLS клиентского сертификата из HTTP-заголовков reverse proxy (Caddy/Nginx).
     Обеспечивает валидацию X-Proxy-Secret для исключения спуфинга mTLS-заголовков внутри сети.
     """
-    proxy_secret = settings.PROXY_INTERNAL_SECRET or os.getenv("PROXY_INTERNAL_SECRET", "").strip()
+    proxy_secret = os.getenv("PROXY_INTERNAL_SECRET", "").strip() or settings.PROXY_INTERNAL_SECRET.strip()
     client_secret = request.headers.get("x-proxy-secret", "").strip()
-    if proxy_secret or client_secret:
-        if not proxy_secret or not client_secret or not hmac.compare_digest(client_secret, proxy_secret):
-            return {
-                "verified": False,
-                "raw_verify_status": "UNTRUSTED_PROXY",
-                "subject": None,
-                "issuer": None,
-                "serial": None,
-                "fingerprint": None,
-                "common_name": None,
-                "is_present": False,
-            }
+    if (
+        not proxy_secret
+        or not client_secret
+        or not hmac.compare_digest(client_secret, proxy_secret)
+    ):
+        return {
+            "verified": False,
+            "raw_verify_status": "UNTRUSTED_PROXY",
+            "subject": None,
+            "issuer": None,
+            "serial": None,
+            "fingerprint": None,
+            "common_name": None,
+            "is_present": False,
+        }
 
     verify_header = request.headers.get("x-client-cert-verify", "").strip()
     # Caddy передает "SUCCESS" или статус верификации
@@ -1545,15 +1577,28 @@ def is_certificate_revoked_in_redis(
                     return True
             except Exception as e:
                 log_warning("PKI", f"Ошибка проверки отзыва сертификата в Redis: {e}")
+                if os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1", "yes"):
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Проверка отзыва сертификата недоступна",
+                    ) from e
         try:
             val = int(s_clean, 0)
             hex_val = format(val, "x")
             if f"serial:{hex_val}" in _revoked_certs_memory:
                 return True
             if client:
-                res_hex = client.exists(f"revoked:cert:serial:{hex_val}")
-                if res_hex in (1, True, "1"):
-                    return True
+                try:
+                    res_hex = client.exists(f"revoked:cert:serial:{hex_val}")
+                    if res_hex in (1, True, "1"):
+                        return True
+                except Exception as exc:
+                    log_warning("PKI", f"Ошибка проверки отзыва сертификата в Redis: {exc}")
+                    if os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1", "yes"):
+                        raise HTTPException(
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="Проверка отзыва сертификата недоступна",
+                        ) from exc
         except ValueError:
             pass
 
@@ -1569,6 +1614,11 @@ def is_certificate_revoked_in_redis(
                     return True
             except Exception as e:
                 log_warning("PKI", f"Ошибка проверки отзыва отпечатка в Redis: {e}")
+                if os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1", "yes"):
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Проверка отзыва сертификата недоступна",
+                    ) from e
 
     if agent_id:
         a_clean = str(agent_id).strip().lower()
@@ -1581,7 +1631,17 @@ def is_certificate_revoked_in_redis(
                     return True
             except Exception as e:
                 log_warning("PKI", f"Ошибка проверки отзыва агента в Redis: {e}")
+                if os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1", "yes"):
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Проверка отзыва сертификата недоступна",
+                    ) from e
 
+    if client is None and os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1", "yes"):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Проверка отзыва сертификата недоступна",
+        )
     return False
 
 
@@ -1617,6 +1677,13 @@ def verify_mtls_client_certificate(request: Request) -> dict[str, Any]:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Требуется действительный клиентский TLS-сертификат (mTLS Mutual Authentication Required)",
+        )
+
+    strict_security = os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1", "yes")
+    if strict_security and not settings.ALLOWED_MTLS_SUBJECTS:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="В строгом режиме список ALLOWED_MTLS_SUBJECTS не может быть пустым",
         )
 
     # Проверка разрешенных субъектов (Common Name или полный Subject)
@@ -1701,7 +1768,13 @@ def record_admin_nonce_if_new(nonce: str, ttl_seconds: int = 300, redis_conn=Non
 
 
 def clear_admin_nonces_cache() -> None:
-    """Очищает локальный кэш nonces (для тестов)."""
+    """Очищает локальный кэш nonces в тестовом режиме.
+
+    Вызывает:
+        RuntimeError: Вызов сделан без FINANCIAL_AI_ALLOW_TEST_BRIDGES.
+    """
+    if os.getenv("FINANCIAL_AI_ALLOW_TEST_BRIDGES", "").lower() not in ("1", "true", "yes"):
+        raise RuntimeError("Очистка nonce-кэша запрещена без FINANCIAL_AI_ALLOW_TEST_BRIDGES")
     with _admin_nonces_lock:
         _admin_nonces_memory.clear()
 
@@ -1895,8 +1968,19 @@ def sign_server_receipt(receipt_data: dict, private_key_pem: str | None = None) 
 _trusted_root_ca_cache: Any | None = None
 
 
+def _test_trust_override_allowed() -> bool:
+    """Сообщает, разрешена ли явная тестовая подмена доверия."""
+    return os.getenv("FINANCIAL_AI_ALLOW_TEST_BRIDGES", "").lower() in ("1", "true", "yes")
+
+
 def set_trusted_root_ca(ca_input: Any) -> None:
-    """Устанавливает доверенный Root CA в оперативной памяти (для тестов и кастомной инициализации)."""
+    """Устанавливает доверенный Root CA только при явном тестовом флаге.
+
+    Вызывает:
+        RuntimeError: Вызов сделан без FINANCIAL_AI_ALLOW_TEST_BRIDGES.
+    """
+    if not _test_trust_override_allowed():
+        raise RuntimeError("Подмена доверенного CA запрещена без FINANCIAL_AI_ALLOW_TEST_BRIDGES")
     global _trusted_root_ca_cache
     _trusted_root_ca_cache = parse_x509_certificate(ca_input)
     import sys
@@ -1909,7 +1993,13 @@ def set_trusted_root_ca(ca_input: Any) -> None:
 
 
 def reset_trusted_root_ca() -> None:
-    """Сбрасывает закешированный Root CA."""
+    """Сбрасывает закешированный Root CA только в тестовом режиме.
+
+    Вызывает:
+        RuntimeError: Вызов сделан без FINANCIAL_AI_ALLOW_TEST_BRIDGES.
+    """
+    if not _test_trust_override_allowed():
+        raise RuntimeError("Сброс доверенного CA запрещён без FINANCIAL_AI_ALLOW_TEST_BRIDGES")
     global _trusted_root_ca_cache
     _trusted_root_ca_cache = None
     import sys

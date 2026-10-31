@@ -96,10 +96,9 @@ def get_permissions_for_role(role: Role | str) -> set[Permission]:
 
 
 class CurrentUser(str):
-    """
-    Класс авторизованного пользователя, расширяющий str для 100% обратной
-    совместимости со старыми зависимостями (где ожидался str username).
-    Содержит роль, набор разрешений и методы проверки прав.
+    """Представляет авторизованного пользователя с явной ролью и набором разрешений.
+
+    Строковое значение объекта совпадает с именем учётной записи.
     """
 
     role: Role
@@ -108,18 +107,33 @@ class CurrentUser(str):
     def __new__(
         cls,
         username: str,
-        role: Role | str = Role.SUPERADMIN,
+        role: Role | str,
         permissions: set[Permission] | None = None,
     ):
-        instance = str.__new__(cls, username)
-        if isinstance(role, str):
+        """Создаёт пользователя только с переданной ролью.
+
+        Аргументы:
+            username: Имя учётной записи.
+            role: Роль RBAC. Параметр обязателен.
+            permissions: Набор разрешений. Если не передан, берётся из роли.
+
+        Возвращает:
+            Экземпляр CurrentUser.
+
+        Вызывает:
+            ValueError: Роль пустая или не входит в перечень ролей.
+        """
+        if isinstance(role, Role):
+            role_enum = role
+        elif isinstance(role, str) and role.strip():
             try:
                 role_enum = Role(role.lower().strip())
-            except ValueError:
-                role_enum = Role.SUPERADMIN
+            except ValueError as exc:
+                raise ValueError(f"Неизвестная роль: {role}") from exc
         else:
-            role_enum = role
+            raise ValueError("Роль пользователя обязательна")
 
+        instance = str.__new__(cls, username)
         instance.role = role_enum
         if permissions is not None:
             instance.permissions = permissions

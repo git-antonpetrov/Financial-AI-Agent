@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
+from src.simulations.api.bank_claims import remember_bank_movement
 from src.simulations.api.core.auth import verify_bank_token
 from src.simulations.api.schemas.responses import (
     AccountResponse,
@@ -348,13 +349,17 @@ async def transfer_money(
     Проверка и валидация счета получателя выполняются безопасно внутри заблокированной транзакции.
     Подписывает сформированный чек-ответ приватным ключом Банка (Блок 5 схемы arch.txt).
     """
-    effective_idempotency_key = None
-    if data.idempotency_key:
-        effective_idempotency_key = str(data.idempotency_key).strip()
-    elif request is not None and request.headers.get("X-Idempotency-Key"):
-        effective_idempotency_key = str(request.headers.get("X-Idempotency-Key")).strip()
-    elif isinstance(x_idempotency_key, str) and x_idempotency_key:
-        effective_idempotency_key = x_idempotency_key.strip()
+    header_key = None
+    if request is not None:
+        raw_header = request.headers.get("X-Idempotency-Key")
+        if isinstance(raw_header, str) and raw_header.strip():
+            header_key = raw_header.strip()
+    elif isinstance(x_idempotency_key, str) and x_idempotency_key.strip():
+        header_key = x_idempotency_key.strip()
+    body_key = str(data.idempotency_key).strip() if data.idempotency_key else ""
+    effective_idempotency_key = header_key or body_key or None
+    if not effective_idempotency_key:
+        raise HTTPException(400, "Требуется заголовок X-Idempotency-Key")
 
     async with get_db() as db:
         # 1. Проверка идемпотентности: возврат кэшированного ответа без повторного списания
@@ -362,7 +367,10 @@ async def transfer_money(
             existing_rec = await db.scalar(
                 select(IdempotencyRecord).where(IdempotencyRecord.key == effective_idempotency_key)
             )
-            if existing_rec:
+            if (
+                getattr(existing_rec, "key", None) == effective_idempotency_key
+                and getattr(existing_rec, "response_payload", None)
+            ):
                 log_info(
                     "BankAPI",
                     f"Идемпотентный повтор запроса: кэш для ключа {effective_idempotency_key}",
@@ -385,7 +393,7 @@ async def transfer_money(
                     Transaction.category == "expense",
                 )
             )
-            if existing_tx:
+            if getattr(existing_tx, "idempotency_key", None) == effective_idempotency_key:
                 log_info(
                     "BankAPI",
                     f"Идемпотентный повтор: найдена транзакция {existing_tx.id} для ключа {effective_idempotency_key}",
@@ -518,6 +526,14 @@ async def transfer_money(
 
         db.add(tx_out)
         db.add(tx_in)
+        remember_bank_movement(
+            db,
+            key=effective_idempotency_key,
+            operation_type="bank_transfer",
+            account_id=str(sender.id),
+            amount=data.amount,
+            direction="expense",
+        )
 
         # Криптографическое подписание чека приватным ключом Банка (Блок 5 схемы arch.txt)
         request_nonce = None

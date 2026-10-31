@@ -11,6 +11,7 @@ from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
 from src.simulations.db.bank.db.client import get_async_session_maker
+from src.simulations.workers.advisory_lock import acquire_advisory_lock, release_advisory_lock
 
 AsyncSessionLocal = get_async_session_maker()
 from src.simulations.core.utils.console_logger import log_error, log_info
@@ -68,6 +69,16 @@ async def process_auto_payments(session: AsyncSession, current_date: date) -> No
 
                 acc_bal = Decimal(str(account.balance))
                 ap_amt = Decimal(str(ap.amount))
+                autopay_key = f"autopay:{ap.id}:{current_date.isoformat()}"
+                already_posted = await session.scalar(
+                    select(Transaction).where(Transaction.idempotency_key == autopay_key)
+                )
+                if getattr(already_posted, "idempotency_key", None) == autopay_key:
+                    if ap.schedule == "monthly":
+                        ap.next_payment_date = ap.next_payment_date + relativedelta(months=1)
+                    else:
+                        ap.next_payment_date = ap.next_payment_date + timedelta(days=7)
+                    continue
                 if acc_bal >= ap_amt:
                     # Списываем деньги
                     account.balance = acc_bal - ap_amt
@@ -82,6 +93,7 @@ async def process_auto_payments(session: AsyncSession, current_date: date) -> No
                         status="completed",
                         date=current_date,
                         time=get_moscow_time(),
+                        idempotency_key=f"autopay:{ap.id}:{current_date.isoformat()}",
                     )
                     session.add(tx)
 
@@ -270,8 +282,8 @@ async def run_bank_eod() -> None:
     Запускает весь цикл EOD (End of Day) по реальному системному времени.
     """
     async with AsyncSessionLocal() as session:
-        lock = await session.scalar(text("SELECT pg_try_advisory_lock(84920481)"))
-        if not lock:
+        lock_conn, locked = await acquire_advisory_lock(session, 84920481)
+        if not locked:
             log_info("Bank EOD", "Параллельный процесс Bank EOD уже выполняется. Пропуск итерации.")
             return
 
@@ -286,5 +298,4 @@ async def run_bank_eod() -> None:
 
             log_info("Bank EOD", "=== EOD ЗАВЕРШЕН ===")
         finally:
-            await session.execute(text("SELECT pg_advisory_unlock(84920481)"))
-            await session.commit()
+            await release_advisory_lock(lock_conn, session, 84920481)

@@ -247,14 +247,17 @@ async def ipc_security_guard(request: Request, call_next):
             status_code=status.HTTP_403_FORBIDDEN,
         )
 
-    # Проверка IPC токена рукопожатия от доверенного родительского процесса
-    if SIDECAR_IPC_SECRET:
-        token = request.headers.get("x-local-secret") or request.query_params.get("secret")
-        if not token or not secrets.compare_digest(token.strip(), SIDECAR_IPC_SECRET):
-            return Response(
-                content="Forbidden: Invalid or missing IPC secret",
-                status_code=status.HTTP_403_FORBIDDEN,
-            )
+    if not SIDECAR_IPC_SECRET:
+        return Response(
+            content="Forbidden: IPC secret is not configured",
+            status_code=status.HTTP_403_FORBIDDEN,
+        )
+    token = request.headers.get("x-local-secret")
+    if not token or not secrets.compare_digest(token.strip(), SIDECAR_IPC_SECRET):
+        return Response(
+            content="Forbidden: Invalid or missing IPC secret",
+            status_code=status.HTTP_403_FORBIDDEN,
+        )
 
     return await call_next(request)
 
@@ -689,7 +692,9 @@ async def process_document(
         try:
             cfg = remote_client.get_contentai_config()
             contentai_username = contentai_username or cfg.get("username", "")
-            contentai_password = contentai_password or cfg.get("password", "")
+            fetched_password = cfg.get("password", "")
+            if fetched_password and fetched_password != "********":
+                contentai_password = contentai_password or fetched_password
             contentai_api_uri = contentai_api_uri or cfg.get("api_uri", "")
         except Exception:
             pass

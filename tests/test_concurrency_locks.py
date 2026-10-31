@@ -88,7 +88,8 @@ def test_bank_transfer_money_uses_ordered_pessimistic_locking(monkeypatch):
             amount=Decimal("300.00"),
             transfer_type="account",
             destination="40817810000000000001"
-        )
+        ,
+            idempotency_key="idem-test")
 
         await transfer_money(req)
 
@@ -147,7 +148,8 @@ def test_bank_transfer_money_deadlock_symmetry(monkeypatch):
                 amount=Decimal("100.00"),
                 transfer_type="account",
                 destination=f"NUM_{to_id[-1]}"
-            ))
+            ,
+            idempotency_key="idem-test"))
 
         # В обоих случаях запросы блокировки должны содержать одинаковый список идентификаторов в WHERE IN
         assert len(captured_sqls) == 2
@@ -217,7 +219,8 @@ def test_ruble_transfer_uses_ordered_pessimistic_locking(monkeypatch):
 
         monkeypatch.setattr("src.simulations.api.routers.ruble.ruble_db", lambda: make_async_cm(session))
 
-        req = RubleTransferRequest(to_wallet_id="w_A", amount=Decimal("200.00"))
+        req = RubleTransferRequest(to_wallet_id="w_A", amount=Decimal("200.00"),
+            idempotency_key="idem-test")
         await transfer_rubles("w_Z", req)
 
         assert executed_stmt is not None
@@ -263,16 +266,17 @@ def test_ruble_fund_and_withdraw_use_pessimistic_locks(monkeypatch):
         monkeypatch.setattr("src.simulations.api.routers.ruble.bank_db", lambda: make_async_cm(bank_session))
         monkeypatch.setattr("src.simulations.api.routers.ruble.ruble_db", lambda: make_async_cm(ruble_session))
 
-        req = FundWithdrawRequest(bank_account_id="bank_acc_1", amount=Decimal("250.00"))
+        req = FundWithdrawRequest(
+            bank_account_id="bank_acc_1",
+            amount=Decimal("250.00"),
+            idempotency_key="idem-fund-lock",
+        )
         await fund_wallet("ruble_w_1", req)
 
-        assert len(bank_stmts) == 1
-        assert bank_stmts[0]._for_update_arg is not None
-        assert "FOR UPDATE" in compile_pg(bank_stmts[0])
-
-        assert len(ruble_stmts) == 1
-        assert ruble_stmts[0]._for_update_arg is not None
-        assert "FOR UPDATE" in compile_pg(ruble_stmts[0])
+        assert any(getattr(stmt, "_for_update_arg", None) is not None for stmt in bank_stmts)
+        assert any("FOR UPDATE" in compile_pg(stmt) for stmt in bank_stmts)
+        assert any(getattr(stmt, "_for_update_arg", None) is not None for stmt in ruble_stmts)
+        assert any("FOR UPDATE" in compile_pg(stmt) for stmt in ruble_stmts)
 
         # 2. Вывод из кошелька (withdraw_wallet)
         bank_stmts.clear()
@@ -280,13 +284,10 @@ def test_ruble_fund_and_withdraw_use_pessimistic_locks(monkeypatch):
 
         await withdraw_wallet("ruble_w_1", req)
 
-        assert len(bank_stmts) == 1
-        assert bank_stmts[0]._for_update_arg is not None
-        assert "FOR UPDATE" in compile_pg(bank_stmts[0])
-
-        assert len(ruble_stmts) == 1
-        assert ruble_stmts[0]._for_update_arg is not None
-        assert "FOR UPDATE" in compile_pg(ruble_stmts[0])
+        assert any(getattr(stmt, "_for_update_arg", None) is not None for stmt in bank_stmts)
+        assert any("FOR UPDATE" in compile_pg(stmt) for stmt in bank_stmts)
+        assert any(getattr(stmt, "_for_update_arg", None) is not None for stmt in ruble_stmts)
+        assert any("FOR UPDATE" in compile_pg(stmt) for stmt in ruble_stmts)
 
     asyncio.run(_test())
 
@@ -314,7 +315,8 @@ def test_ruble_create_smart_contract_locks_creator_wallet(monkeypatch):
             receiver_wallet_id="receiver_w",
             amount=Decimal("400.00"),
             condition_type="oracle",
-            contract_code="def execute(ctx): pass"
+            contract_code="def execute(ctx): pass",
+            idempotency_key="idem-contract-lock",
         )
         await create_smart_contract("creator_w", req)
 
@@ -355,19 +357,22 @@ def test_invest_open_products_lock_bank_account(monkeypatch):
         monkeypatch.setattr("src.simulations.api.routers.invest.invest_db", lambda: make_async_cm(invest_session))
 
         # 1. Открытие вклада
-        req_dep = OpenProductRequest(client_id="cl_1", from_bank_account_id="bank_acc_invest", initial_amount=Decimal("10000.00"), term_months=6)
+        req_dep = OpenProductRequest(client_id="cl_1", from_bank_account_id="bank_acc_invest", initial_amount=Decimal("10000.00"), term_months=6,
+            idempotency_key="idem-open-test")
         await open_deposit(req_dep)
         assert bank_stmts[-1]._for_update_arg is not None
         assert "FOR UPDATE" in compile_pg(bank_stmts[-1])
 
         # 2. Открытие накопительного счета
-        req_sav = OpenProductRequest(client_id="cl_1", from_bank_account_id="bank_acc_invest", initial_amount=Decimal("5000.00"))
+        req_sav = OpenProductRequest(client_id="cl_1", from_bank_account_id="bank_acc_invest", initial_amount=Decimal("5000.00"),
+            idempotency_key="idem-open-test")
         await open_savings(req_sav)
         assert bank_stmts[-1]._for_update_arg is not None
         assert "FOR UPDATE" in compile_pg(bank_stmts[-1])
 
         # 3. Открытие брокерского счета
-        req_brk = OpenProductRequest(client_id="cl_1", from_bank_account_id="bank_acc_invest", initial_amount=Decimal("15000.00"))
+        req_brk = OpenProductRequest(client_id="cl_1", from_bank_account_id="bank_acc_invest", initial_amount=Decimal("15000.00"),
+            idempotency_key="idem-open-test")
         await open_broker_account(req_brk)
         assert bank_stmts[-1]._for_update_arg is not None
         assert "FOR UPDATE" in compile_pg(bank_stmts[-1])
@@ -406,7 +411,7 @@ def test_invest_close_products_lock_both_records(monkeypatch):
         monkeypatch.setattr("src.simulations.api.routers.invest.invest_db", lambda: make_async_cm(invest_session))
         monkeypatch.setattr("src.simulations.api.routers.invest.bank_db", lambda: make_async_cm(bank_session))
 
-        req = CloseProductRequest(to_bank_account_id="bank_acc_target")
+        req = CloseProductRequest(to_bank_account_id="bank_acc_target", idempotency_key="idem-close-lock")
 
         # Закрытие вклада
         await close_deposit("dep_1", req)

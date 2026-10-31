@@ -111,19 +111,15 @@ REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 REDIS_SSL_CA = os.getenv("REDIS_SSL_CA_CERTS", "/certs/ca.crt")
 
-redis_kwargs = {
-    "host": REDIS_HOST,
-    "port": REDIS_PORT,
-    "password": REDIS_PASSWORD,
-    "ssl": settings.REDIS_SSL,
-    "decode_responses": True,
-    "socket_timeout": 2.0,
-    "socket_connect_timeout": 2.0,
-}
-if settings.REDIS_SSL and os.path.exists(REDIS_SSL_CA):
-    redis_kwargs["ssl_ca_certs"] = REDIS_SSL_CA
-    redis_kwargs["ssl_cert_reqs"] = "required"
+from src.common.redis_factory import redis_connection_kwargs
 
+redis_kwargs = redis_connection_kwargs(
+    REDIS_HOST,
+    REDIS_PORT,
+    REDIS_PASSWORD,
+    use_ssl=settings.REDIS_SSL and os.path.exists(REDIS_SSL_CA),
+    ca_file=REDIS_SSL_CA,
+)
 redis_client = redis.Redis(**redis_kwargs)
 
 USER_ROLE_MAPPING: dict[str, Role] = {
@@ -274,10 +270,10 @@ async def mtls_enforcement_middleware(request: Request, call_next):
         "/health",
         "/api/auth/public-key",
         "/api/v1/auth/public-key",
-        "/docs",
-        "/openapi.json",
-        "/redoc",
     }
+    strict_security = os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1", "yes")
+    if not strict_security:
+        public_paths.update({"/docs", "/openapi.json", "/redoc"})
     if path in public_paths or request.method == "OPTIONS":
         return await call_next(request)
 
@@ -1015,31 +1011,38 @@ async def logout(
     """
     from security import redis_blacklist
 
-    if redis_blacklist:
-        try:
-            now_ts = int(datetime.now(UTC).timestamp())
-            payload = decode_access_token(token)
-            jti = payload.get("jti")
-            exp = payload.get("exp")
-            ttl = max(1, exp - now_ts) if exp else settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    if redis_blacklist is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Не удалось отозвать токен: хранилище отзыва недоступно",
+        )
+    try:
+        now_ts = int(datetime.now(UTC).timestamp())
+        payload = decode_access_token(token)
+        jti = payload.get("jti")
+        exp = payload.get("exp")
+        ttl = max(1, exp - now_ts) if exp else settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
 
-            if jti:
-                redis_blacklist.setex(f"blacklist:{jti}", ttl, "revoked")
-            redis_blacklist.setex(f"blacklist:{token}", ttl, "revoked")
+        if jti:
+            redis_blacklist.setex(f"blacklist:{jti}", ttl, "revoked")
+        redis_blacklist.setex(f"blacklist:{token}", ttl, "revoked")
 
-            if req and req.refresh_token:
-                try:
-                    ref_payload = decode_access_token(req.refresh_token)
-                    ref_jti = ref_payload.get("jti")
-                    ref_exp = ref_payload.get("exp")
-                    ref_ttl = max(1, ref_exp - now_ts) if ref_exp else settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400
-                    if ref_jti:
-                        redis_blacklist.setex(f"blacklist:{ref_jti}", ref_ttl, "revoked")
-                    redis_blacklist.setex(f"blacklist:{req.refresh_token}", ref_ttl, "revoked")
-                except Exception:
-                    pass
-        except Exception as e:
-            log_error("Auth", f"Failed to blacklist token in Redis: {e!s}")
+        if req and req.refresh_token:
+            ref_payload = decode_access_token(req.refresh_token)
+            ref_jti = ref_payload.get("jti")
+            ref_exp = ref_payload.get("exp")
+            ref_ttl = max(1, ref_exp - now_ts) if ref_exp else settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400
+            if ref_jti:
+                redis_blacklist.setex(f"blacklist:{ref_jti}", ref_ttl, "revoked")
+            redis_blacklist.setex(f"blacklist:{req.refresh_token}", ref_ttl, "revoked")
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error("Auth", f"Не удалось записать отзыв токена в Redis: {e!s}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Не удалось отозвать токен: хранилище отзыва недоступно",
+        ) from e
 
     log_success("Auth", "Successful logout, token(s) revoked in Redis")
     await audit.log_audit_event(

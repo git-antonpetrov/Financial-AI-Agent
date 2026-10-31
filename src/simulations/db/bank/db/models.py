@@ -109,6 +109,22 @@ class AutoPayment(Base):
     account = relationship("Account", back_populates="auto_payments")
 
 
+class BankIdempotencyClaim(Base):
+    """Фиксирует одну банковскую операцию на ключ идемпотентности.
+
+    Проводки не являются носителем идемпотентности: у перевода один ключ
+    стоит и на расходе, и на приходе. Повтор с другим типом, счётом или
+    суммой не считается успехом.
+    """
+
+    __tablename__ = "bank_idempotency_claims"
+    key = Column(String, primary_key=True)
+    operation_type = Column(String, nullable=False)
+    account_id = Column(String, nullable=False)
+    amount = Column(String, nullable=False)
+    direction = Column(String, nullable=False)
+
+
 class IdempotencyRecord(Base):
     """
     Таблица дедупликации и кэширования идемпотентных запросов перевода средств.

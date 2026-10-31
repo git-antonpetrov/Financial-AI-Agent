@@ -38,7 +38,7 @@ from src.simulations.db.invest.db.client import get_async_engine as get_invest_e
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Валидация строгого режима безопасности (SEC-10)
-    strict_sec = os.getenv("STRICT_SECURITY", "false").lower() in ("true", "1")
+    strict_sec = os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1")
     if strict_sec:
         require_enclave = os.getenv("REQUIRE_ENCLAVE_SIGNATURE", "true").lower() in (
             "true",
