@@ -1,3 +1,4 @@
+import os
 import time
 import base64
 import pytest
@@ -28,6 +29,14 @@ def setup_test_env(monkeypatch):
     monkeypatch.setenv("AGENT_DIGITAL_BOOTSTRAP_TOKEN", "test_digital_token")
     monkeypatch.setenv("ORACLE_BOOTSTRAP_TOKEN", "test_oracle_token")
     monkeypatch.setenv("REQUIRE_ENCLAVE_SIGNATURE", "false")
+
+
+def _proxy_headers(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Возвращает заголовки с верным секретом прокси."""
+    headers = {"X-Proxy-Secret": os.environ["PROXY_INTERNAL_SECRET"]}
+    if extra:
+        headers.update(extra)
+    return headers
 
 
 # =========================================================================
@@ -300,7 +309,7 @@ def test_bank_pki_endpoints():
     client = TestClient(app)
 
     # 1. Сводная информация о сертификатах
-    res_info = client.get("/bank/ca/certificate")
+    res_info = client.get("/bank/ca/certificate", headers=_proxy_headers())
     assert res_info.status_code == 200
     data = res_info.json()
     assert "root_ca_pem" in data
@@ -310,13 +319,13 @@ def test_bank_pki_endpoints():
     assert data["bank_cert_pem"].startswith("-----BEGIN CERTIFICATE-----")
 
     # 2. Сертификат Root CA в PEM
-    res_root = client.get("/bank/ca/root-cert.pem")
+    res_root = client.get("/bank/ca/root-cert.pem", headers=_proxy_headers())
     assert res_root.status_code == 200
     assert res_root.headers["content-type"].startswith("text/plain")
     assert res_root.text.startswith("-----BEGIN CERTIFICATE-----")
 
     # 3. Сертификат Банка в PEM
-    res_bank = client.get("/bank/ca/bank-cert.pem")
+    res_bank = client.get("/bank/ca/bank-cert.pem", headers=_proxy_headers())
     assert res_bank.status_code == 200
     assert res_bank.headers["content-type"].startswith("text/plain")
     assert res_bank.text.startswith("-----BEGIN CERTIFICATE-----")
@@ -366,7 +375,7 @@ def test_oracle_endpoint_with_valid_and_invalid_signature(monkeypatch):
     # 1. Запрос с валидной подписью оракула
     res_valid = client.post(
         "/ruble/smart-contracts/contract-sec-1/condition",
-        headers={"X-Bootstrap-Token": "test_oracle_token"},
+        headers=_proxy_headers({"X-Bootstrap-Token": "test_oracle_token"}),
         json={
             "status": "fulfilled",
             "oracle_name": "rate_oracle",
@@ -389,7 +398,7 @@ def test_oracle_endpoint_with_valid_and_invalid_signature(monkeypatch):
     fake_sig = base64.b64encode(b"invalid_oracle_signature_123456").decode("ascii")
     res_invalid = client.post(
         "/ruble/smart-contracts/contract-sec-1/condition",
-        headers={"X-Bootstrap-Token": "test_oracle_token"},
+        headers=_proxy_headers({"X-Bootstrap-Token": "test_oracle_token"}),
         json={
             "status": "fulfilled",
             "oracle_name": "rate_oracle",
@@ -437,11 +446,11 @@ def test_enclave_signed_request_and_replay_protection():
     )
     sig_b64 = base64.b64encode(raw_sig).decode("ascii")
 
-    headers = {
+    headers = _proxy_headers({
         "X-Enclave-Signature": sig_b64,
         "X-Nonce": nonce,
         "X-Timestamp": str(now_ts),
-    }
+    })
 
     # 1. Первый запрос с подписью Анклава должен пройти успешно
     res1 = client.get(path, headers=headers)

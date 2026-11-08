@@ -60,7 +60,8 @@ def test_open_deposit_initializes_next_payment_date_and_amount(monkeypatch):
             from_bank_account_id="bank_acc_1",
             initial_amount=Decimal("60000.00"),
             term_months=6
-        )
+        ,
+            idempotency_key="idem-open-test")
         res = await open_deposit(req)
 
         assert len(created_deposits) == 1
@@ -114,7 +115,8 @@ def test_open_savings_initializes_next_payment_date_and_amount(monkeypatch):
             client_id="cl_2",
             from_bank_account_id="bank_acc_2",
             initial_amount=Decimal("12000.00")
-        )
+        ,
+            idempotency_key="idem-open-test")
         res = await open_savings(req)
 
         assert len(created_savings) == 1
@@ -166,7 +168,8 @@ def test_open_broker_account_initializes_next_commission_date(monkeypatch):
             client_id="cl_3",
             from_bank_account_id="bank_acc_3",
             initial_amount=Decimal("15000.00")
-        )
+        ,
+            idempotency_key="idem-open-test")
         res = await open_broker_account(req)
 
         assert len(created_brokers) == 1

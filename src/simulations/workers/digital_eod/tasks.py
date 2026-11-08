@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from src.simulations.db.digital_ruble.db.client import get_async_session_maker
+from src.simulations.workers.advisory_lock import acquire_advisory_lock, release_advisory_lock
 
 AsyncSessionLocal = get_async_session_maker()
 
@@ -32,7 +33,7 @@ async def process_single_contract(session: AsyncSession, contract: SmartContract
     """
     contract_amount = Decimal(str(contract.amount))
 
-    # Блокируем строки кошельков участников в строго детерминированном (отсортированном) порядке для исключения deadlock
+    # Блокирует строки кошельков участников в строго детерминированном (отсортированном) порядке для исключения deadlock
     first_id, second_id = sorted([contract.creator_wallet_id, contract.receiver_wallet_id])
     first_res = await session.execute(select(Wallet).where(Wallet.id == first_id).with_for_update())
     w1 = first_res.scalars().first()
@@ -51,7 +52,7 @@ async def process_single_contract(session: AsyncSession, contract: SmartContract
         contract.error_message = "Кошелек создателя или получателя не найден в базе данных"
         return "failed"
 
-    # Подготавливаем контекст песочницы
+    # Подготавливает контекст песочницы
     ctx = ContractContext(
         contract_id=contract.id,
         creator_id=contract.creator_wallet_id,
@@ -60,7 +61,7 @@ async def process_single_contract(session: AsyncSession, contract: SmartContract
         condition_status=contract.condition_status,
     )
 
-    # Исполняем код контракта в защищенной песочнице
+    # Исполняет код контракта в защищенной песочнице
     success, is_completed, transfers, error_msg = SmartContractSandbox.execute_contract(
         code=contract.contract_code or "", ctx=ctx
     )
@@ -74,7 +75,7 @@ async def process_single_contract(session: AsyncSession, contract: SmartContract
         contract.status = "failed"
         contract.error_message = error_msg
 
-        # Возвращаем заблокированные средства создателю на его основной баланс
+        # Возвращает заблокированные средства создателю на его основной баланс
         refund_amount = min(creator_frozen, contract_amount)
         creator.frozen_balance = creator_frozen - refund_amount
         creator.balance = creator_bal + refund_amount
@@ -97,7 +98,7 @@ async def process_single_contract(session: AsyncSession, contract: SmartContract
 
         transferred_total = Decimal("0.00")
 
-        # Применяем переводы, списав средства из замороженного залога создателя
+        # Применяет переводы, списав средства из замороженного залога создателя
         for tx in transfers:
             amount_to_send = Decimal(str(tx["amount"]))
             to_wallet_id = tx["to"]
@@ -115,7 +116,7 @@ async def process_single_contract(session: AsyncSession, contract: SmartContract
 
             transferred_total += amount_to_send
 
-            # Записываем операцию в историю транзакций с реальной криптографической подписью платформы
+            # Записывает операцию в историю транзакций с реальной криптографической подписью платформы
             sig_ts = int(datetime.now(UTC).timestamp())
             signature = get_digital_platform_signer().sign_transaction(
                 sender_id=creator.id,
@@ -135,16 +136,16 @@ async def process_single_contract(session: AsyncSession, contract: SmartContract
             )
             session.add(new_tx)
 
-        # Снимаем из frozen_balance фактический объем переводов
+        # Снимает из frozen_balance фактический объем переводов
         escrow_release = min(creator_frozen, contract_amount)
         creator_frozen -= escrow_release
 
-        # Если контракт израсходовал не всю сумму залога, возвращаем остаток на баланс создателя
+        # Если контракт израсходовал не всю сумму залога, возвращает остаток на баланс создателя
         unspent_amount = contract_amount - transferred_total
         if unspent_amount > Decimal("0.00"):
             creator_bal += unspent_amount
 
-        # Сохраняем итоговые балансы
+        # Сохраняет итоговые балансы
         creator.balance = creator_bal
         creator.frozen_balance = creator_frozen
         receiver.balance = receiver_bal
@@ -222,8 +223,8 @@ async def run_ruble_eod() -> None:
     Защищена распределенной блокировкой PostgreSQL для исключения параллельного запуска воркеров.
     """
     async with AsyncSessionLocal() as session:
-        lock = await session.scalar(text("SELECT pg_try_advisory_lock(84920483)"))
-        if not lock:
+        lock_conn, locked = await acquire_advisory_lock(session, 84920483)
+        if not locked:
             log_info("Ruble EOD", "Параллельный процесс Ruble EOD уже выполняется. Пропуск итерации.")
             return
 
@@ -232,5 +233,4 @@ async def run_ruble_eod() -> None:
             await process_smart_contracts(session)
             log_info("Ruble EOD", "=== EOD ЦИФРОВОГО РУБЛЯ ЗАВЕРШЕН ===")
         finally:
-            await session.execute(text("SELECT pg_advisory_unlock(84920483)"))
-            await session.commit()
+            await release_advisory_lock(lock_conn, session, 84920483)

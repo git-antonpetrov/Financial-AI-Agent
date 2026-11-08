@@ -90,6 +90,7 @@ def test_process_task_preserves_minio_file_on_error(monkeypatch):
     mock_client = MagicMock()
     monkeypatch.setattr(vector_worker, "minio_client", mock_client)
     monkeypatch.setattr(vector_worker, "get_chroma_client", lambda: MagicMock())
+    monkeypatch.setattr(vector_worker, "get_db_pool", lambda: MagicMock())
     # Имитирует возврат некорректного Markdown без short_name
     mock_resp = MagicMock()
     mock_resp.read.return_value = b"# No frontmatter"
@@ -114,6 +115,7 @@ def test_process_task_deletes_minio_file_on_success(monkeypatch):
     mock_client = MagicMock()
     monkeypatch.setattr(vector_worker, "minio_client", mock_client)
     monkeypatch.setattr(vector_worker, "get_chroma_client", lambda: MagicMock())
+    monkeypatch.setattr(vector_worker, "get_db_pool", lambda: MagicMock())
     mock_resp = MagicMock()
     mock_resp.read.return_value = b"doc_to_delete\n"
     mock_client.get_object.return_value = mock_resp

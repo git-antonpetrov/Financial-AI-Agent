@@ -68,6 +68,14 @@ from security import (
 from src.admin_client.backend import main
 import contextlib
 
+IPC_SECRET = "unit-ipc-secret"
+
+
+@pytest.fixture(autouse=True)
+def bind_ipc_secret(monkeypatch):
+    """Подставляет IPC-секрет, потому что sidecar без секрета отклоняет запросы."""
+    monkeypatch.setattr(main, "SIDECAR_IPC_SECRET", IPC_SECRET)
+
 
 @contextlib.contextmanager
 def patch_rag_external_services():
@@ -75,7 +83,9 @@ def patch_rag_external_services():
     patches = []
     for mod_name in ["routers.rag_documents", "src.admin_server.fastapi.routers.rag_documents"]:
         try:
-            p = patch(f"{mod_name}._get_external_services", return_value=(None, None))
+            from tests.memory_redis import MemoryRedis
+
+            p = patch(f"{mod_name}._get_external_services", return_value=(None, MemoryRedis()))
             p.start()
             patches.append(p)
         except Exception:
@@ -346,7 +356,7 @@ def test_vector_worker_short_name_and_metadata_fallback():
 
 def test_admin_client_bff_new_endpoints():
     """Проверяет работу новых эндпоинтов BFF в admin_client main.py."""
-    test_client = TestClient(main.app)
+    test_client = TestClient(main.app, headers={"X-Local-Secret": "unit-ipc-secret"})
 
     with patch.object(main.remote_client, "is_authenticated", return_value=True):
         # 1. GET /api/local/agents/{name}/keys
@@ -551,7 +561,8 @@ def test_rag_documents_endpoint_returns_server_cert_header_and_body(pki_setup):
             "X-Signature": sig_b64,
             "X-Cert": pki_setup["client_cert_pem"],
             "Content-Type": "application/json",
-            "X-Client-Cert-Verify": "SUCCESS",
+            "X-Proxy-Secret": os.environ["PROXY_INTERNAL_SECRET"],
+        "X-Client-Cert-Verify": "SUCCESS",
             "X-Client-Cert-Subject": "CN=superadmin-workstation,OU=admin_operator"
         }
 
@@ -865,7 +876,8 @@ def test_rag_documents_delete_endpoint_and_x_agent_cert(pki_setup):
             "X-Signature": sig_b64,
             "X-Agent-Cert": pki_setup["client_cert_pem"],
             "Content-Type": "application/json",
-            "X-Client-Cert-Verify": "SUCCESS",
+            "X-Proxy-Secret": os.environ["PROXY_INTERNAL_SECRET"],
+        "X-Client-Cert-Verify": "SUCCESS",
             "X-Client-Cert-Subject": "CN=superadmin-workstation,OU=admin_operator"
         }
 

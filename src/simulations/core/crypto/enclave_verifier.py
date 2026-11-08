@@ -23,31 +23,22 @@ class NonceStore:
         self.redis_client = redis_client
         if self.redis_client is None:
             try:
-                import redis
+                from src.common.redis_factory import open_redis_or_none, redis_connection_kwargs
 
                 redis_host = os.getenv("REDIS_HOST", "redis")
                 redis_port = int(os.getenv("REDIS_PORT", "6379"))
                 redis_password = os.getenv("REDIS_PASSWORD", "")
                 redis_ssl = os.getenv("REDIS_SSL", "true").lower() in ("true", "1", "yes")
                 redis_ca = os.getenv("REDIS_SSL_CA_CERTS", "/certs/ca.crt")
-
-                kwargs = {
-                    "host": redis_host,
-                    "port": redis_port,
-                    "password": redis_password or None,
-                    "decode_responses": True,
-                    "socket_timeout": 1.5,
-                    "socket_connect_timeout": 1.5,
-                }
-                if redis_ssl and os.path.exists(redis_ca):
-                    kwargs["ssl"] = True
-                    kwargs["ssl_ca_certs"] = redis_ca
-                    kwargs["ssl_cert_reqs"] = "required"
-                candidate_redis = redis.Redis(**kwargs)
-                if candidate_redis.ping() is True:
-                    self.redis_client = candidate_redis
-                else:
-                    self.redis_client = None
+                self.redis_client = open_redis_or_none(
+                    **redis_connection_kwargs(
+                        redis_host,
+                        redis_port,
+                        redis_password,
+                        use_ssl=redis_ssl and os.path.exists(redis_ca),
+                        ca_file=redis_ca,
+                    )
+                )
             except Exception:
                 self.redis_client = None
         self._memory_cache: dict[str, float] = {}
@@ -110,7 +101,13 @@ class NonceStore:
             self._memory_cache.pop(nonce, None)
 
     def clear(self) -> None:
-        """Очищает память (для тестов)."""
+        """Очищает память nonce только при явном тестовом флаге.
+
+        Вызывает:
+            RuntimeError: Вызов сделан без FINANCIAL_AI_ALLOW_TEST_BRIDGES.
+        """
+        if os.getenv("FINANCIAL_AI_ALLOW_TEST_BRIDGES", "").lower() not in ("1", "true", "yes"):
+            raise RuntimeError("Очистка nonce запрещена без FINANCIAL_AI_ALLOW_TEST_BRIDGES")
         with self._lock:
             self._memory_cache.clear()
 
@@ -301,7 +298,7 @@ class EnclaveVerifier:
             for canonical_data in canonical_candidates:
                 try:
                     if isinstance(public_key, rsa.RSAPublicKey):
-                        # Пробуем PSS, при ошибке PKCS1v15 для совместимости
+                        # Проверяет подпись RSA-PSS, а при несовпадении — PKCS1v15.
                         try:
                             public_key.verify(
                                 signature_bytes,
@@ -361,6 +358,12 @@ def get_enclave_verifier() -> EnclaveVerifier:
 
 
 def reset_enclave_verifier_for_tests() -> None:
-    """Сбрасывает синглтон верификатора анклава для изоляции тестов."""
+    """Сбрасывает синглтон верификатора анклава только при явном тестовом флаге.
+
+    Вызывает:
+        RuntimeError: Вызов сделан без FINANCIAL_AI_ALLOW_TEST_BRIDGES.
+    """
     global _ENCLAVE_VERIFIER_INSTANCE
+    if os.getenv("FINANCIAL_AI_ALLOW_TEST_BRIDGES", "").lower() not in ("1", "true", "yes"):
+        raise RuntimeError("Сброс верификатора анклава запрещён без FINANCIAL_AI_ALLOW_TEST_BRIDGES")
     _ENCLAVE_VERIFIER_INSTANCE = None

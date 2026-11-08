@@ -56,14 +56,12 @@ async def create_database_if_not_exists():
     sys_url = url.replace(f"/{raw_db_name}", "/postgres")
     sys_url_asyncpg = sys_url.replace("postgresql+asyncpg://", "postgres://")
 
-    ssl_mode = os.getenv("POSTGRES_SSLMODE", "").strip()
+    from src.common.db.asyncpg_ssl import build_asyncpg_ssl
+
+    ssl_arg = build_asyncpg_ssl(os.getenv("POSTGRES_SSLMODE", ""))
     conn_kwargs = {}
-    if ssl_mode and ssl_mode not in ("disable", "allow"):
-        if os.path.exists("/certs/ca.crt"):
-            import ssl
-            conn_kwargs["ssl"] = ssl.create_default_context(cafile="/certs/ca.crt")
-        else:
-            conn_kwargs["ssl"] = True
+    if ssl_arg is not None:
+        conn_kwargs["ssl"] = ssl_arg
 
     from src.simulations.core.utils.console_logger import log_info, log_warning
 
@@ -169,7 +167,7 @@ async def seed_data():
                 strat = random.choice(strategies) if random.random() > 0.5 else None
                 strat_id = strat.id if strat else None
 
-                # Если подписан на стратегию, случайным образом генерируем доход
+                # Если подписан на стратегию, случайным образом генерирует доход
                 income = Decimal(str(round(random.uniform(-5000, 20000), 2))) if strat_id else Decimal("0.00")
                 next_comm = random_next_payment_date() if strat_id else None
 

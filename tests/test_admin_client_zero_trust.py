@@ -40,8 +40,8 @@ try:
         export_windows_cert_to_cache,
         get_windows_cert_store_help_message,
         resolve_and_validate_client_certificate,
-        create_test_ca_and_client_cert,
     )
+    from tests.crypto_material import create_test_ca_and_client_cert
     from src.admin_client.backend.pipeline import DocumentPipeline
     from src.admin_client.backend import main
 except ImportError:
@@ -57,8 +57,8 @@ except ImportError:
         export_windows_cert_to_cache,
         get_windows_cert_store_help_message,
         resolve_and_validate_client_certificate,
-        create_test_ca_and_client_cert,
     )
+    from tests.crypto_material import create_test_ca_and_client_cert
     from pipeline import DocumentPipeline
     import main
 

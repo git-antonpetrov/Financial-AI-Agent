@@ -30,7 +30,7 @@ except ImportError:
             import ctypes
 
             def secure_zero_memory(target: Any) -> None:
-                """NIST SP 800-88 compliant memory zeroization fallback."""
+                """Затирает буфер ключа нулями по NIST SP 800-88, если общий модуль недоступен."""
                 if target is None:
                     return
                 if isinstance(target, bytearray):
@@ -51,7 +51,9 @@ except ImportError:
                         pass
         except Exception:
             def secure_zero_memory(target: Any) -> None:
-                pass
+                raise RuntimeError(
+                    "Модуль затирания ключей недоступен. Запуск без NIST SP 800-88 запрещён."
+                )
 
 
 def zeroize_private_key_material(key_material: bytearray | memoryview | bytes | str | Any) -> None:
@@ -148,11 +150,11 @@ async def check_md5(db: AsyncSession, file_hash: str, filename: str, agent_name:
 
     from sqlalchemy import text
 
-    # Создаем 64-битный хэш из file_hash для блокировки
+    # Создаёт 64-битный хеш file_hash для блокировки.
     lock_id = int(hashlib.md5(file_hash.encode()).hexdigest()[:16], 16) - 2**63
     await db.execute(text("SELECT pg_advisory_xact_lock(:lock_id)"), {"lock_id": lock_id})
 
-    # 1. Проверяем завершенные или обрабатываемые воркером файлы
+    # 1. Проверяет завершенные или обрабатываетые воркером файлы
     query_completed = select(models.Document).where(
         models.Document.file_hash == file_hash,
         models.Document.agent_name == agent_name,
@@ -163,7 +165,7 @@ async def check_md5(db: AsyncSession, file_hash: str, filename: str, agent_name:
     if completed_doc:
         return "duplicate"
 
-    # 2. Проверяем наличие временной записи 'checking'
+    # 2. Проверяет наличие временной записи 'checking'
     query_checking = (
         select(models.Document)
         .where(
@@ -189,7 +191,7 @@ async def check_md5(db: AsyncSession, file_hash: str, filename: str, agent_name:
             is_stale = True
 
         if is_stale:
-            # Предыдущая проверка зависла или оборвалась — перезапускаем ее для нового файла
+            # Предыдущая проверка зависла или оборвалась — перезапускает ее для нового файла
             checking_doc.created_at = now
             checking_doc.filename = filename
             checking_doc.message = "Файл принят на повторную проверку (предыдущая проверка истекла по таймауту)"
@@ -199,7 +201,7 @@ async def check_md5(db: AsyncSession, file_hash: str, filename: str, agent_name:
             # Активная проверка в рамках последних 30 минут
             return "duplicate"
 
-    # Свежий файл — создаём запись 'checking'
+    # Свежий файл — создаёт запись 'checking'
     await create_document(
         db,
         file_hash,
@@ -360,7 +362,7 @@ async def update_checking_to_processing(
     except Exception:
         doc = None
 
-    # Если по file_hash не найдено, пробуем найти по filename + agent_name + status='checking'
+    # Если по file_hash не найдено, пытается найти по filename + agent_name + status='checking'
     if not doc and filename:
         query_fn = (
             select(models.Document)
@@ -396,7 +398,7 @@ async def update_checking_to_processing(
             raise RuntimeError(f"Ошибка фиксации обновления статуса документа: {e}") from e
         return doc
 
-    # Запасной вариант: если 'checking' запись не найдена, создаём новую
+    # Запасной вариант: если 'checking' запись не найдена, создаёт новую
     target_hash = new_file_hash or file_hash
     target_fn = filename or ""
     return await create_document(
@@ -626,7 +628,7 @@ async def rotate_agent_key(
         old_k.status = "superseded"
 
     # Зануление конфиденциального буфера закрытого ключа в памяти (NIST SP 800-88)
-    # Зануляем именно байты приватного ключа, а не копию публичного ключа!
+    # Зануляет именно байты приватного ключа, а не копию публичного ключа!
     priv_target = old_private_key if old_private_key is not None else private_key
     if priv_target is not None:
         zeroize_private_key_material(priv_target)

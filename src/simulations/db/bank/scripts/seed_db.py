@@ -51,14 +51,12 @@ async def create_database_if_not_exists():
     sys_url = url.replace(f"/{raw_db_name}", "/postgres")
     sys_url_asyncpg = sys_url.replace("postgresql+asyncpg://", "postgres://")
 
-    ssl_mode = os.getenv("POSTGRES_SSLMODE", "").strip()
+    from src.common.db.asyncpg_ssl import build_asyncpg_ssl
+
+    ssl_arg = build_asyncpg_ssl(os.getenv("POSTGRES_SSLMODE", ""))
     conn_kwargs = {}
-    if ssl_mode and ssl_mode not in ("disable", "allow"):
-        if os.path.exists("/certs/ca.crt"):
-            import ssl
-            conn_kwargs["ssl"] = ssl.create_default_context(cafile="/certs/ca.crt")
-        else:
-            conn_kwargs["ssl"] = True
+    if ssl_arg is not None:
+        conn_kwargs["ssl"] = ssl_arg
 
     from src.simulations.core.utils.console_logger import log_info, log_warning
 
@@ -80,10 +78,10 @@ async def seed_data():
     await init_db()
 
     async with AsyncSessionLocal() as session:
-        # Проверяем, есть ли уже данные (чтобы не дублировать)
-        # Если хотим пересоздавать — можно добавить Base.metadata.drop_all(engine) в init_db
+        # Пропускает вставку, если в базе уже есть счета.
+        # При необходимости пересоздания — можно добавить Base.metadata.drop_all(engine) в init_db
 
-        # 1. Создаем тарифы
+        # 1. Создаёт тарифы
         print("Создаем тарифы...")
         tariffs_data = [
             Tariff(
@@ -120,7 +118,7 @@ async def seed_data():
         session.add_all(tariffs_data)
         await session.commit()
 
-        # 2. Создаем клиентов
+        # 2. Создаёт клиентов
         print("Используем фиксированные UUID для клиентов...")
         client_ids = [
             "11111111-1111-1111-1111-111111111111",  # Иванов Иван Иванович
@@ -128,7 +126,7 @@ async def seed_data():
             "33333333-3333-3333-3333-333333333333",  # Васильков Василий Васильевич
         ]
 
-        # 3. Создаем счета, карты и транзакции для каждого
+        # 3. Создаёт счета, карты и транзакции для каждого
         print("Создаем счета, карты и транзакции...")
 
         operation_types_expense = ["transfer_sbp", "transfer_non_sbp", "purchase"]
@@ -144,7 +142,7 @@ async def seed_data():
         ]
 
         for client_id in client_ids:
-            # Даем каждому клиенту 1-2 счета
+            # Даёт каждому клиенту 1-2 счета
             num_accounts = random.randint(1, 2)
             for _ in range(num_accounts):
                 tariff = random.choice(tariffs_data)
@@ -156,7 +154,7 @@ async def seed_data():
                     tariff_id=tariff.id,
                 )
                 session.add(account)
-                await session.flush()  # Получаем account.id
+                await session.flush()  # Получает account.id
 
                 # Автоплатежи (50% шанс)
                 if random.random() > 0.5:

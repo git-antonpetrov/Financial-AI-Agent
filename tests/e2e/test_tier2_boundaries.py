@@ -243,7 +243,8 @@ def test_banking_transfer_overdraft_rejection(monkeypatch):
             amount=Decimal("50000.00"),
             transfer_type="account",
             destination="40817810000000000002",
-        )
+        
+            idempotency_key="idem-test")
 
         with pytest.raises(HTTPException) as exc_info:
             await transfer_money(req)
@@ -264,7 +265,8 @@ def test_banking_transfer_negative_or_zero_amount():
             amount=Decimal("0.00"),
             transfer_type="account",
             destination="40817810000000000002",
-        )
+        
+            idempotency_key="idem-test")
 
     with pytest.raises((HTTPException, ValidationError)):
         TransferRequest(
@@ -272,7 +274,8 @@ def test_banking_transfer_negative_or_zero_amount():
             amount=Decimal("-150.00"),
             transfer_type="account",
             destination="40817810000000000002",
-        )
+        
+            idempotency_key="idem-test")
 
 
 def test_banking_transfer_same_account_rejection(monkeypatch):
@@ -303,7 +306,8 @@ def test_banking_transfer_same_account_rejection(monkeypatch):
             amount=Decimal("100.00"),
             transfer_type="account",
             destination="40817810000000000001",
-        )
+        
+            idempotency_key="idem-test")
 
         with pytest.raises(HTTPException) as exc_info:
             await transfer_money(req)

@@ -292,6 +292,29 @@ class AgentRevokeKeyRequest(BaseModel):
     )
 
 
+class CertificateRevokeRequest(BaseModel):
+    """Запрос мгновенного отзыва сертификата по серийному номеру."""
+
+    serial: str = Field(
+        ...,
+        min_length=1,
+        max_length=128,
+        pattern=r"^(0x)?[0-9a-fA-F]+$",
+        description="Серийный номер сертификата в десятичной или шестнадцатеричной записи",
+    )
+    fingerprint: str | None = Field(
+        default=None,
+        max_length=128,
+        description="Отпечаток сертификата, если он известен",
+    )
+    reason: str = Field(
+        default="Compromised",
+        min_length=1,
+        max_length=255,
+        description="Причина отзыва",
+    )
+
+
 class AgentActionResponse(BaseModel):
     """Схема статусного ответа на действие над ключом/агентом."""
 

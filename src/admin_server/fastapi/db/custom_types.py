@@ -4,6 +4,7 @@
 """
 
 import base64
+import os
 from typing import Any
 
 from sqlalchemy.types import Text, TypeDecorator
@@ -63,5 +64,6 @@ class EncryptedText(TypeDecorator):
         except Exception as e:
             if is_enc:
                 raise ValueError(f"Decryption failed for ENC1 encrypted payload: {e}") from e
-            # Обратная совместимость с ранее сохраненным открытым текстом
+            if os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1", "yes"):
+                raise ValueError("В строгом режиме открытый текст в зашифрованной колонке запрещён") from e
             return val_str

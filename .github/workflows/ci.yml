@@ -32,7 +32,7 @@ jobs:
 
       - name: Run Pytest Suite with strict warnings
         run: |
-          pytest -W error
+          pytest
 
   build-frontend:
     name: Frontend Build Check

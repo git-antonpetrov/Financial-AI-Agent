@@ -110,8 +110,9 @@ async def log_audit_event(
     except Exception as e:
         log_warning(
             "Audit",
-            f"Предупреждение: сбой взятия advisory lock для журнала аудита: {e}",
+            f"Сбой взятия advisory lock для журнала аудита: {e}",
         )
+        raise RuntimeError("Запись аудита отклонена: advisory lock недоступен") from e
 
     # Получение последней записи в журнале (Fail-Closed: ошибка БД не маскируется)
     prev_hash = GENESIS_HASH

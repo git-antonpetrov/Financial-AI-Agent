@@ -178,11 +178,11 @@ async def cleanup_stale_jobs():
     """Выполняет периодическую фоновую очистку устаревших задач для предотвращения утечки памяти."""
     while True:
         try:
-            await asyncio.sleep(300)  # Проверяем каждые 5 минут
+            await asyncio.sleep(300)  # Повторяет проверку каждые 5 минут.
             current_time = time.time()
             stale_jobs = [
                 job_id for job_id, created_at in list(job_creation_times.items()) if current_time - created_at > 3600
-            ]  # Удаляем старше 1 часа
+            ]  # Удаляет записи старше одного часа.
             for job_id in stale_jobs:
                 job_queues.pop(job_id, None)
                 job_statuses.pop(job_id, None)
@@ -196,7 +196,7 @@ async def cleanup_stale_jobs():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Управляет жизненным циклом приложения FastAPI, запуская и корректно останавливая фоновые задачи."""
-    # Запускаем фоновую очистку при старте приложения
+    # Запускает фоновую очистку при старте приложения
     cleanup_task = asyncio.create_task(cleanup_stale_jobs())
     yield
     cleanup_task.cancel()
@@ -247,14 +247,17 @@ async def ipc_security_guard(request: Request, call_next):
             status_code=status.HTTP_403_FORBIDDEN,
         )
 
-    # Проверка IPC токена рукопожатия от доверенного родительского процесса
-    if SIDECAR_IPC_SECRET:
-        token = request.headers.get("x-local-secret") or request.query_params.get("secret")
-        if not token or not secrets.compare_digest(token.strip(), SIDECAR_IPC_SECRET):
-            return Response(
-                content="Forbidden: Invalid or missing IPC secret",
-                status_code=status.HTTP_403_FORBIDDEN,
-            )
+    if not SIDECAR_IPC_SECRET:
+        return Response(
+            content="Forbidden: IPC secret is not configured",
+            status_code=status.HTTP_403_FORBIDDEN,
+        )
+    token = request.headers.get("x-local-secret")
+    if not token or not secrets.compare_digest(token.strip(), SIDECAR_IPC_SECRET):
+        return Response(
+            content="Forbidden: Invalid or missing IPC secret",
+            status_code=status.HTTP_403_FORBIDDEN,
+        )
 
     return await call_next(request)
 
@@ -380,7 +383,7 @@ def validate_server_url(server_url: str) -> None:
             ip_str = item[4][0]
             ip_obj = ipaddress.ip_address(ip_str)
 
-            # Проверяем вхождение в доверенные корпоративные подсети
+            # Проверяет вхождение адреса в доверенные корпоративные подсети.
             if any(ip_obj in net for net in enterprise_networks):
                 continue
 
@@ -665,7 +668,7 @@ async def process_document(
     if agent_name not in VALID_AGENTS:
         raise HTTPException(status_code=400, detail=f"Invalid agent: {agent_name}")
 
-    # Подтягиваем параметры из активной сессии remote_client, если они не переданы напрямую
+    # Подтягивает параметры из активной сессии remote_client, если они не переданы напрямую
     if not server_url and remote_client:
         server_url = remote_client.server_url
     if not admin_token and remote_client:
@@ -689,7 +692,9 @@ async def process_document(
         try:
             cfg = remote_client.get_contentai_config()
             contentai_username = contentai_username or cfg.get("username", "")
-            contentai_password = contentai_password or cfg.get("password", "")
+            fetched_password = cfg.get("password", "")
+            if fetched_password and fetched_password != "********":
+                contentai_password = contentai_password or fetched_password
             contentai_api_uri = contentai_api_uri or cfg.get("api_uri", "")
         except Exception:
             pass
@@ -857,7 +862,7 @@ async def get_progress(job_id: str):
                 is_completed = True
                 break
     finally:
-        # Очищаем ресурсы только если получен терминальный статус или пайплайн уже завершен
+        # Очищает ресурсы только если получен терминальный статус или пайплайн уже завершен
         if is_completed or job_statuses.get(job_id) == "finished":
             job_queues.pop(job_id, None)
             job_statuses.pop(job_id, None)

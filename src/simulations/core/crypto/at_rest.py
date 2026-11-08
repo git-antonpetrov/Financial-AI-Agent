@@ -21,7 +21,9 @@ except ImportError:
         from common.crypto.zeroize import secure_zero_memory
     except ImportError:
         def secure_zero_memory(target: Any) -> None:
-            pass
+            raise RuntimeError(
+                "Модуль затирания ключей недоступен. Запуск без NIST SP 800-88 запрещён."
+            )
 
 MAGIC_ENCRYPTION_V1 = b"ENC1"
 
@@ -200,7 +202,7 @@ class EncryptedText(TypeDecorator):
     impl = Text
     cache_ok = True
 
-    def __init__(self, deterministic: bool = True, *args: Any, **kwargs: Any):
+    def __init__(self, deterministic: bool = False, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.deterministic = deterministic
 
@@ -215,6 +217,8 @@ class EncryptedText(TypeDecorator):
         val_str = str(value)
         if is_encrypted_text(val_str):
             return decrypt_text_at_rest(val_str)
+        if os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1", "yes"):
+            raise ValueError("В строгом режиме открытый текст в зашифрованной колонке запрещён")
         return val_str
 
 
@@ -245,6 +249,8 @@ class EncryptedDecimal(TypeDecorator):
         if is_encrypted_text(val_str):
             decrypted = decrypt_text_at_rest(val_str)
             return Decimal(decrypted)
+        if os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1", "yes"):
+            raise ValueError("В строгом режиме открытый текст в зашифрованной колонке запрещён")
         try:
             return Decimal(val_str)
         except Exception:

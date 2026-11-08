@@ -22,6 +22,7 @@ except ImportError:
 
 try:
     from src.admin_client.backend.core.crypto import (
+        HardwareSigningBridge,
         WindowsCertificateStoreError,
         ZeroTrustClientSigner,
         export_windows_cert_to_cache,
@@ -32,6 +33,7 @@ try:
 except ImportError:
     try:
         from core.crypto import (
+            HardwareSigningBridge,
             WindowsCertificateStoreError,
             ZeroTrustClientSigner,
             export_windows_cert_to_cache,
@@ -40,6 +42,7 @@ except ImportError:
             get_windows_cert_store_help_message,
         )
     except ImportError:
+        HardwareSigningBridge = None
         ZeroTrustClientSigner = None
         find_root_ca_in_windows_store = None
         find_client_cert_in_windows_store = None
@@ -78,13 +81,13 @@ class DocumentPipeline:
         """
         Инициализирует экземпляр пайплайна с параметрами подключения к серверу, Content AI и mTLS.
 
-        Args:
-            server_url (str): Базовый URL сервера (например, https://api.my-vds.com)
-            admin_token (str): JWT токен администратора для авторизации запросов
-            ca_cert_path (Optional[str]): Путь к доверенному Root CA сертификату (ca.crt)
-            client_cert_path (Optional[str]): Путь к клиентскому mTLS сертификату (admin_client.crt)
-            client_key_path (Optional[str]): Путь к приватному ключу клиента (admin_client.key)
-            signer (Optional[ZeroTrustClientSigner]): Экземпляр клиента цифровой подписи
+        Аргументы:
+            server_url: Базовый URL сервера, например https://api.my-vds.com.
+            admin_token: JWT администратора для авторизации запросов.
+            ca_cert_path: Путь к доверенному корневому сертификату ca.crt.
+            client_cert_path: Путь к клиентскому сертификату mTLS admin_client.crt.
+            client_key_path: Путь к приватному ключу клиента admin_client.key.
+            signer: Экземпляр клиента цифровой подписи.
             use_zero_trust (bool): Использовать защищенный эндпоинт /api/v1/rag/documents с цифровой подписью
         """
         self.server_url = server_url.rstrip("/")
@@ -153,7 +156,11 @@ class DocumentPipeline:
             self.signer = signer
         elif ZeroTrustClientSigner is not None and self.use_zero_trust:
             try:
-                signer_mode = "software" if self.client_key_path else "hardware"
+                has_key_file = bool(self.client_key_path and os.path.exists(self.client_key_path))
+                is_hw_available = bool(
+                    HardwareSigningBridge is not None and HardwareSigningBridge.is_tpm_available()
+                )
+                signer_mode = "hardware" if is_hw_available else ("software" if has_key_file else "hardware")
                 self.signer = ZeroTrustClientSigner(
                     mode=signer_mode,
                     cert_path=self.client_cert_path,
@@ -181,9 +188,9 @@ class DocumentPipeline:
         """
         Устанавливает функцию обратного вызова для передачи статуса обработки в пользовательский интерфейс.
 
-        Args:
-            callback: Функция, принимающая (имя_файла, статус, текстовое_сообщение).
-                      Примеры статусов: 'processing', 'completed', 'error', 'skipped'
+        Аргументы:
+            callback: Функция, которая принимает имя файла, статус и текстовое сообщение.
+                Статусы: processing, completed, error, skipped.
         """
         self.on_progress_update = callback
 
@@ -191,17 +198,17 @@ class DocumentPipeline:
         """
         Обрабатывает отдельный документ, последовательно выполняя все шаги пайплайна.
 
-        Args:
-            file_path (str): Локальный путь к файлу на компьютере администратора
-            agent_name (str): Имя RAG-агента (например, 'digital')
+        Аргументы:
+            file_path: Локальный путь к файлу на компьютере администратора.
+            agent_name: Имя RAG-агента, например digital.
 
-        Returns:
-            dict: Словарь с итоговым результатом обработки
+        Возвращает:
+            Словарь с итоговым результатом обработки.
         """
         filename = os.path.basename(file_path)
         log_info("Pipeline", f"Начало обработки файла: {filename}")
 
-        # Отправляем в React красивое уведомление о старте
+        # Отправляет в React красивое уведомление о старте
         self.on_progress_update(filename, "processing", "Шаг 1: Вычисление MD5 и проверка дубликатов...")
 
         is_hash_locked = False
@@ -228,7 +235,7 @@ class DocumentPipeline:
                 msg = "Пропущен: Точная копия файла уже загружена (дубликат)"
                 log_warning("Pipeline", f"Файл {filename} отброшен: {msg}")
 
-                # Сигнализируем React'у, что файл нужно покрасить в серый/желтый цвет
+                # Сигнализирует React'у, что файл нужно покрасить в серый/желтый цвет
                 self.on_progress_update(filename, "skipped", msg)
                 return {"status": "skipped", "reason": "md5_duplicate"}
 
@@ -240,7 +247,7 @@ class DocumentPipeline:
             if ext.lower() not in [".pdf"]:
                 log_info("Pipeline", f"Конвертация {filename} в PDF...")
                 self.on_progress_update(filename, "processing", f"Шаг 2: Конвертация {ext} в PDF...")
-                # Кладем сконвертированный PDF во временную папку (рядом с оригиналом)
+                # Кладёт сконвертированный PDF во временную папку (рядом с оригиналом)
                 temp_dir = os.path.join(os.path.dirname(file_path), "temp_converted")
                 working_file_path = convert_to_pdf(file_path, temp_dir)
                 filename_to_recognize = os.path.basename(working_file_path)
@@ -280,7 +287,7 @@ class DocumentPipeline:
             )
             log_info("Pipeline", "Отправка текста на LLM-анализ...")
 
-            # Берем первые ~15000 символов, чтобы не превысить лимит токенов (хватит для понимания сути документа)
+            # Оставляет первые 15000 символов, потому что более длинный текст превышает лимит токенов.
             analyze_url = f"{self.server_url}/api/llm/analyze"
             analyze_resp = self.session.post(
                 analyze_url,
@@ -378,7 +385,7 @@ class DocumentPipeline:
             )
             log_info("Pipeline", "Формирование Markdown и отправка...")
 
-            # Формируем главный файл (upsert) с безопасной сериализацией YAML frontmatter
+            # Формирует главный файл (upsert) с безопасной сериализацией YAML frontmatter
             frontmatter_data = {
                 "short_name": str(short_name),
                 "system_name": str(system_name),
@@ -481,7 +488,7 @@ class DocumentPipeline:
             }
 
         except requests.exceptions.RequestException as e:
-            # Отдельно ловим сетевые ошибки (если VDS упал)
+            # Отдельно ловит сетевые ошибки (если VDS упал)
             error_msg = f"Ошибка сети при связи с сервером: {e!s}"
             log_error("Pipeline", f"Сбой в файле {filename} -> {error_msg}")
             self.on_progress_update(filename, "error", error_msg)
@@ -494,7 +501,7 @@ class DocumentPipeline:
             return {"status": "error", "message": str(e)}
 
         finally:
-            # Освобождаем локальную блокировку MD5 только если этот поток её установил
+            # Освобождает локальную блокировку MD5 только если этот поток её установил
             if is_hash_locked and "file_hash" in locals():
                 with _ACTIVE_MD5_LOCK:
                     _ACTIVE_MD5S.discard(file_hash)
@@ -531,7 +538,7 @@ class DocumentPipeline:
         }
         body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
-        # Получаем защитные заголовки Zero-Trust
+        # Получает защитные заголовки Zero-Trust
         zt_headers = self.signer.create_rag_request_headers(body_bytes)
         combined_headers = {
             **self.headers,
@@ -553,7 +560,7 @@ class DocumentPipeline:
             receipt_verified = self.signer.verify_server_receipt(
                 resp_data, server_sig, trusted_server_cert_or_pubkey=server_cert
             )
-            # Если сертификат не был передан в ответе, пробуем запросить открытый ключ сервера через API
+            # Если сертификат не был передан в ответе, пытается запросить открытый ключ сервера через API
             if not receipt_verified and not server_cert:
                 try:
                     pk_resp = self.session.get(f"{self.server_url}/api/auth/public-key", timeout=5.0)
@@ -661,7 +668,7 @@ class DocumentPipeline:
         """
         hasher = hashlib.md5()
         with open(file_path, "rb") as f:
-            # Читаем блоками по 4 Мегабайта
+            # Читает блоками по 4 Мегабайта
             for chunk in iter(lambda: f.read(4096 * 1024), b""):
                 hasher.update(chunk)
         return hasher.hexdigest()
@@ -670,11 +677,11 @@ class DocumentPipeline:
         """
         Отправляет POST-запрос к FastAPI серверу для проверки наличия дубликата документа по MD5.
 
-        Returns:
-            bool: True если дубликат существует, False если файл новый.
+        Возвращает:
+            True, если дубликат существует. False, если файл новый.
 
-        Raises:
-            requests.exceptions.RequestException: Если сервер вернул ошибку 500 или недоступен.
+        Вызывает:
+            requests.exceptions.RequestException: Сервер вернул ошибку 500 или недоступен.
         """
         url = f"{self.server_url}/api/documents/check/md5"
         payload = {
@@ -683,10 +690,10 @@ class DocumentPipeline:
             "agent_name": agent_name,
         }
 
-        # Отправляем JSON и заголовки с токеном через защищенную mTLS-сессию
+        # Отправляет JSON и заголовки с токеном через защищенную mTLS-сессию
         response = self.session.post(url, headers=self.headers, json=payload, timeout=(5, 120))
 
-        # Если статус не 200 (например, 401 Unauthorized или 500 Internal Server Error) — выбрасываем исключение
+        # Если статус не 200 (например, 401 Unauthorized или 500 Internal Server Error) — выбрасывает исключение
         response.raise_for_status()
 
         data = response.json()
@@ -713,7 +720,7 @@ class DocumentPipeline:
         elif isinstance(parsed_data, (int, float)):
             texts.append(str(parsed_data))
 
-        # Отфильтруем пустые строки и склеим через пробел/перенос строки
+        # Отфильтровывает пустые строки и склеивает через пробел/перенос строки
         return "\n".join(filter(bool, texts))
 
     def _extract_repeal_paragraphs(self, text: str) -> list[str]:
@@ -728,7 +735,7 @@ class DocumentPipeline:
             r"считать\s+не\s*действующ\w*"
         )
         for p in paragraphs:
-            # Ищем юридические формулировки отмены или признания недействительным
+            # Ищет юридические формулировки отмены или признания документа недействительным.
             if re.search(pattern, p, re.IGNORECASE):
                 cleaned_p = p.strip()
                 if cleaned_p:

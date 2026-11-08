@@ -206,3 +206,19 @@ def test_context_dunder_isolation():
     with pytest.raises(AttributeError, match="категорически запрещен"):
         _ = ctx.__globals__
 
+
+def test_augassign_string_multiplication_hits_limit():
+    """Составное умножение строки на короткое число не обходит лимит песочницы."""
+    code = """
+def execute(ctx):
+    text = "a"
+    factor = int("100") * int("100")
+    text *= factor
+    return False
+"""
+    ctx = ContractContext("c-1", "w-1", "w-2", 100.0, "fulfilled")
+    success, _, _, error = SmartContractSandbox.execute_contract(code, ctx)
+    assert success is False
+    assert error
+    assert "лимит" in error or "Размножение" in error
+

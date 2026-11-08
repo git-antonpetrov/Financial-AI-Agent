@@ -264,7 +264,7 @@ def test_client():
 
 @pytest.fixture
 def admin_headers():
-    token = create_access_token({"sub": "admin"})
+    token = create_access_token({"sub": "admin"}, role="superadmin")
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -489,4 +489,29 @@ def test_redis_revocation_helpers():
     revoke_agent_key_in_redis(agent_name, kid)
     assert is_agent_key_revoked_in_redis(agent_name, kid) is True
     assert is_agent_key_revoked_in_redis(agent_name) is True
+
+
+def test_agent_revocation_fails_closed_when_redis_write_fails(monkeypatch):
+    """Не подтверждает отзыв, если строгий режим не смог записать его в Redis."""
+    from fastapi import HTTPException
+
+    monkeypatch.setenv("STRICT_SECURITY", "true")
+
+    class BrokenRedis:
+        def setex(self, *_args, **_kwargs):
+            raise ConnectionError("redis down")
+
+        def exists(self, *_args, **_kwargs):
+            raise ConnectionError("redis down")
+
+    broken = BrokenRedis()
+    with pytest.raises(HTTPException) as write_error:
+        revoke_agent_key_in_redis("strict-agent", "strict-kid", redis_conn=broken)
+    assert write_error.value.status_code == 503
+
+    security._revoked_certs_memory.discard("agent:fresh-agent")
+    security._revoked_certs_memory.discard("agent_key:fresh-kid")
+    with pytest.raises(HTTPException) as read_error:
+        is_agent_key_revoked_in_redis("fresh-agent", "fresh-kid", redis_conn=broken)
+    assert read_error.value.status_code == 503
 

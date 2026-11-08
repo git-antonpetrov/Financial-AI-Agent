@@ -2,7 +2,7 @@ import asyncio
 import sys
 from pathlib import Path
 
-# Добавляем корень проекта в sys.path
+# Добавляет корень проекта в sys.path.
 sys.path.append(str(Path(__file__).resolve().parents[4]))
 
 from dotenv import load_dotenv
@@ -18,18 +18,18 @@ from src.simulations.workers.bank_eod.tasks import run_bank_eod
 async def main():
     log_info("Bank EOD Worker", "Инициализация воркера...")
 
-    # Создаем асинхронный планировщик с явным указанием московского времени
+    # Создаёт асинхронный планировщик в часовом поясе Москвы.
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
 
-    # Настраиваем запуск EOD каждый день в 23:30 по Москве
+    # Настраивает запуск EOD каждый день в 23:30 по Москве
     scheduler.add_job(run_bank_eod, "cron", hour=23, minute=30, timezone="Europe/Moscow")
 
-    # Запускаем планировщик
+    # Запускает планировщик
     scheduler.start()
     log_info("Bank EOD Worker", "Воркер запущен и работает в фоне. Ожидание расписания...")
 
     # Элегантный способ держать процесс открытым без while True
-    # Создаем Future, которое никогда не выполнится
+    # Создаёт Future, которое не завершается, потому что процесс должен оставаться запущенным.
     await asyncio.Event().wait()
 
 

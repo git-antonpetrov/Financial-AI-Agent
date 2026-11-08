@@ -1,11 +1,13 @@
 import os
 from functools import lru_cache
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from src.common.db.asyncpg_ssl import build_asyncpg_ssl, database_url_without_ssl_query
 from src.simulations.core.utils.console_logger import log_error, log_info, log_warning
 
-# Импортируем Base, чтобы при init_db все модели были привязаны к нему
+# Импортирует Base, чтобы при init_db все модели были привязаны к нему
 from src.simulations.db.bank.db.database import Base
 
 
@@ -20,11 +22,10 @@ def get_async_engine():
             "Критическая ошибка конфигурации: переменная окружения BANK_DATABASE_URL "
             "обязательна, но не задана. Использование значений по умолчанию с открытыми паролями запрещено."
         )
-    DATABASE_URL = DATABASE_URL.strip()
-    ssl_mode = os.getenv("POSTGRES_SSLMODE", "").strip()
-    if ssl_mode and "?" not in DATABASE_URL:
-        DATABASE_URL += f"?ssl={ssl_mode}"
-    return create_async_engine(DATABASE_URL, echo=False)
+    database_url = database_url_without_ssl_query(DATABASE_URL.strip())
+    ssl_arg = build_asyncpg_ssl(os.getenv("POSTGRES_SSLMODE", ""))
+    connect_args = {"ssl": ssl_arg} if ssl_arg is not None else {}
+    return create_async_engine(database_url, echo=False, connect_args=connect_args)
 
 
 def get_async_session_maker():
@@ -49,6 +50,19 @@ async def init_db(reset: bool = False):
                 log_warning("Database", "Внимание: Выполняется пересоздание всех таблиц базы данных!")
                 await conn.run_sync(Base.metadata.drop_all)
             await conn.run_sync(Base.metadata.create_all)
+            await conn.execute(
+                text(
+                    "ALTER TABLE IF EXISTS auto_payments "
+                    "ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR"
+                )
+            )
+            await conn.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ix_auto_payments_idempotency_key "
+                    "ON auto_payments (idempotency_key)"
+                )
+            )
         log_info("Bank DB", "Таблицы успешно инициализированы.")
     except Exception as e:
         log_error("Bank DB", f"Ошибка инициализации БД: {e}")
+        raise

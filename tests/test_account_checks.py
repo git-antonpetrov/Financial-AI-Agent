@@ -48,7 +48,8 @@ def test_bank_transfer_rejects_self_transfer(monkeypatch):
             amount=Decimal("100.00"),
             transfer_type="account",
             destination="40817810000000000001"
-        )
+        ,
+            idempotency_key="idem-test")
 
         with pytest.raises(HTTPException) as exc_info:
             await transfer_money(req)
@@ -81,7 +82,8 @@ def test_bank_transfer_rejects_inactive_accounts(monkeypatch):
             amount=Decimal("50.00"),
             transfer_type="account",
             destination="NUM_A"
-        )
+        ,
+            idempotency_key="idem-test")
         with pytest.raises(HTTPException) as exc_info:
             await transfer_money(req)
         assert exc_info.value.status_code == 400
@@ -99,7 +101,8 @@ def test_bank_transfer_rejects_inactive_accounts(monkeypatch):
             amount=Decimal("50.00"),
             transfer_type="account",
             destination="NUM_C"
-        )
+        ,
+            idempotency_key="idem-test")
         with pytest.raises(HTTPException) as exc_info2:
             await transfer_money(req2)
         assert exc_info2.value.status_code == 400
@@ -164,7 +167,8 @@ def test_ruble_transfer_rejects_self_transfer():
     Проверяет, что P2P перевод цифровых рублей на тот же самый кошелек отклоняется с HTTP 400.
     """
     async def _test():
-        req = RubleTransferRequest(to_wallet_id="w_same", amount=Decimal("150.00"))
+        req = RubleTransferRequest(to_wallet_id="w_same", amount=Decimal("150.00"),
+            idempotency_key="idem-test")
         with pytest.raises(HTTPException) as exc_info:
             await transfer_rubles("w_same", req)
 
@@ -189,7 +193,8 @@ def test_ruble_transfer_rejects_inactive_wallets(monkeypatch):
         res_mock.scalars().all.return_value = [w_blocked, w_act]
         session.execute = AsyncMock(return_value=res_mock)
 
-        req = RubleTransferRequest(to_wallet_id="w_act", amount=Decimal("50.00"))
+        req = RubleTransferRequest(to_wallet_id="w_act", amount=Decimal("50.00"),
+            idempotency_key="idem-test")
         with pytest.raises(HTTPException) as exc_info:
             await transfer_rubles("w_block", req)
         assert exc_info.value.status_code == 400
@@ -239,7 +244,8 @@ def test_bank_transfer_by_phone_selects_active_rub_account(monkeypatch):
             amount=Decimal("200.00"),
             transfer_type="phone",
             destination="cl_2"
-        )
+        ,
+            idempotency_key="idem-test")
         res = await transfer_money(req)
         assert res["status"] == "success"
         assert sender_acc.balance == Decimal("800.00")
@@ -256,7 +262,7 @@ def test_bank_transfer_by_phone_rejects_when_no_active_rub_account(monkeypatch):
         session = AsyncMock()
         # 1-й вызов scalar (поиск активного счета) -> None
         # 2-й вызов scalar (проверка существования клиента) -> "acc_closed"
-        session.scalar = AsyncMock(side_effect=[None, "acc_closed"])
+        session.scalar = AsyncMock(side_effect=[None, None, None, "acc_closed"])
 
         monkeypatch.setattr("src.simulations.api.routers.bank.get_db", lambda: make_async_cm(session))
 
@@ -265,7 +271,8 @@ def test_bank_transfer_by_phone_rejects_when_no_active_rub_account(monkeypatch):
             amount=Decimal("100.00"),
             transfer_type="phone",
             destination="cl_with_closed_accs"
-        )
+        ,
+            idempotency_key="idem-test")
         with pytest.raises(HTTPException) as exc_info:
             await transfer_money(req)
 

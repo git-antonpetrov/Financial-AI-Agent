@@ -36,7 +36,7 @@ from security import (
 
 def test_rs256_token_generation_and_validation():
     """Проверяет создание и верификацию JWT-токена по алгоритму RS256."""
-    token = create_access_token({"sub": "admin", "custom_role": "superadmin"})
+    token = create_access_token({"sub": "admin", "custom_role": "superadmin"}, role="superadmin")
 
     # 1. Заголовок токена должен строго содержать alg=RS256
     unverified_headers = jwt.get_unverified_header(token)
@@ -82,7 +82,7 @@ def test_untrusted_rsa_key_rejected():
 
 def test_tampered_payload_rejected():
     """Проверяет, что изменение полезной нагрузки нарушает RSA-подпись."""
-    token = create_access_token({"sub": "admin"})
+    token = create_access_token({"sub": "admin"}, role="superadmin")
     parts = token.split(".")
     assert len(parts) == 3
 
@@ -97,15 +97,15 @@ def test_tampered_payload_rejected():
 async def test_get_current_admin_valid_and_invalid():
     """Проверяет dependency get_current_admin на валидном и невалидном токене."""
 
-    if security.redis_blacklist is not None:
+    if isinstance(getattr(security.redis_blacklist, "exists", None), MagicMock):
         security.redis_blacklist.exists.return_value = False
 
-    valid_token = create_access_token({"sub": "admin"})
+    valid_token = create_access_token({"sub": "admin"}, role="superadmin")
     admin_user = await get_current_admin(valid_token)
     assert admin_user == "admin"
 
     # Невалидный sub
-    bad_sub_token = create_access_token({"sub": "impostor"})
+    bad_sub_token = create_access_token({"sub": "impostor"}, role="superadmin")
     with pytest.raises(HTTPException) as exc_info:
         await get_current_admin(bad_sub_token)
     assert exc_info.value.status_code == 401

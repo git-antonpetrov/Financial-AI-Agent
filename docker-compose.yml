@@ -55,11 +55,28 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
-    command: >
-      sh -c "mkdir -p /tmp/pg_certs && cp /certs/postgres.key /tmp/pg_certs/postgres.key && chmod 600 /tmp/pg_certs/postgres.key && chown postgres:postgres /tmp/pg_certs/postgres.key && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/certs/postgres.crt -c ssl_key_file=/tmp/pg_certs/postgres.key -c ssl_ca_file=/certs/ca.crt"
+      BANK_DB_PASSWORD: ${BANK_DB_PASSWORD}
+      INVEST_DB_PASSWORD: ${INVEST_DB_PASSWORD}
+      DIGITAL_DB_PASSWORD: ${DIGITAL_DB_PASSWORD}
+    entrypoint: ["/bin/sh", "/usr/local/bin/postgres-wrapper.sh"]
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/certs/postgres.crt
+      - -c
+      - ssl_key_file=/tmp/pg_certs/postgres.key
+      - -c
+      - ssl_ca_file=/certs/ca.crt
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./src/simulations/db/init_databases.sql:/docker-entrypoint-initdb.d/init_databases.sql:ro
+      - ./src/simulations/db/postgres-wrapper.sh:/usr/local/bin/postgres-wrapper.sh:ro
+      - ./src/simulations/db/init_databases.sql:/docker-entrypoint-initdb.d/01-init_databases.sql:ro
+      - ./src/simulations/db/init_app_roles.sh:/docker-entrypoint-initdb.d/02-init_app_roles.sh:ro
+      - ./src/simulations/db/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
       - postgres_certs:/certs:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
@@ -91,6 +108,7 @@ services:
     volumes:
       - pgadmin_data:/var/lib/pgadmin
       - ca_public:/certs:ro
+      - ./src/simulations/db/pgadmin_servers.json:/pgadmin4/servers.json:ro
     depends_on:
       postgres-db:
         condition: service_healthy
@@ -122,10 +140,10 @@ services:
       root-ca:
         condition: service_completed_successfully
     environment:
-      - BANK_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/bank_db
-      - INVEST_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/invest_db
-      - RUBLE_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/digital_db
-      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
+      - BANK_DATABASE_URL=postgresql+asyncpg://bank_app:${BANK_DB_PASSWORD}@postgres-db:5432/bank_db
+      - INVEST_DATABASE_URL=postgresql+asyncpg://invest_app:${INVEST_DB_PASSWORD}@postgres-db:5432/invest_db
+      - RUBLE_DATABASE_URL=postgresql+asyncpg://digital_app:${DIGITAL_DB_PASSWORD}@postgres-db:5432/digital_db
+      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-verify-full}
       - SSL_CERT_FILE=/certs/ca.crt
       - DATA_ENCRYPTION_KEY=${DATA_ENCRYPTION_KEY}
     volumes:
@@ -154,13 +172,13 @@ services:
       root-ca:
         condition: service_completed_successfully
     environment:
-      - BANK_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/bank_db
+      - BANK_DATABASE_URL=postgresql+asyncpg://bank_app:${BANK_DB_PASSWORD}@postgres-db:5432/bank_db
       - TZ=Europe/Moscow
-      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
+      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-verify-full}
       - SSL_CERT_FILE=/certs/ca.crt
       - DATA_ENCRYPTION_KEY=${DATA_ENCRYPTION_KEY}
     volumes:
-      - bank_certs:/certs:ro
+      - ca_public:/certs:ro
     networks:
       - simulation_net
       - data_net
@@ -186,10 +204,10 @@ services:
       root-ca:
         condition: service_completed_successfully
     environment:
-      - INVEST_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/invest_db
-      - BANK_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/bank_db
+      - INVEST_DATABASE_URL=postgresql+asyncpg://invest_app:${INVEST_DB_PASSWORD}@postgres-db:5432/invest_db
+      - BANK_DATABASE_URL=postgresql+asyncpg://bank_app:${BANK_DB_PASSWORD}@postgres-db:5432/bank_db
       - TZ=Europe/Moscow
-      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
+      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-verify-full}
       - SSL_CERT_FILE=/certs/ca.crt
       - DATA_ENCRYPTION_KEY=${DATA_ENCRYPTION_KEY}
     volumes:
@@ -219,9 +237,9 @@ services:
       root-ca:
         condition: service_completed_successfully
     environment:
-      - RUBLE_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/digital_db
+      - RUBLE_DATABASE_URL=postgresql+asyncpg://digital_app:${DIGITAL_DB_PASSWORD}@postgres-db:5432/digital_db
       - TZ=Europe/Moscow
-      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
+      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-verify-full}
       - SSL_CERT_FILE=/certs/ca.crt
       - DATA_ENCRYPTION_KEY=${DATA_ENCRYPTION_KEY}
     volumes:
@@ -250,13 +268,17 @@ services:
         condition: service_healthy
       root-ca:
         condition: service_completed_successfully
+      redis:
+        condition: service_healthy
     environment:
       - STRICT_SECURITY=true
-      - BANK_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/bank_db
-      - INVEST_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/invest_db
-      - RUBLE_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/digital_db
-      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
+      - PROXY_INTERNAL_SECRET=${PROXY_INTERNAL_SECRET:?PROXY_INTERNAL_SECRET is required}
+      - BANK_DATABASE_URL=postgresql+asyncpg://bank_app:${BANK_DB_PASSWORD}@postgres-db:5432/bank_db
+      - INVEST_DATABASE_URL=postgresql+asyncpg://invest_app:${INVEST_DB_PASSWORD}@postgres-db:5432/invest_db
+      - RUBLE_DATABASE_URL=postgresql+asyncpg://digital_app:${DIGITAL_DB_PASSWORD}@postgres-db:5432/digital_db
+      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-verify-full}
       - SSL_CERT_FILE=/certs/ca.crt
+      - CRL_PATH=/certs/ca.crl
       - DATA_ENCRYPTION_KEY=${DATA_ENCRYPTION_KEY}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -273,7 +295,7 @@ services:
     volumes:
       - bank_certs:/certs:ro
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8002/health')\" || exit 1"]
+      test: ["CMD-SHELL", "python -c \"import ssl,urllib.request; ctx=ssl.create_default_context(cafile='/certs/ca.crt'); urllib.request.urlopen('https://localhost:8002/health', context=ctx)\" || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -338,6 +360,7 @@ services:
       --tls-cert-file /certs/redis.crt 
       --tls-key-file /certs/redis.key 
       --tls-ca-cert-file /certs/ca.crt 
+      --tls-protocols TLSv1.3 
       --tls-auth-clients no 
       --requirepass ${REDIS_PASSWORD}
     volumes:
@@ -351,6 +374,7 @@ services:
       start_period: 5s
     networks:
       - admin_backend_net
+      - simulation_net
     restart: unless-stopped
     deploy:
       resources:
@@ -393,10 +417,11 @@ services:
       - ALLOWED_MTLS_ISSUERS=${ALLOWED_MTLS_ISSUERS:-}
       - MINIO_SECURE=${MINIO_SECURE:-true}
       - REDIS_SSL=${REDIS_SSL:-true}
-      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
+      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-verify-full}
       - SSL_CERT_FILE=/certs/ca.crt
+      - CRL_PATH=/certs/ca.crl
       - REDIS_SSL_CA_CERTS=/certs/ca.crt
-      - PROXY_INTERNAL_SECRET=${PROXY_INTERNAL_SECRET:-financial-core-proxy-token-2026}
+      - PROXY_INTERNAL_SECRET=${PROXY_INTERNAL_SECRET:?PROXY_INTERNAL_SECRET is required}
     volumes:
       - ./data:/app/data:ro
       - admin_certs:/certs:ro
@@ -484,14 +509,25 @@ services:
       - CHROMA_ENVELOPE_ENCRYPTION_ENABLED=${CHROMA_ENVELOPE_ENCRYPTION_ENABLED:-true}
       - MINIO_SECURE=${MINIO_SECURE:-true}
       - REDIS_SSL=${REDIS_SSL:-true}
-      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-require}
+      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-verify-full}
       - SSL_CERT_FILE=/certs/ca.crt
       - REDIS_SSL_CA_CERTS=/certs/ca.crt
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+      - MINIO_SSE_TYPE=${MINIO_SSE_TYPE:-s3}
+      - MINIO_SSL_CA_CERTS=/certs/ca.crt
+      - VERTEX_PROJECT=${VERTEX_PROJECT:-}
+      - VERTEX_LOCATION=${VERTEX_LOCATION:-global}
+      - VERTEX_BASE_URL=${VERTEX_BASE_URL:-}
+      - EMBEDDING_MODEL_NAME=${EMBEDDING_MODEL_NAME:-gemini-embedding-2}
+      - CHUNK_BATCH_SIZE=${CHUNK_BATCH_SIZE:-10}
+      - CHUNK_SLEEP_SECONDS=${CHUNK_SLEEP_SECONDS:-10}
+      - CHUNK_SIZE=${CHUNK_SIZE:-1000}
+      - CHUNK_OVERLAP=${CHUNK_OVERLAP:-100}
     volumes:
       - ./data:/app/data:ro
       - ca_public:/certs:ro
-    env_file:
-      - .env
     networks:
       - admin_backend_net
       - data_net
@@ -509,6 +545,8 @@ services:
   caddy:
     image: caddy:2-alpine
     container_name: caddy-server
+    # Читает ключ платформы с режимом 0600. Root открывает файл, принадлежащий uid сервиса.
+    user: "0:0"
     restart: unless-stopped
     depends_on:
       root-ca:
@@ -522,10 +560,11 @@ services:
       - CADDY_CLIENT_AUTH_MODE=${CADDY_CLIENT_AUTH_MODE:-require_and_verify}
       - ADMIN_DOMAIN=${ADMIN_DOMAIN:-admin.fin-ai-agent.ru}
       - ADMIN_LOCAL_DOMAIN=${ADMIN_LOCAL_DOMAIN:-admin.fin-ai-agent.local}
-      - PROXY_INTERNAL_SECRET=${PROXY_INTERNAL_SECRET:-financial-core-proxy-token-2026}
+      - PROXY_INTERNAL_SECRET=${PROXY_INTERNAL_SECRET:?PROXY_INTERNAL_SECRET is required}
     volumes:
       - ./src/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - ca_public:/etc/caddy/certs:ro
+      - admin_certs:/etc/caddy/admin:ro
       - caddy_data:/data
       - caddy_config:/config
     healthcheck:
@@ -536,15 +575,18 @@ services:
       start_period: 10s
     networks:
       edge_net:
+        ipv4_address: 10.90.10.10
         aliases:
           - caddy
       admin_backend_net:
+        ipv4_address: 10.90.20.10
         aliases:
           - caddy-backend
           - admin-server.internal
           - simulation-api.internal
           - bank-service.internal
       simulation_net:
+        ipv4_address: 10.90.30.10
         aliases:
           - caddy-sim
           - simulation-api.internal
@@ -565,6 +607,8 @@ services:
 # 1. pki_net:        Изолированная подсеть Root CA (internal: true, нет доступа в интернет).
 # 2. edge_net:       Публичный контур ingress (Caddy обратный прокси с TLS 1.3 и mTLS).
 # 3. admin_backend_net:   Внутренняя сеть сервисов управления (Admin Server, Vector Worker, Redis).
+#    Redis дополнительно подключён к simulation_net, чтобы шлюз симуляции
+#    получал отзыв сертификатов по Pub/Sub и не входил в контур управления.
 # 4. data_net:      Изолированная сеть хранения (PostgreSQL, MinIO, ChromaDB) с internal: true
 #                   (запрещен любой прямой доступ в/из внешней сети Интернет).
 # 5. simulation_net: Изолированный контур банковских симуляций (API, воркеры EOD, смарт-контракты).
@@ -580,13 +624,25 @@ networks:
     internal: true
   edge_net:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 10.90.10.0/24
+          gateway: 10.90.10.1
   admin_backend_net:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 10.90.20.0/24
+          gateway: 10.90.20.1
   data_net:
     driver: bridge
     internal: true
   simulation_net:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 10.90.30.0/24
+          gateway: 10.90.30.1
 
 volumes:
   root_ca_data:

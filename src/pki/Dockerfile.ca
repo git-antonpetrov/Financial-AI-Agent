@@ -5,7 +5,10 @@ WORKDIR /app
 RUN apk add --no-cache gcc musl-dev libffi-dev && \
     addgroup -S appgroup && \
     adduser -S appuser -G appgroup && \
-    mkdir -p /data/ca /shared_certs /export/ca_public /export/admin_certs /export/bank_certs /export/admin_client_certs /export/enclave_certs /app && \
+    mkdir -p /data/ca /shared_certs \
+        /export/ca_public /export/admin_certs /export/bank_certs \
+        /export/admin_client_certs /export/enclave_certs \
+        /export/postgres_certs /export/redis_certs /export/minio_certs /app && \
     chown -R appuser:appgroup /data/ca /shared_certs /export /app
 
 COPY src/pki/requirements.txt /app/requirements.txt
@@ -17,6 +20,6 @@ ENV ROOT_CA_DATA_DIR=/data/ca \
     SHARED_CERTS_DIR=/shared_certs \
     PYTHONUNBUFFERED=1
 
-USER appuser
-
+# Процесс остаётся root: одноразовый выпуск должен отдать ключи uid сервисов.
+# Контейнер завершается и больше не слушает сеть.
 ENTRYPOINT ["python", "bootstrap_pki.py"]

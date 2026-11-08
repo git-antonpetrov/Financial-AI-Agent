@@ -446,7 +446,7 @@ def test_api_audit_endpoints_authorized():
 
     try:
         # Создаем тестовые записи
-        token = create_access_token({"sub": "admin"})
+        token = create_access_token({"sub": "admin"}, role="superadmin")
         client = TestClient(app)
         headers = {"Authorization": f"Bearer {token}"}
 

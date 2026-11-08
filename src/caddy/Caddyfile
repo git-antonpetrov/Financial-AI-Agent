@@ -1,68 +1,66 @@
-# -----------------------------------------------------------------------------
-# CADDY WEBSERVER / ZERO-TRUST INGRESS & INTERNAL TLS CONFIGURATION
-# 1. Внешний контур Администратора: Строгий mTLS (require_and_verify), проверка по Root CA
-# 2. Внутренний контур Банковской Симуляции: tls internal для шифрования транзита
-# -----------------------------------------------------------------------------
+# Публичный site block слушает только адрес edge-сети.
+# Внутренние имена слушают адреса сетей Docker и не принимают соединение
+# с опубликованного порта, потому что docker-proxy приходит со шлюза .1.
 
-# 1. Внешний защищенный шлюз Администратора
+# Публичный вход администратора предъявляет сертификат платформы из тома admin_certs.
 {$ADMIN_DOMAIN:admin.fin-ai-agent.ru}, {$ADMIN_LOCAL_DOMAIN:admin.fin-ai-agent.local} {
-    # Строгий протокол TLS 1.3 и безопасные наборы шифров
-    tls {
-        protocols tls1.2 tls1.3
-        ciphers TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
-        
-        # Взаимная аутентификация TLS (mTLS)
-        # В боевом контуре требует обязательный клиентский сертификат, подписанный Root CA
+    bind 10.90.10.10
+
+    tls /etc/caddy/admin/admin_server.crt /etc/caddy/admin/admin_server.key {
+        protocols tls1.3
         client_auth {
             mode {$CADDY_CLIENT_AUTH_MODE:require_and_verify}
             trusted_ca_cert_file /etc/caddy/certs/ca.crt
         }
     }
 
-    # Заголовки безопасности HTTP
-    header {
-        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-        X-Content-Type-Options "nosniff"
-        X-Frame-Options "DENY"
-        Referrer-Policy "strict-origin-when-cross-origin"
-        Permissions-Policy "camera=(), microphone=(), geolocation=()"
-        -Server
-    }
+    # Обрывает публичный вход, если субъект клиентского сертификата принадлежит банку.
+    @bank_client expression `string({http.request.tls.client.subject}).contains("bank_service") || string({http.request.tls.client.subject}).contains("bank_operator") || string({http.request.tls.client.subject}).contains("bank-simulation")`
 
-    # Проксирование запросов к FastAPI Admin Server с mTLS-заголовками и таймаутами для LLM
-    reverse_proxy admin-server:8000 {
-        header_up -X-Client-Cert-*
-        header_up -X-Client-Cert-Verify
-        header_up -X-Client-Cert-Subject
-        header_up -X-Client-Cert-Issuer
-        header_up -X-Client-Cert-Serial
-        header_up -X-Client-Cert-Fingerprint
-        header_up -X-Client-Cert-Pem
-        header_up Host {host}
-        header_up X-Real-IP {remote_host}
-        header_up X-Forwarded-For {remote_host}
-        header_up X-Forwarded-Proto https
-        header_up X-Proxy-Secret "{$PROXY_INTERNAL_SECRET}"
-        header_up X-Client-Cert-Verify {tls_client_verified}
-        header_up X-Client-Cert-Subject {tls_client_subject}
-        header_up X-Client-Cert-Issuer {tls_client_issuer}
-        header_up X-Client-Cert-Serial {tls_client_serial}
-        header_up X-Client-Cert-Fingerprint {tls_client_fingerprint}
-        header_up X-Client-Cert-Pem {tls_client_escaped_cert}
+    route {
+        header {
+            Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+            X-Content-Type-Options "nosniff"
+            X-Frame-Options "DENY"
+            Referrer-Policy "strict-origin-when-cross-origin"
+            Permissions-Policy "camera=(), microphone=(), geolocation=()"
+            -Server
+        }
 
-        transport http {
-            response_header_timeout 180s
-            read_timeout 180s
-            write_timeout 180s
+        abort @bank_client
+
+        reverse_proxy admin-server:8000 {
+            header_up -X-Client-Cert-*
+            header_up -X-Client-Cert-Verify
+            header_up -X-Client-Cert-Subject
+            header_up -X-Client-Cert-Issuer
+            header_up -X-Client-Cert-Serial
+            header_up -X-Client-Cert-Fingerprint
+            header_up -X-Client-Cert-Pem
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto https
+            header_up X-Proxy-Secret "{$PROXY_INTERNAL_SECRET}"
+            header_up X-Client-Cert-Verify {tls_client_verified}
+            header_up X-Client-Cert-Subject {tls_client_subject}
+            header_up X-Client-Cert-Issuer {tls_client_issuer}
+            header_up X-Client-Cert-Serial {tls_client_serial}
+            header_up X-Client-Cert-Fingerprint {tls_client_fingerprint}
+            header_up X-Client-Cert-Pem {tls_client_escaped_cert}
+
+            transport http {
+                response_header_timeout 180s
+                read_timeout 180s
+                write_timeout 180s
+            }
         }
     }
 }
 
-# 2. Внутренний банковский контур (Шифрование транзита между контейнерами и подсетями)
+# Внутренний банковский контур слушает адреса 10.90.20.10 и 10.90.30.10.
 simulation-api.internal, bank-service.internal {
-    # Защита от непреднамеренного внешнего доступа через порт 443 хоста
-    @external not remote_ip 172.16.0.0/12 10.0.0.0/8 192.168.0.0/16 127.0.0.1 ::1
-    abort @external
+    bind 10.90.20.10 10.90.30.10
 
     tls internal {
         protocols tls1.3
@@ -72,39 +70,61 @@ simulation-api.internal, bank-service.internal {
         }
     }
 
-    header {
-        Strict-Transport-Security "max-age=31536000; includeSubDomains"
-        X-Content-Type-Options "nosniff"
-        X-Frame-Options "DENY"
-        -Server
-    }
+    # Шлюз моста принадлежит docker-proxy, потому что прокси хоста выходит в контейнер с этого адреса.
+    @docker_proxy remote_ip 10.90.10.1 10.90.20.1 10.90.30.1
+    @outside not remote_ip 10.90.20.0/24 10.90.30.0/24
 
-    reverse_proxy simulation-api:8002 {
-        header_up -X-Client-Cert-*
-        header_up -X-Client-Cert-Verify
-        header_up -X-Client-Cert-Subject
-        header_up -X-Client-Cert-Issuer
-        header_up -X-Client-Cert-Serial
-        header_up -X-Client-Cert-Fingerprint
-        header_up Host {host}
-        header_up X-Real-IP {remote_host}
-        header_up X-Forwarded-For {remote_host}
-        header_up X-Forwarded-Proto https
-        header_up X-Proxy-Secret "{$PROXY_INTERNAL_SECRET}"
+    route {
+        header {
+            Strict-Transport-Security "max-age=31536000; includeSubDomains"
+            X-Content-Type-Options "nosniff"
+            X-Frame-Options "DENY"
+            -Server
+        }
 
-        transport http {
-            response_header_timeout 60s
-            read_timeout 60s
-            write_timeout 60s
+        abort @docker_proxy
+        abort @outside
+
+        # Снимает заголовки, которые выставляет сам Caddy.
+        # X-Agent-Cert, X-Enclave-Cert, X-Cert и X-Signature клиента внутреннего имени сохраняет.
+        # Шифрует последний переход сертификатом банка: SAN содержит simulation-api,
+        # а доверие берётся из корневого сертификата платформы.
+        # Передаёт серийный номер клиентского сертификата, чтобы шлюз сверил его со списком отзыва.
+        reverse_proxy https://simulation-api:8002 {
+            header_up -X-Client-Cert-*
+            header_up -X-Client-Cert-Verify
+            header_up -X-Client-Cert-Subject
+            header_up -X-Client-Cert-Issuer
+            header_up -X-Client-Cert-Serial
+            header_up -X-Client-Cert-Fingerprint
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto https
+            header_up X-Proxy-Secret "{$PROXY_INTERNAL_SECRET}"
+            header_up X-Client-Cert-Verify {tls_client_verified}
+            header_up X-Client-Cert-Subject {tls_client_subject}
+            header_up X-Client-Cert-Issuer {tls_client_issuer}
+            header_up X-Client-Cert-Serial {tls_client_serial}
+            header_up X-Client-Cert-Fingerprint {tls_client_fingerprint}
+
+            transport http {
+                tls
+                tls_server_name simulation-api
+                tls_trust_pool file {
+                    pem_file /etc/caddy/certs/ca.crt
+                }
+                response_header_timeout 60s
+                read_timeout 60s
+                write_timeout 60s
+            }
         }
     }
 }
 
-# 3. Внутренний контур Администратора (Межсетевое TLS-взаимодействие)
+# Внутренний контур администратора слушает те же адреса сетей Docker.
 admin-server.internal {
-    # Защита от непреднамеренного внешнего доступа через порт 443 хоста
-    @external not remote_ip 172.16.0.0/12 10.0.0.0/8 192.168.0.0/16 127.0.0.1 ::1
-    abort @external
+    bind 10.90.20.10 10.90.30.10
 
     tls internal {
         protocols tls1.3
@@ -114,42 +134,50 @@ admin-server.internal {
         }
     }
 
-    header {
-        Strict-Transport-Security "max-age=31536000; includeSubDomains"
-        X-Content-Type-Options "nosniff"
-        X-Frame-Options "DENY"
-        -Server
-    }
+    @docker_proxy remote_ip 10.90.10.1 10.90.20.1 10.90.30.1
+    @outside not remote_ip 10.90.20.0/24 10.90.30.0/24
 
-    reverse_proxy admin-server:8000 {
-        header_up -X-Client-Cert-*
-        header_up -X-Client-Cert-Verify
-        header_up -X-Client-Cert-Subject
-        header_up -X-Client-Cert-Issuer
-        header_up -X-Client-Cert-Serial
-        header_up -X-Client-Cert-Fingerprint
-        header_up -X-Client-Cert-Pem
-        header_up Host {host}
-        header_up X-Real-IP {remote_host}
-        header_up X-Forwarded-For {remote_host}
-        header_up X-Forwarded-Proto https
-        header_up X-Proxy-Secret "{$PROXY_INTERNAL_SECRET}"
-        header_up X-Client-Cert-Verify {tls_client_verified}
-        header_up X-Client-Cert-Subject {tls_client_subject}
-        header_up X-Client-Cert-Issuer {tls_client_issuer}
-        header_up X-Client-Cert-Serial {tls_client_serial}
-        header_up X-Client-Cert-Fingerprint {tls_client_fingerprint}
-        header_up X-Client-Cert-Pem {tls_client_escaped_cert}
+    route {
+        header {
+            Strict-Transport-Security "max-age=31536000; includeSubDomains"
+            X-Content-Type-Options "nosniff"
+            X-Frame-Options "DENY"
+            -Server
+        }
 
-        transport http {
-            response_header_timeout 180s
-            read_timeout 180s
-            write_timeout 180s
+        abort @docker_proxy
+        abort @outside
+
+        reverse_proxy admin-server:8000 {
+            header_up -X-Client-Cert-*
+            header_up -X-Client-Cert-Verify
+            header_up -X-Client-Cert-Subject
+            header_up -X-Client-Cert-Issuer
+            header_up -X-Client-Cert-Serial
+            header_up -X-Client-Cert-Fingerprint
+            header_up -X-Client-Cert-Pem
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto https
+            header_up X-Proxy-Secret "{$PROXY_INTERNAL_SECRET}"
+            header_up X-Client-Cert-Verify {tls_client_verified}
+            header_up X-Client-Cert-Subject {tls_client_subject}
+            header_up X-Client-Cert-Issuer {tls_client_issuer}
+            header_up X-Client-Cert-Serial {tls_client_serial}
+            header_up X-Client-Cert-Fingerprint {tls_client_fingerprint}
+            header_up X-Client-Cert-Pem {tls_client_escaped_cert}
+
+            transport http {
+                response_header_timeout 180s
+                read_timeout 180s
+                write_timeout 180s
+            }
         }
     }
 }
 
-# 4. Локальный Healthcheck для проверок с хоста (loopback, без требования mTLS)
+# Локальный healthcheck отвечает внутри контейнера.
 http://127.0.0.1:80, http://localhost:80 {
     handle /health {
         respond "OK" 200
@@ -158,4 +186,3 @@ http://127.0.0.1:80, http://localhost:80 {
         respond "Not Found" 404
     }
 }
-

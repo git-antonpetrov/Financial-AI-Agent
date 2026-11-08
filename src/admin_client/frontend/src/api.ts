@@ -4,22 +4,22 @@ import { invoke } from '@tauri-apps/api/core'
  * Получает криптографический токен IPC рукопожатия, сгенерированный процессом Tauri.
  */
 export const getLocalSidecarSecret = async (): Promise<string> => {
-  try {
-    return await invoke<string>('get_sidecar_secret')
-  } catch {
-    return ''
+  const secret = await invoke<string>('get_sidecar_secret')
+  if (!secret) {
+    throw new Error('Секрет IPC sidecar не получен')
   }
+  return secret
 }
 
 /**
  * Получает динамический базовый URL локального Python Sidecar (BFF).
  */
 export const getLocalSidecarUrl = async (): Promise<string> => {
-  try {
-    return await invoke<string>('get_sidecar_url')
-  } catch {
-    return 'http://127.0.0.1:8005'
+  const url = await invoke<string>('get_sidecar_url')
+  if (!url) {
+    throw new Error('Адрес sidecar не получен')
   }
+  return url
 }
 
 /**
@@ -30,7 +30,7 @@ export const localFetch = async (endpoint: string, options: RequestInit = {}): P
   const baseUrl = await getLocalSidecarUrl()
   const secret = await getLocalSidecarSecret()
   const headers = new Headers(options.headers || {})
-  if (secret && !headers.has('X-Local-Secret')) {
+  if (!headers.has('X-Local-Secret')) {
     headers.set('X-Local-Secret', secret)
   }
   const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`

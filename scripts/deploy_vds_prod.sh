@@ -37,6 +37,39 @@ log_error() {
     echo -e "${COLOR_RED}[ERROR]${COLOR_RESET} $1"
 }
 
+# Извлекает поле cryptsetup status. Имя mapper в тексте не участвует в решении.
+extract_luks_field() {
+    local status_text="$1"
+    local label="$2"
+    printf '%s\n' "${status_text}" | sed -n "s/^[[:space:]]*${label}:[[:space:]]*//Ip" | head -n 1
+}
+
+# Проверяет режим 0600 у закрытых ключей, если каталог сертификатов уже есть.
+# Отсутствующий каталог остаётся штатным стартом до bootstrap и не останавливает запуск.
+verify_host_private_key_modes() {
+    local cert_dir="$1"
+    if [[ ! -d "${cert_dir}" ]]; then
+        log_info "Каталог сертификатов ${cert_dir} ещё не создан. Проверка режима 0600 пропущена до bootstrap."
+        return 0
+    fi
+    local found=0
+    local key_file
+    local mode
+    while IFS= read -r -d '' key_file; do
+        found=1
+        mode="$(stat -c '%a' "${key_file}" 2>/dev/null || stat -f '%OLp' "${key_file}")"
+        if [[ "${mode}" != "600" && "${mode}" != "0600" ]]; then
+            log_error "Закрытый ключ ${key_file} имеет режим ${mode}, требуется 0600."
+            exit 1
+        fi
+    done < <(find "${cert_dir}" -type f -name '*.key' -print0)
+    if [[ "${found}" -eq 0 ]]; then
+        log_info "В ${cert_dir} нет закрытых ключей. Проверка режима 0600 нечего подтверждать."
+    else
+        log_success "Закрытые ключи в ${cert_dir} имеют режим 0600."
+    fi
+}
+
 # Определение рабочей директории проекта
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -84,6 +117,39 @@ else
 fi
 log_success "Обнаружен Docker Compose: $($DOCKER_COMPOSE_CMD version --short 2>/dev/null || echo 'доступен')"
 
+# Каталог данных Docker обязан лежать на открытом томе LUKS. Иначе стек не стартует.
+DOCKER_ROOT="$($DOCKER_BIN info -f '{{.DockerRootDir}}' 2>/dev/null || true)"
+if [[ -z "${DOCKER_ROOT}" ]]; then
+    DOCKER_ROOT="/var/lib/docker"
+fi
+if [[ ! -e "${DOCKER_ROOT}" ]]; then
+    log_error "Каталог данных Docker не найден: ${DOCKER_ROOT}"
+    exit 1
+fi
+DOCKER_SOURCE="$(findmnt -no SOURCE -T "${DOCKER_ROOT}" 2>/dev/null || df -P "${DOCKER_ROOT}" | awk 'NR==2 {print $1}')"
+LUKS_NAME="${DOCKER_SOURCE#/dev/mapper/}"
+if [[ "${DOCKER_SOURCE}" != /dev/mapper/* || -z "${LUKS_NAME}" ]]; then
+    log_error "Тома Docker (${DOCKER_ROOT} на ${DOCKER_SOURCE}) не находятся на расшифрованном LUKS. Запуск остановлен."
+    exit 1
+fi
+LUKS_STATUS="$(cryptsetup status "${LUKS_NAME}" 2>/dev/null || true)"
+if [[ -z "${LUKS_STATUS}" ]]; then
+    log_error "Тома Docker (${DOCKER_ROOT} на ${DOCKER_SOURCE}) не находятся на расшифрованном LUKS. Запуск остановлен."
+    exit 1
+fi
+LUKS_TYPE="$(extract_luks_field "${LUKS_STATUS}" "type" | tr '[:upper:]' '[:lower:]')"
+LUKS_CIPHER="$(extract_luks_field "${LUKS_STATUS}" "cipher" | tr '[:upper:]' '[:lower:]')"
+LUKS_KEY_BITS="$(extract_luks_field "${LUKS_STATUS}" "keysize" | tr -cd '0-9')"
+if [[ "${LUKS_TYPE}" != luks* ]]; then
+    log_error "Устройство ${DOCKER_SOURCE} не является LUKS (type=${LUKS_TYPE:-unknown}). Запуск остановлен."
+    exit 1
+fi
+if [[ "${LUKS_CIPHER}" != aes-xts* || -z "${LUKS_KEY_BITS}" || "${LUKS_KEY_BITS}" -lt 512 ]]; then
+    log_error "Шифр LUKS ${DOCKER_SOURCE} должен быть aes-xts с ключом не меньше 512 бит (cipher=${LUKS_CIPHER:-unknown}, keysize=${LUKS_KEY_BITS:-0}). Запуск остановлен."
+    exit 1
+fi
+log_success "Каталог Docker находится на LUKS ${DOCKER_SOURCE} (${LUKS_CIPHER}, ${LUKS_KEY_BITS} бит)."
+
 
 # Определение Python интерпретатора
 PYTHON_CMD=""
@@ -116,13 +182,15 @@ $PYTHON_CMD "${SCRIPT_DIR}/setup_vds_security_env.py"
 chmod 600 "${PROJECT_ROOT}/.env" 2>/dev/null || true
 log_success "Файл .env инициализирован и защищен (права 0600)."
 
+verify_host_private_key_modes "${PROJECT_ROOT}/certs"
+
 # Очистка устаревшей хостовой папки certs/, если осталась от предыдущих запусков
 if [[ -d "${PROJECT_ROOT}/certs" ]]; then
     log_info "Удаление устаревшей хостовой папки certs/ (Strict Only-Docker Mode)..."
     rm -rf "${PROJECT_ROOT}/certs"
 fi
 
-# Обеспечиваем наличие каталога data/ для безопасного монтирования томов
+# Обеспечивает наличие каталога data/ для безопасного монтирования томов
 mkdir -p "${PROJECT_ROOT}/data"
 
 # ------------------------------------------------------------------------------
@@ -201,7 +269,7 @@ while true; do
     done
 
     if [[ $RUNNING_COUNT -eq ${#CRITICAL_SERVICES[@]} ]]; then
-        # Проверяем health endpoint через защищенный Caddy Ingress (Host Process Isolation)
+        # Проверяет health endpoint через защищенный Caddy Ingress (Host Process Isolation)
         if curl -skf "https://127.0.0.1/health" &> /dev/null || curl -skf "http://127.0.0.1/health" &> /dev/null; then
             ALL_READY=true
             break

@@ -59,6 +59,8 @@ class RubleTransaction(Base):
     status = Column(String, default="completed", index=True)  # Возможные значения: completed, failed
     smart_contract_id = Column(String, ForeignKey("smart_contracts.id"), nullable=True, index=True)
     signature = Column(String, nullable=True)
+    idempotency_key = Column(String, nullable=True, unique=True, index=True)
+    response_payload = Column(EncryptedText, nullable=True)
     timestamp = Column(DateTime, default=get_moscow_now, index=True)
 
     sender = relationship("Wallet", foreign_keys=[sender_wallet_id], back_populates="sent_transactions")
@@ -82,6 +84,8 @@ class SmartContract(Base):
     condition_status = Column(String, default="pending", index=True)  # Возможные значения: pending, fulfilled, failed
     status = Column(String, default="active", index=True)  # Возможные значения: active, executed, cancelled, failed
     error_message = Column(String, nullable=True)  # Полный текст ошибки при сбое контракта
+    idempotency_key = Column(String, nullable=True, unique=True, index=True)
+    response_payload = Column(EncryptedText, nullable=True)
     created_at = Column(DateTime, default=get_moscow_now)
     executed_at = Column(DateTime, nullable=True)
 

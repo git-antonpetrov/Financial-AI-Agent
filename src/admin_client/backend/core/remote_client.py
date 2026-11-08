@@ -276,7 +276,7 @@ class RemoteAdminClient:
         except Exception:
             pass
 
-        # При сбое ротации очищаем сессию
+        # При сбое ротации очищает сессию
         self.logout()
         return False
 
@@ -341,7 +341,7 @@ class RemoteAdminClient:
         if resp.status_code == 401 and auto_refresh and self.refresh_token:
             refreshed = self.refresh_session()
             if refreshed:
-                # Повторяем запрос с новым токеном
+                # Повторяет запрос с новым токеном
                 with self._lock:
                     headers["Authorization"] = f"Bearer {self.access_token}"
                 kwargs["headers"] = headers

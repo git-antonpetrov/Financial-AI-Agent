@@ -140,26 +140,32 @@ def test_server_configuration_error_when_token_unset(test_app, monkeypatch):
 
 
 def test_real_simulation_app_endpoints_protected():
+    import os
+
     from src.simulations.api.main import app as simulation_app
 
     client = TestClient(simulation_app)
+    proxy = {"X-Proxy-Secret": os.environ["PROXY_INTERNAL_SECRET"]}
 
-    # Публичный health check
-    assert client.get("/health").status_code == 200
+    # Вызов мимо loopback без секрета прокси закрыт.
+    assert client.get("/health").status_code == 401
 
-    # Защищенные роуты симуляции без токена
-    assert client.get("/bank/accounts/by-client/cl_123").status_code == 401
-    assert client.get("/invest/strategies").status_code == 401
-    assert client.get("/ruble/wallets/cl_123").status_code == 401
+    loopback = TestClient(simulation_app, client=("127.0.0.1", 8002))
+    assert loopback.get("/health").status_code == 200
+
+    # Защищенные роуты симуляции без токена агента, но с секретом прокси
+    assert client.get("/bank/accounts/by-client/cl_123", headers=proxy).status_code == 401
+    assert client.get("/invest/strategies", headers=proxy).status_code == 401
+    assert client.get("/ruble/wallets/cl_123", headers=proxy).status_code == 401
 
     # С неверным токеном
-    bad_headers = {"X-Bootstrap-Token": "wrong_token"}
+    bad_headers = {"X-Bootstrap-Token": "wrong_token", **proxy}
     assert client.get("/bank/accounts/by-client/cl_123", headers=bad_headers).status_code == 401
     assert client.get("/invest/strategies", headers=bad_headers).status_code == 401
     assert client.get("/ruble/wallets/cl_123", headers=bad_headers).status_code == 401
 
     # Междоменный доступ запрещен (403)
-    invest_headers = {"X-Bootstrap-Token": "secret_invest_token_456"}
+    invest_headers = {"X-Bootstrap-Token": "secret_invest_token_456", **proxy}
     assert client.get("/bank/accounts/by-client/cl_123", headers=invest_headers).status_code == 403
 
 

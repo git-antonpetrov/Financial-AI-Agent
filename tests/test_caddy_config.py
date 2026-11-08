@@ -16,12 +16,10 @@ def test_caddyfile_exists_and_contains_domains():
 
 
 def test_caddyfile_tls_protocols_and_ciphers():
-    """Проверяет строгие настройки TLS: протоколы 1.2/1.3 и надежные наборы шифров."""
+    """Проверяет, что внешний и внутренний контуры принимают только TLS 1.3."""
     content = load_caddyfile()
-    assert "protocols tls1.2 tls1.3" in content, "Должны быть разрешены только TLS 1.2 и TLS 1.3"
-    assert "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384" in content
-    assert "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384" in content
-    assert "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256" in content
+    assert "protocols tls1.3" in content
+    assert "protocols tls1.2 tls1.3" not in content
 
 
 def test_caddyfile_client_auth_configuration():
@@ -48,7 +46,8 @@ def test_caddyfile_internal_simulation_routing():
     content = load_caddyfile()
     assert "simulation-api.internal" in content
     assert "client_auth" in content, "Внутренний маршрут должен использовать client_auth"
-    assert "reverse_proxy simulation-api:8002" in content
+    assert "reverse_proxy https://simulation-api:8002" in content
+    assert content.count("header_up X-Client-Cert-Serial {tls_client_serial}") >= 3
 
 
 def test_caddyfile_security_headers():
@@ -74,4 +73,39 @@ def test_caddyfile_internal_inter_service_tls_routing():
     assert "bank-service.internal" in content
     assert "admin-server.internal" in content
     assert "reverse_proxy admin-server:8000" in content
+
+
+def test_internal_sites_bind_only_docker_networks():
+    """Проверяет, что внутренние site block не слушают адрес опубликованного порта."""
+    content = load_caddyfile()
+    assert "172.16.0.0/12" not in content
+    assert "bind 10.90.10.10" in content
+    assert content.count("bind 10.90.20.10 10.90.30.10") == 2
+    assert "remote_ip 10.90.10.1 10.90.20.1 10.90.30.1" in content
+    assert "abort @docker_proxy" in content
+    assert "not remote_ip 10.90.20.0/24 10.90.30.0/24" in content
+    public_block = content.split("simulation-api.internal", 1)[0]
+    assert "admin.fin-ai-agent.ru" in public_block
+    assert "bind 10.90.20.10" not in public_block
+
+
+def test_public_site_presents_platform_certificate_and_rejects_bank_client():
+    """Проверяет сертификат платформы и отказ банку на публичном входе."""
+    content = load_caddyfile()
+    assert "tls /etc/caddy/admin/admin_server.crt /etc/caddy/admin/admin_server.key" in content
+    assert "bank_service" in content
+    assert "bank_operator" in content
+    assert "bank-simulation" in content
+    assert "abort @bank_client" in content
+
+
+def test_simulation_proxy_keeps_internal_agent_headers():
+    """Проверяет, что прокси симуляции снимает только заголовки, которые ставит Caddy."""
+    content = load_caddyfile()
+    simulation = content.split("simulation-api.internal", 1)[1].split("admin-server.internal", 1)[0]
+    assert "header_up -X-Client-Cert-*" in simulation
+    assert "header_up -X-Agent-Cert" not in simulation
+    assert "header_up -X-Enclave-Cert" not in simulation
+    assert "header_up -X-Signature" not in simulation
+    assert "reverse_proxy https://simulation-api:8002" in simulation
 

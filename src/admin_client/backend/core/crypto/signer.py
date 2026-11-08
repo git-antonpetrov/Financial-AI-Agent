@@ -73,7 +73,11 @@ class ZeroTrustClientSigner:
                 cert_pem=cert_pem,
                 ca_cert_path=ca_cert_path,
             )
-        elif mode == "simulated_tpm":
+        elif mode == "simulated_tpm" and os.getenv("FINANCIAL_AI_ALLOW_TEST_BRIDGES", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
             self._active_bridge = SimulatedTPMBridge(
                 key_path=key_path,
                 key_pem=key_pem,
@@ -82,7 +86,11 @@ class ZeroTrustClientSigner:
                 ca_cert_path=ca_cert_path,
                 ca_cert_pem=ca_cert_pem,
             )
-        elif mode == "software":
+        elif mode == "software" and os.getenv("FINANCIAL_AI_ALLOW_TEST_BRIDGES", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
             self._active_bridge = SoftwareSigningBridge(
                 cert_path=cert_path,
                 key_path=key_path,
@@ -209,10 +217,10 @@ class ZeroTrustClientSigner:
         """
         Криптографически проверяет подлинность квитанции сервера (AckReceipt).
 
-        Args:
+        Аргументы:
             receipt_data: Словарь с данными квитанции.
             server_signature_b64: Цифровая подпись сервера в Base64.
-            trusted_server_cert_or_pubkey: Открытый ключ или сертификат сервера/Root CA.
+            trusted_server_cert_or_pubkey: Открытый ключ или сертификат сервера либо корневого CA.
         """
         if not server_signature_b64 or not server_signature_b64.strip():
             return False
@@ -294,7 +302,7 @@ class ZeroTrustClientSigner:
 
                 leaf_cert = parsed_certs[0]
 
-                # Разрешаем доверенный Root CA
+                # Разрешает доверенный Root CA
                 root_ca_pem = self._resolve_trusted_root_ca_pem()
                 if not root_ca_pem:
                     return False
@@ -371,7 +379,7 @@ class ZeroTrustClientSigner:
                 return False
 
             if isinstance(pub_key, rsa.RSAPublicKey):
-                # Пробуем RSA-PSS (Max Salt)
+                # Проверяет подпись RSA-PSS с максимальной длиной соли.
                 try:
                     pub_key.verify(
                         raw_sig,
@@ -386,7 +394,7 @@ class ZeroTrustClientSigner:
                 except InvalidSignature:
                     pass
 
-                # Пробуем RSA-PSS (Digest Salt)
+                # Проверяет подпись RSA-PSS с длиной соли, равной длине хеша.
                 try:
                     pub_key.verify(
                         raw_sig,
@@ -401,7 +409,7 @@ class ZeroTrustClientSigner:
                 except InvalidSignature:
                     pass
 
-                # Пробуем PKCS#1 v1.5
+                # Проверяет подпись PKCS#1 v1.5.
                 try:
                     pub_key.verify(raw_sig, canonical_receipt, padding.PKCS1v15(), hashes.SHA256())
                     return True

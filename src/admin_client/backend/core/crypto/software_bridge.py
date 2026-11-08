@@ -124,9 +124,9 @@ class SoftwareSigningBridge:
         """
         Подписывает канонические байты.
 
-        Args:
+        Аргументы:
             canonical_bytes: Байты для подписи.
-            scheme: 'PSS' (по умолчанию) или 'PKCS1'.
+            scheme: PSS по умолчанию или PKCS1.
         """
         if scheme == "PKCS1":
             raw_sig = self._private_key.sign(canonical_bytes, padding.PKCS1v15(), hashes.SHA256())

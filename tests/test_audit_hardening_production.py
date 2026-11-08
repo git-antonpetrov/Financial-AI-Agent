@@ -142,7 +142,8 @@ def test_bank_transfer_blocks_cross_currency(monkeypatch):
             amount=Decimal("100.00"),
             transfer_type="account",
             destination="40817810000000000002",
-        )
+        
+            idempotency_key="idem-test")
         with pytest.raises(HTTPException) as exc:
             await transfer_money(req)
 
@@ -177,7 +178,8 @@ def test_invest_open_deposit_blocks_idor(monkeypatch):
             from_bank_account_id="acc_bank",
             initial_amount=Decimal("1000.00"),
             term_months=6,
-        )
+        
+            idempotency_key="idem-open-test")
         with pytest.raises(HTTPException) as exc:
             await open_deposit(req)
 
@@ -215,7 +217,7 @@ def test_invest_close_deposit_and_savings_block_idor(monkeypatch):
         monkeypatch.setattr("src.simulations.api.routers.invest.invest_db", lambda: make_async_cm(invest_session))
         monkeypatch.setattr("src.simulations.api.routers.invest.bank_db", lambda: make_async_cm(bank_session))
 
-        req = CloseProductRequest(to_bank_account_id="acc_attacker")
+        req = CloseProductRequest(to_bank_account_id="acc_attacker", idempotency_key="idem-close-idor")
         with pytest.raises(HTTPException) as exc:
             await close_deposit("dep_target", req)
 

@@ -211,6 +211,7 @@ venv/
 .venv/
 env/
 .idea/
+.cursor/
 .vscode/*
 !.vscode/settings.json
 

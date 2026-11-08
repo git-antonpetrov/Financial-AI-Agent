@@ -404,31 +404,39 @@ async def submit_rag_document(
                 detail="Storage failure",
             )
 
-    # 6. Отправка задачи в очередь Redis для vector-worker
-    if redis_client is not None:
-        try:
-            import anyio
+    if redis_client is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Очередь векторизации недоступна, документ не принят",
+        )
+    try:
+        import anyio
 
-            queue_payload = {
-                "agent": agent_name,
-                "action": "upsert",
-                "file_path": object_name,
-                "bucket": bucket_name,
-                "file_hash": file_hash,
-                "system_name": doc_req.document_title,
-                "short_name": safe_title,
-                "filename": filename,
-                "metadata": doc_req.metadata,
-            }
-            await anyio.to_thread.run_sync(redis_client.lpush, "document_tasks", json.dumps(queue_payload))
-            log_success("Redis", f"Задача векторизации для {filename} поставлена в очередь")
-        except Exception as e:
-            log_warning("Redis", f"Предупреждение: отправка задачи в Redis не удалась ({e})")
-            if getattr(settings, "STRICT_SECURITY", False):
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Ошибка постановки задачи векторизации в очередь: {e}",
-                )
+        queue_payload = {
+            "agent": agent_name,
+            "action": "upsert",
+            "file_path": object_name,
+            "bucket": bucket_name,
+            "file_hash": file_hash,
+            "system_name": doc_req.document_title,
+            "short_name": safe_title,
+            "filename": filename,
+            "metadata": doc_req.metadata,
+        }
+        await anyio.to_thread.run_sync(redis_client.lpush, "document_tasks", json.dumps(queue_payload))
+        log_success("Redis", f"Задача векторизации для {filename} поставлена в очередь")
+    except Exception as exc:
+        log_error("Redis", f"Постановка задачи в Redis не выполнена: {exc}")
+        if doc_record is not None:
+            try:
+                await db.delete(doc_record)
+                await db.commit()
+            except Exception as rollback_err:
+                log_error("RAG Database", f"Не удалось отменить документ без очереди: {rollback_err}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Очередь векторизации недоступна, документ не принят",
+        ) from exc
 
     # 7. Формирование и подписание квитанции сервера (AckReceipt)
     receipt_id = str(uuid.uuid4())

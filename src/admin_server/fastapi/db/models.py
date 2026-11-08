@@ -2,7 +2,7 @@
 Модели SQLAlchemy для хранения документов, заявок агентов и зарегистрированных агентов.
 """
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -87,6 +87,7 @@ class AuditLog(Base):
     """
 
     __tablename__ = "audit_logs"
+    __table_args__ = (UniqueConstraint("prev_hash", name="uq_audit_logs_prev_hash"),)
 
     id = Column(Integer, primary_key=True, index=True)
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)

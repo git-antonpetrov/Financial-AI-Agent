@@ -98,7 +98,10 @@ def test_invest_close_deposit_and_savings_exact_decimal(monkeypatch):
         monkeypatch.setattr("src.simulations.api.routers.invest.invest_db", lambda: make_async_cm(invest_session))
         monkeypatch.setattr("src.simulations.api.routers.invest.bank_db", lambda: make_async_cm(bank_session))
 
-        res = await close_deposit("dep_dec", CloseProductRequest(to_bank_account_id="bank_acc_1"))
+        res = await close_deposit(
+            "dep_dec",
+            CloseProductRequest(to_bank_account_id="bank_acc_1", idempotency_key="idem-close-dec"),
+        )
 
         assert res["status"] == "success"
         assert isinstance(res["returned_amount"], Decimal)
@@ -139,7 +142,8 @@ def test_invest_open_deposit_sets_decimal_rate(monkeypatch):
             from_bank_account_id="bank_acc_1",
             initial_amount=Decimal("15000.50"),
             term_months=12
-        ))
+        ,
+            idempotency_key="idem-open-test"))
 
         assert len(created_objects) == 1
         dep = created_objects[0]

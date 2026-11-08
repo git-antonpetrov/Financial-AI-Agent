@@ -78,7 +78,12 @@ class ContentCaptureRecognizer:
         api_uri: str = "",
     ):
         self.username = username or os.getenv("CONTENTAI_USERNAME")
-        self.password = password or os.getenv("CONTENTAI_PASSWORD")
+        candidate = password or os.getenv("CONTENTAI_PASSWORD")
+        if candidate == "********":
+            candidate = os.getenv("CONTENTAI_PASSWORD")
+        if candidate == "********":
+            candidate = ""
+        self.password = candidate
         if not self.username or not self.password:
             raise ValueError("Не заданы CONTENTAI_USERNAME или CONTENTAI_PASSWORD")
 
@@ -296,7 +301,7 @@ class ContentCaptureRecognizer:
                         f"Content AI завис: прогресс не меняется ({percent}%) более {idle_timeout} секунд"
                     )
 
-                # Периодически проверяем наличие ошибок в пакете
+                # Периодически проверяет наличие ошибок в пакете
                 if elapsed > 0 and elapsed % 10 == 0:
                     try:
                         get_batch_xml = (

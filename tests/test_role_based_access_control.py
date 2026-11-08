@@ -152,12 +152,28 @@ def test_current_user_compatibility():
     assert not user.has_permission("nonexistent:perm")
 
 
+def test_current_user_requires_explicit_role():
+    """Не создаёт пользователя без роли и не повышает неизвестную роль до SUPERADMIN."""
+    with pytest.raises(TypeError):
+        CurrentUser("admin")
+
+    with pytest.raises(ValueError):
+        CurrentUser("admin", role=None)
+
+    with pytest.raises(ValueError):
+        CurrentUser("admin", role="root")
+
+    operator = CurrentUser("operator", role="operator")
+    assert operator.role == Role.OPERATOR
+    assert operator.role != Role.SUPERADMIN
+
+
 # --- 2. ТЕСТЫ JWT-ТОКЕНОВ С ПОДДЕРЖКОЙ RBAC ---
 
 def test_create_access_token_with_roles():
     """Проверяет генерацию и декодирование JWT токенов для разных ролей."""
-    # 1. Superadmin (по умолчанию)
-    admin_token = create_access_token({"sub": "admin"})
+    # 1. Superadmin передаётся явно: конструктор больше не подставляет роль сам.
+    admin_token = create_access_token({"sub": "admin"}, role=Role.SUPERADMIN)
     payload_admin = decode_access_token(admin_token)
     assert payload_admin["role"] == "superadmin"
     assert "security:manage" in payload_admin["permissions"]
@@ -180,9 +196,42 @@ def test_create_access_token_with_roles():
     assert "documents:write" not in payload_aud["permissions"]
 
 
+def test_token_constructors_reject_empty_and_unknown_role():
+    """Пустая или неизвестная роль не становится SUPERADMIN и поднимает ValueError."""
+    with pytest.raises(ValueError):
+        create_access_token({"sub": "admin"})
+    with pytest.raises(ValueError):
+        create_access_token({"sub": "admin"}, role="")
+    with pytest.raises(ValueError):
+        create_access_token({"sub": "admin"}, role="   ")
+    with pytest.raises(ValueError):
+        create_access_token({"sub": "admin"}, role="root")
+    with pytest.raises(ValueError):
+        create_access_token({"sub": "admin", "role": "root"})
+    with pytest.raises(ValueError):
+        create_refresh_token({"sub": "admin"})
+    with pytest.raises(ValueError):
+        create_refresh_token({"sub": "admin"}, role="owner")
+
+    payload_token = create_access_token({"sub": "auditor", "role": "auditor"})
+    assert decode_access_token(payload_token)["role"] == Role.AUDITOR.value
+    explicit = create_access_token(
+        {"sub": "operator", "role": "auditor"},
+        role=Role.OPERATOR,
+    )
+    assert decode_access_token(explicit)["role"] == Role.OPERATOR.value
+
+
+def test_login_mapping_keeps_admin_as_superadmin():
+    """Логин по-прежнему явно сопоставляет учётную запись admin с SUPERADMIN."""
+    from server import USER_ROLE_MAPPING
+
+    assert USER_ROLE_MAPPING["admin"] is Role.SUPERADMIN
+
+
 def test_refresh_token_rotation_preserves_role():
     """Проверяет сохранение роли пользователя при ротации refresh-токена (RTR)."""
-    if security.redis_blacklist is not None:
+    if isinstance(getattr(security.redis_blacklist, "exists", None), MagicMock):
         security.redis_blacklist.exists.return_value = False
         security.redis_blacklist.setex.return_value = True
 

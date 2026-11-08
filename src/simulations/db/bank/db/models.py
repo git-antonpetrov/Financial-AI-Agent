@@ -105,8 +105,25 @@ class AutoPayment(Base):
     schedule = Column(String, nullable=False)  # Периодичность: 'monthly', 'weekly'
     next_payment_date = Column(Date, nullable=False, index=True)
     is_active = Column(Boolean, default=True, index=True)
+    idempotency_key = Column(String, nullable=True, unique=True, index=True)
 
     account = relationship("Account", back_populates="auto_payments")
+
+
+class BankIdempotencyClaim(Base):
+    """Фиксирует одну банковскую операцию на ключ идемпотентности.
+
+    Проводки не являются носителем идемпотентности: у перевода один ключ
+    стоит и на расходе, и на приходе. Повтор с другим типом, счётом или
+    суммой не считается успехом.
+    """
+
+    __tablename__ = "bank_idempotency_claims"
+    key = Column(String, primary_key=True)
+    operation_type = Column(String, nullable=False)
+    account_id = Column(String, nullable=False)
+    amount = Column(EncryptedDecimal, nullable=False)
+    direction = Column(String, nullable=False)
 
 
 class IdempotencyRecord(Base):

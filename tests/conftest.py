@@ -15,6 +15,7 @@ import litellm  # noqa: F401  # Гарантируем предзагрузку 
 import asyncpg  # noqa: F401  # Гарантируем предзагрузку реального пакета asyncpg
 import pytest
 from pathlib import Path
+from tests.memory_redis import MemoryRedis
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 from cryptography.hazmat.backends import default_backend
@@ -217,6 +218,8 @@ _DEFAULT_ENV = {
     "ADMIN_TOTP_SECRET": "JBSWY3DPEHPK3PXP",
     "POSTGRES_PASSWORD": "test_postgres_secret",
     "FINANCIAL_AGENT_CERTS_CACHE_DIR": str(_certs_dir),
+    "SSL_CERT_FILE": str(_certs_dir / "ca.crt"),
+    "PROXY_INTERNAL_SECRET": "test-unit-proxy-secret-32b!",
     "BANK_DATABASE_URL": "postgresql+asyncpg://financial_ai_agent:test_postgres_secret@postgres-db:5432/bank_db",
     "INVEST_DATABASE_URL": "postgresql+asyncpg://financial_ai_agent:test_postgres_secret@postgres-db:5432/invest_db",
     "RUBLE_DATABASE_URL": "postgresql+asyncpg://financial_ai_agent:test_postgres_secret@postgres-db:5432/ruble_db",
@@ -227,6 +230,46 @@ for k, v in _DEFAULT_ENV.items():
     if k not in os.environ:
         os.environ[k] = v
 
+# Тестовый процесс не наследует боевые флаги окружения разработчика.
+os.environ["REQUIRE_MTLS"] = "false"
+os.environ["REQUIRE_2FA"] = "false"
+os.environ["MINIO_SECURE"] = "false"
+os.environ["MINIO_SSE_ENABLED"] = "false"
+os.environ["STRICT_SECURITY"] = "false"
+os.environ["AUTH_FAIL_CLOSED"] = "false"
+os.environ["REDIS_CONNECT_TIMEOUT"] = "0.3"
+os.environ["FINANCIAL_AI_ALLOW_TEST_BRIDGES"] = "true"
+os.environ["PROXY_INTERNAL_SECRET"] = "test-unit-proxy-secret-32b!"
+os.environ["SSL_CERT_FILE"] = str(_certs_dir / "ca.crt")
+os.environ["REDIS_HOST"] = "127.0.0.1"
+os.environ["REDIS_SSL"] = "false"
+os.environ["POSTGRES_SSLMODE"] = "verify-full"
+
+
+@pytest.fixture(autouse=True)
+def disable_live_redis(monkeypatch):
+    """Подменяет живые клиенты Redis, чтобы тесты не ждали молчащий порт."""
+    import sys
+
+    client = MemoryRedis()
+    for module in list(sys.modules.values()):
+        if module is None:
+            continue
+        module_file = str(getattr(module, "__file__", "") or "").replace("\\", "/")
+        if "Financial-AI-Agent" not in module_file or "site-packages" in module_file:
+            continue
+        if "/tests/" in module_file:
+            continue
+        if hasattr(module, "redis_blacklist"):
+            monkeypatch.setattr(module, "redis_blacklist", client, raising=False)
+        if hasattr(module, "redis_client"):
+            monkeypatch.setattr(module, "redis_client", client, raising=False)
+    try:
+        import src.common.redis_factory as redis_factory
+
+        monkeypatch.setattr(redis_factory, "open_redis_or_none", lambda **kwargs: None)
+    except Exception:
+        pass
 
 
 def pytest_configure(config):

@@ -41,58 +41,77 @@ def is_simulation_entity_revoked(key: str) -> bool:
 
 
 async def run_simulation_revocation_listener() -> None:
-    """
-    Фоновый асинхронный подписчик на Redis-канал 'security:revocations'.
-    Обеспечивает мгновенную (0 секунд) синхронизацию кэша _simulation_revoked_cache при отзывах/восстановлениях.
+    """Подписывается на канал Redis ``security:revocations`` и обновляет локальный кэш.
+
+    Обрыв соединения не останавливает подписку: слушатель ждёт и подключается снова,
+    потому что отзыв должен доходить до шлюза после перезапуска Redis.
+
+    Побочные эффекты:
+        Пишет отозванные идентификаторы в ``_simulation_revoked_cache``.
     """
     import asyncio
 
-    try:
-        import redis
+    while True:
+        client = None
+        try:
+            client, pubsub = await asyncio.to_thread(_open_revocation_pubsub)
+            while True:
+                msg = await asyncio.to_thread(pubsub.get_message, ignore_subscribe_messages=True, timeout=0.5)
+                if msg and msg.get("type") == "message":
+                    data = msg.get("data")
+                    if isinstance(data, bytes):
+                        data = data.decode("utf-8")
+                    if isinstance(data, str):
+                        if data.startswith("unrevoked:"):
+                            update_simulation_revocation_cache(data.replace("unrevoked:", ""), is_revoked=False)
+                        else:
+                            update_simulation_revocation_cache(data, is_revoked=True)
+                await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log_warning("Simulation Auth", f"Слушатель отзывов Redis повторит подключение: {e}")
+            await asyncio.sleep(5)
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    log_warning("Simulation Auth", "Не удалось закрыть клиент Redis после обрыва подписки.")
 
-        redis_host = os.getenv("REDIS_HOST", "redis")
-        redis_port = int(os.getenv("REDIS_PORT", "6379"))
-        redis_password = os.getenv("REDIS_PASSWORD", "")
-        redis_ssl = os.getenv("REDIS_SSL", "true").lower() in ("true", "1", "yes")
-        redis_ca = os.getenv("REDIS_SSL_CA_CERTS", "/certs/ca.crt")
 
-        kwargs = {
-            "host": redis_host,
-            "port": redis_port,
-            "password": redis_password or None,
-            "decode_responses": True,
-            "socket_timeout": 2.0,
-            "socket_connect_timeout": 2.0,
-        }
-        if redis_ssl and os.path.exists(redis_ca):
-            kwargs["ssl"] = True
-            kwargs["ssl_ca_certs"] = redis_ca
-            kwargs["ssl_cert_reqs"] = "required"
+def _open_revocation_pubsub():
+    """Открывает подписку Redis на канал отзывов сертификатов.
 
-        def _init_pubsub():
-            c = redis.Redis(**kwargs)
-            ps = c.pubsub()
-            ps.subscribe("security:revocations")
-            return c, ps
+    Возвращает:
+        Пару из клиента Redis и объекта pubsub.
 
-        client, pubsub = await asyncio.to_thread(_init_pubsub)
-        while True:
-            msg = await asyncio.to_thread(pubsub.get_message, ignore_subscribe_messages=True, timeout=0.5)
-            if msg and msg.get("type") == "message":
-                data = msg.get("data")
-                if isinstance(data, bytes):
-                    data = data.decode("utf-8")
-                if isinstance(data, str):
-                    if data.startswith("unrevoked:"):
-                        key = data.replace("unrevoked:", "")
-                        update_simulation_revocation_cache(key, is_revoked=False)
-                    else:
-                        update_simulation_revocation_cache(data, is_revoked=True)
-            await asyncio.sleep(0.5)
-    except asyncio.CancelledError:
-        pass
-    except Exception as e:
-        log_warning("Simulation Auth", f"Фоновый слушатель отзывов Redis завершил работу: {e}")
+    Вызывает:
+        Exception: Redis недоступен или TLS-сертификат не проходит проверку.
+    """
+    import redis
+
+    redis_host = os.getenv("REDIS_HOST", "redis")
+    redis_port = int(os.getenv("REDIS_PORT", "6379"))
+    redis_password = os.getenv("REDIS_PASSWORD", "")
+    redis_ssl = os.getenv("REDIS_SSL", "true").lower() in ("true", "1", "yes")
+    redis_ca = os.getenv("REDIS_SSL_CA_CERTS", "/certs/ca.crt")
+
+    from src.common.redis_factory import redis_connection_kwargs
+
+    if redis_ssl and not os.path.exists(redis_ca):
+        raise RuntimeError(f"REDIS_SSL включён, но файл CA не найден: {redis_ca}")
+    kwargs = redis_connection_kwargs(
+        redis_host,
+        redis_port,
+        redis_password,
+        use_ssl=redis_ssl,
+        ca_file=redis_ca,
+    )
+    client = redis.Redis(**kwargs)
+    pubsub = client.pubsub()
+    pubsub.subscribe("security:revocations")
+    return client, pubsub
 
 
 def extract_token_from_headers(
@@ -166,7 +185,7 @@ def verify_agent_token(token: str, allowed_env_vars: list[str], domain_name: str
         if secrets.compare_digest(token, expected):
             return token
 
-    # Проверка: если токен валиден для другого домена симуляций, возвращаем 403 Forbidden
+    # Проверка: если токен валиден для другого домена симуляций, возвращает 403 Forbidden
     other_env_vars = [
         "AGENT_BANK_BOOTSTRAP_TOKEN",
         "AGENT_INVEST_BOOTSTRAP_TOKEN",
@@ -339,6 +358,16 @@ async def check_enclave_or_token_auth(
                             raise
                         except Exception as e:
                             log_warning("Simulation Auth", f"Ошибка проверки отзыва Анклава в Redis: {e}")
+                            if os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1", "yes"):
+                                raise HTTPException(
+                                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                                    detail="Проверка отзыва сертификата Анклава недоступна",
+                                ) from e
+                    elif os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1", "yes"):
+                        raise HTTPException(
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="Проверка отзыва сертификата Анклава недоступна",
+                        )
 
             # 5.2 Проверка конечного сертификата агента в In-Memory Cache
             if (
@@ -359,10 +388,15 @@ async def check_enclave_or_token_auth(
             redis_cli = getattr(verifier.nonce_store, "redis_client", None)
             if redis_cli is not None:
                 try:
+                    cn_lookup = cn_str.strip().lower() if cn_str else ""
+                    agent_revoked = bool(cn_lookup) and (
+                        redis_cli.exists(f"revoked:agent:{cn_lookup}")
+                        or redis_cli.exists(f"revoked:agent_key:{cn_lookup}")
+                    )
                     if (
                         redis_cli.exists(f"revoked:cert:serial:{serial_str}")
                         or redis_cli.exists(f"revoked:cert:fp:{fp_str}")
-                        or (cn_str and redis_cli.exists(f"revoked:agent:{cn_str}"))
+                        or agent_revoked
                     ):
                         log_warning(
                             "Simulation Auth",
@@ -376,18 +410,26 @@ async def check_enclave_or_token_auth(
                     raise
                 except Exception as e:
                     log_warning("Simulation Auth", f"Ошибка проверки отзыва в Redis: {e}")
+                    if os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1", "yes"):
+                        raise HTTPException(
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="Проверка отзыва сертификата агента недоступна",
+                        ) from e
+            elif os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1", "yes"):
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Проверка отзыва сертификата агента недоступна",
+                )
 
             # Проверка 6 (Zero-Trust Pipeline): Проверка роли субъекта (OU / Role validation)
             ou_values = [str(attr.value) for attr in leaf_cert.subject if attr.oid == NameOID.ORGANIZATIONAL_UNIT_NAME]
-            valid_roles = {
-                "AI Autonomous Financial Agent",
-                "bank_operator",
-                "Security Operations",
-                "bank_service",
-                "admin_operator",
-                "infrastructure",
-                "agent",
+            domain_roles = {
+                "Bank": {"bank_operator", "bank_service", "AI Autonomous Financial Agent"},
+                "Invest": {"invest_operator", "bank_operator", "AI Autonomous Financial Agent"},
+                "Digital Ruble": {"digital_operator", "bank_operator", "AI Autonomous Financial Agent"},
+                "Oracle": {"oracle", "AI Autonomous Financial Agent"},
             }
+            valid_roles = domain_roles.get(domain_name, set())
             if not ou_values or not any(role in valid_roles for role in ou_values):
                 log_warning("Simulation Auth", f"Недопустимая или отсутствующая роль сертификата: {ou_values}")
                 raise HTTPException(
@@ -412,19 +454,6 @@ async def check_enclave_or_token_auth(
                 leaf_cert_input=leaf_cert,
                 verify_chain=False,
             )
-            if not is_sig_valid:
-                canonical_data_compat = chain_val.compute_canonical_digest(
-                    timestamp=req_ts,
-                    nonce=nonce,
-                    body_bytes=body,
-                )
-                is_sig_valid, sig_err = chain_val.verify_signature(
-                    payload_bytes=canonical_data_compat,
-                    signature_b64=signature,
-                    leaf_cert_input=leaf_cert,
-                    verify_chain=False,
-                )
-
             if not is_sig_valid:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
@@ -453,7 +482,7 @@ async def check_enclave_or_token_auth(
                 detail="Для аутентификации Анклава требуются все заголовки: X-Enclave-Signature, X-Nonce, X-Timestamp",
             )
 
-        # Читаем тело запроса
+        # Читает тело запроса
         body = await request.body()
         verifier = get_enclave_verifier()
 
@@ -476,11 +505,11 @@ async def check_enclave_or_token_auth(
             )
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=reason)
 
-        # Запоминаем проверенный nonce в состоянии запроса для включения в Signed Receipt
+        # Запоминает проверенный nonce в состоянии запроса для включения в Signed Receipt
         request.state.enclave_nonce = nonce
         request.state.authenticated_entity = "enclave"
 
-        # Если вместе с подписью Анклава передан токен конкретного агента, проводим его доменную валидацию
+        # Если вместе с подписью Анклава передан токен конкретного агента, проводит его доменную валидацию
         optional_token = extract_token_from_headers(
             x_bootstrap_token=request.headers.get("X-Bootstrap-Token"),
             authorization=request.headers.get("Authorization"),

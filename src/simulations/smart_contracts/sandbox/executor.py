@@ -7,6 +7,101 @@ from typing import Any
 from src.simulations.smart_contracts.dsl.context import ContractContext
 
 
+_MAX_SEQUENCE_REPEAT = 1000
+_MAX_INT_LITERAL_DIGITS = 9
+
+
+def _constant_int(node: ast.AST) -> int | None:
+    """Возвращает целое значение константы либо None, если узел не является целым литералом."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, int) and not isinstance(node.value, bool):
+        return node.value
+    return None
+
+
+def _sequence_like(node: ast.AST) -> bool:
+    """Проверяет, порождает ли узел строку или коллекцию на уровне синтаксиса."""
+    if isinstance(node, (ast.List, ast.Tuple, ast.BinOp, ast.JoinedStr)):
+        return True
+    return isinstance(node, ast.Constant) and isinstance(node.value, str)
+
+
+def _reject_sequence_multiplication(left: ast.AST, right: ast.AST) -> None:
+    """Запрещает размножение строк и коллекций, включая обход через int(\"...\")."""
+    for seq_node, factor_node in ((left, right), (right, left)):
+        if not _sequence_like(seq_node):
+            continue
+        factor = _constant_int(factor_node)
+        if factor is None or factor < 0 or factor > _MAX_SEQUENCE_REPEAT:
+            raise SandboxExecutionError(
+                "Размножение последовательности разрешено только на целый литерал от 0 до 1000"
+            )
+        if isinstance(seq_node, ast.Constant) and isinstance(seq_node.value, str):
+            if len(seq_node.value) * factor > _MAX_SEQUENCE_REPEAT:
+                raise SandboxExecutionError("Размножение строки превышает допустимый размер")
+
+
+def _sandbox_int(value: Any = 0, base: int = 10) -> int:
+    """Преобразует значение в int и отклоняет длинные строковые аргументы."""
+    if isinstance(value, str):
+        token = value.strip()
+        digits = token[1:] if token.startswith(("+", "-")) else token
+        if len(digits) > _MAX_INT_LITERAL_DIGITS:
+            raise SandboxExecutionError("Слишком длинный аргумент int()")
+        return int(token, base)
+    if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
+        raise SandboxExecutionError("int() принимает только число или короткую строку")
+    return int(value)
+
+
+def _sandbox_mul(left: Any, right: Any) -> Any:
+    """Умножает числа и ограничивает размножение строк и коллекций."""
+    sequence = None
+    factor = None
+    if isinstance(left, (str, list, tuple, bytes)) and isinstance(right, int) and not isinstance(right, bool):
+        sequence, factor = left, right
+    elif isinstance(right, (str, list, tuple, bytes)) and isinstance(left, int) and not isinstance(left, bool):
+        sequence, factor = right, left
+    if sequence is not None and factor is not None:
+        if factor < 0 or factor > _MAX_SEQUENCE_REPEAT or len(sequence) * factor > _MAX_SEQUENCE_REPEAT:
+            raise SandboxExecutionError("Размножение последовательности превышает лимит песочницы")
+        return sequence * factor
+    if isinstance(left, (int, float, Decimal)) and isinstance(right, (int, float, Decimal)):
+        if isinstance(left, bool) or isinstance(right, bool):
+            raise SandboxExecutionError("Недопустимое умножение")
+        return left * right
+    raise SandboxExecutionError("Недопустимое умножение")
+
+
+class _MultiplicationRewriter(ast.NodeTransformer):
+    """Заменяет оператор умножения вызовом ограниченной функции песочницы."""
+
+    def visit_BinOp(self, node: ast.BinOp) -> ast.AST:
+        """Переписывает умножение в вызов _sandbox_mul."""
+        node = self.generic_visit(node)
+        if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Mult):
+            return node
+        return ast.Call(
+            func=ast.Name(id="_sandbox_mul", ctx=ast.Load()),
+            args=[node.left, node.right],
+            keywords=[],
+        )
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> ast.AST:
+        """Переписывает составное умножение в вызов _sandbox_mul."""
+        node = self.generic_visit(node)
+        if not isinstance(node.op, ast.Mult):
+            return node
+        loaded = ast.Name(id=node.target.id, ctx=ast.Load()) if isinstance(node.target, ast.Name) else node.target
+        return ast.Assign(
+            targets=[node.target],
+            value=ast.Call(
+                func=ast.Name(id="_sandbox_mul", ctx=ast.Load()),
+                args=[loaded, node.value],
+                keywords=[],
+            ),
+        )
+
+
 class SandboxExecutionError(Exception):
     """Исключение, возникающее при нарушении правил безопасности или ошибке выполнения песочницы."""
 
@@ -92,18 +187,7 @@ class SecurityASTVisitor(ast.NodeVisitor):
         if isinstance(node.op, (ast.LShift, ast.RShift)):
             raise SandboxExecutionError("Битовые сдвиги запрещены в смарт-контрактах (DoS protection)")
         if isinstance(node.op, ast.Mult):
-            for val_node, mul_node in [(node.left, node.right), (node.right, node.left)]:
-                if isinstance(val_node, (ast.List, ast.Tuple, ast.BinOp)) or (
-                    isinstance(val_node, ast.Constant) and isinstance(val_node.value, str)
-                ):
-                    if (
-                        isinstance(mul_node, ast.Constant)
-                        and isinstance(mul_node.value, int)
-                        and mul_node.value > 1000
-                    ):
-                        raise SandboxExecutionError(
-                            "Умножение последовательностей с коэффициентом > 1000 запрещено (DoS protection)"
-                        )
+            _reject_sequence_multiplication(node.left, node.right)
         self.generic_visit(node)
 
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
@@ -113,15 +197,6 @@ class SecurityASTVisitor(ast.NodeVisitor):
             )
         if isinstance(node.op, (ast.LShift, ast.RShift)):
             raise SandboxExecutionError("Составные битовые сдвиги запрещены в смарт-контрактах (DoS protection)")
-        if isinstance(node.op, ast.Mult):
-            if (
-                isinstance(node.value, ast.Constant)
-                and isinstance(node.value.value, int)
-                and node.value.value > 1000
-            ):
-                raise SandboxExecutionError(
-                    "Составное умножение последовательностей с коэффициентом > 1000 запрещено (DoS protection)"
-                )
         self.generic_visit(node)
 
     def visit_Import(self, node: ast.Import) -> None:
@@ -180,7 +255,7 @@ class SmartContractSandbox:
         "None": None,
         "len": len,
         "round": round,
-        "int": int,
+        "int": _sandbox_int,
         "float": float,
         "str": str,
         "bool": bool,
@@ -231,26 +306,29 @@ class SmartContractSandbox:
         """
         Исполняет проверенный код смарт-контракта в изолированном контексте с лимитом операций и времени.
 
-        Args:
-            code (str): Исходный код смарт-контракта на Python.
-            ctx (ContractContext): Контекст исполнения смарт-контракта.
-            timeout_seconds (float): Лимит времени выполнения в секундах.
-            max_operations (int): Максимальное число выполняемых шагов/инструкций.
+        Аргументы:
+            code: Исходный код смарт-контракта на Python.
+            ctx: Контекст исполнения смарт-контракта.
+            timeout_seconds: Лимит времени выполнения в секундах.
+            max_operations: Максимальное число выполняемых шагов.
 
-        Returns:
-            Tuple[bool, bool, List[Dict[str, Any]], Optional[str]]:
-                - success: True, если контракт отработал без ошибок.
-                - is_completed: True, если контракт завершил свою логику (готов к расчету).
-                - transfers: список запрошенных переводов.
-                - error_message: текст ошибки при неудаче или None.
+        Возвращает:
+            Кортеж из признака успеха, признака завершения, списка переводов и текста ошибки.
         """
         try:
             # 1. Статический анализ безопасности (AST)
             cls.validate_code(code)
 
             # 2. Изолированная среда выполнения
-            restricted_globals: dict[str, Any] = {"__builtins__": cls.SAFE_BUILTINS}
+            restricted_globals: dict[str, Any] = {
+                "__builtins__": cls.SAFE_BUILTINS,
+                "_sandbox_mul": _sandbox_mul,
+            }
             local_scope: dict[str, Any] = {}
+
+            tree = ast.parse(code)
+            tree = _MultiplicationRewriter().visit(tree)
+            ast.fix_missing_locations(tree)
 
             # 3. Мониторинг выполнения с лимитами ресурсов (инструкций и времени)
             # В соответствии с SEC-04 сторожевой таймер устанавливается ДО вызова exec()!
@@ -273,7 +351,7 @@ class SmartContractSandbox:
             sys.settrace(trace_limits)
             try:
                 # 4. Компиляция и объявление
-                compiled_code = compile(code, filename="<smart_contract>", mode="exec")
+                compiled_code = compile(tree, filename="<smart_contract>", mode="exec")
                 exec(compiled_code, restricted_globals, local_scope)
 
                 execute_func = local_scope.get("execute")

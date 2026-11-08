@@ -1,14 +1,18 @@
+from __future__ import annotations
+
 import json
 import random
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from sqlalchemy.exc import IntegrityError
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
+from src.simulations.core.bank_claims import remember_bank_movement
 from src.simulations.api.core.auth import verify_bank_token
 from src.simulations.api.schemas.responses import (
     AccountResponse,
@@ -60,10 +64,81 @@ async def get_bank_cert_pem():
     return get_bank_ca().get_bank_cert_pem()
 
 
+def _receipt_fields(receipt: object) -> dict:
+    """Возвращает поля операции из подписанного чека.
+
+    Аргументы:
+        receipt: Чек банка. Данные лежат в ``receipt.data``.
+
+    Возвращает:
+        Словарь полей. Пустой словарь означает, что чек не содержит данных.
+    """
+    if not isinstance(receipt, dict):
+        return {}
+    nested = receipt.get("receipt")
+    if isinstance(nested, dict) and isinstance(nested.get("data"), dict):
+        return nested["data"]
+    data = receipt.get("data")
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def _amounts_equal(left: object, right: object) -> bool:
+    """Сравнивает две денежные величины с точностью до копейки.
+
+    Аргументы:
+        left: Сохранённая сумма.
+        right: Сумма текущего запроса.
+
+    Возвращает:
+        True, если обе величины задают одну сумму.
+    """
+    try:
+        return Decimal(str(left)).quantize(Decimal("0.01")) == Decimal(str(right)).quantize(Decimal("0.01"))
+    except (InvalidOperation, ValueError):
+        return False
+
+
+def _cached_transfer_matches(record: object, data: TransferRequest) -> bool:
+    """Проверяет, что кэш перевода описывает тот же счёт, назначение и сумму.
+
+    Аргументы:
+        record: Запись идемпотентности перевода.
+        data: Текущий запрос перевода.
+
+    Возвращает:
+        True, если ключ занят этим же переводом.
+    """
+    if str(getattr(record, "from_account_id", "")) != str(data.from_account_id):
+        return False
+    if not _amounts_equal(getattr(record, "amount", None), data.amount):
+        return False
+    if data.to_account_id and str(getattr(record, "to_account_id", "")) != str(data.to_account_id):
+        return False
+    raw = getattr(record, "response_payload", None)
+    if not isinstance(raw, str) or not raw.strip():
+        return data.to_account_id is not None
+    parsed = json.loads(raw)
+    receipt = parsed.get("signed_receipt") if isinstance(parsed, dict) else None
+    receipt_data = _receipt_fields(receipt)
+    if not receipt_data:
+        return data.to_account_id is not None
+    if str(receipt_data.get("from_account_id", "")) != str(data.from_account_id):
+        return False
+    if not _amounts_equal(receipt_data.get("amount"), data.amount):
+        return False
+    if str(receipt_data.get("destination", "")) != str(data.destination):
+        return False
+    if str(receipt_data.get("transfer_type", "")) != str(data.transfer_type):
+        return False
+    if data.to_account_id and str(receipt_data.get("to_account_id", "")) != str(data.to_account_id):
+        return False
+    return True
+
+
 def get_db():
-    """
-    Фабрика для получения асинхронной сессии подключения к банковской БД.
-    """
+    """Возвращает асинхронную сессию банковской базы."""
     session_maker = get_async_session_maker()
     return session_maker()
 
@@ -95,6 +170,7 @@ class AutoPaymentCreate(BaseModel):
     recipient: str
     schedule: str  # Расписание: 'monthly', 'weekly'
     next_payment_date: date
+    idempotency_key: str | None = None
 
 
 # --- Эндпоинты ---
@@ -102,9 +178,7 @@ class AutoPaymentCreate(BaseModel):
 
 @router.get("/accounts/by-client/{client_id}", response_model=list[AccountResponse])
 async def get_accounts(client_id: str) -> list[AccountResponse]:
-    """
-    Получить список всех счетов для указанного клиента.
-    """
+    """Возвращает счета указанного клиента."""
     async with get_db() as db:
         result = await db.execute(select(Account).where(Account.client_id == client_id))
         accounts = result.scalars().all()
@@ -114,9 +188,7 @@ async def get_accounts(client_id: str) -> list[AccountResponse]:
 
 @router.get("/accounts/{account_id}/tariff", response_model=TariffResponse)
 async def get_tariff(account_id: str) -> TariffResponse:
-    """
-    Получить информацию о тарифе, привязанном к конкретному счету.
-    """
+    """Возвращает тариф, привязанный к счёту."""
     async with get_db() as db:
         acc = await db.scalar(select(Account).where(Account.id == account_id))
         if not acc:
@@ -129,9 +201,7 @@ async def get_tariff(account_id: str) -> TariffResponse:
 
 @router.get("/accounts/{account_id}/cards", response_model=list[CardResponse])
 async def get_cards(account_id: str) -> list[CardResponse]:
-    """
-    Получить список всех карт, привязанных к счету.
-    """
+    """Возвращает карты, привязанные к счёту."""
     async with get_db() as db:
         result = await db.execute(select(Card).where(Card.account_id == account_id))
         return [CardResponse.model_validate(c) for c in result.scalars().all()]
@@ -139,9 +209,7 @@ async def get_cards(account_id: str) -> list[CardResponse]:
 
 @router.get("/accounts/{account_id}/transactions", response_model=list[TransactionResponse])
 async def get_transactions(account_id: str) -> list[TransactionResponse]:
-    """
-    Получить историю транзакций по счету, отсортированную по дате убывания.
-    """
+    """Возвращает транзакции счёта от новых к старым."""
     async with get_db() as db:
         result = await db.execute(
             select(Transaction).where(Transaction.account_id == account_id).order_by(Transaction.date.desc())
@@ -151,9 +219,7 @@ async def get_transactions(account_id: str) -> list[TransactionResponse]:
 
 @router.get("/accounts/{account_id}/autopayments", response_model=list[AutoPaymentResponse])
 async def get_autopayments(account_id: str) -> list[AutoPaymentResponse]:
-    """
-    Получить список активных автоплатежей для счета.
-    """
+    """Возвращает активные автоплатежи счёта."""
     async with get_db() as db:
         result = await db.execute(select(AutoPayment).where(AutoPayment.account_id == account_id))
         return [AutoPaymentResponse.model_validate(ap) for ap in result.scalars().all()]
@@ -191,7 +257,7 @@ async def issue_card(account_id: str) -> CardResponse:
             )
             raise HTTPException(404, "Счет не найден")
 
-        # Генерируем уникальный номер карты с проверкой коллизий
+        # Генерирует уникальный номер карты с проверкой коллизий
         card_number = await generate_unique_card_number(db)
         new_card = Card(account_id=account_id, card_number=card_number)
         db.add(new_card)
@@ -309,21 +375,116 @@ async def close_account(
         return {"status": "success", "signed_receipt": receipt}
 
 
+def _require_autopayment_key(request: Request | None, explicit: str | None) -> str:
+    """Возвращает ключ идемпотентности создания автоплатежа.
+
+    Аргументы:
+        request: HTTP-запрос. В модульном тесте может отсутствовать.
+        explicit: Ключ из тела запроса, если заголовка нет.
+
+    Возвращает:
+        Непустой ключ.
+
+    Вызывает:
+        HTTPException: Ключ не передан.
+    """
+    header = None
+    if request is not None:
+        raw_header = request.headers.get("X-Idempotency-Key")
+        if isinstance(raw_header, str) and raw_header.strip():
+            header = raw_header.strip()
+    body = explicit.strip() if isinstance(explicit, str) and explicit.strip() else None
+    key = header or body
+    if not key:
+        raise HTTPException(400, "Требуется заголовок X-Idempotency-Key")
+    return key
+
+
+def _same_autopayment(existing: AutoPayment, account_id: str, data: AutoPaymentCreate) -> bool:
+    """Сравнивает сохранённый автоплатёж с повторным запросом.
+
+    Аргументы:
+        existing: Уже записанный автоплатёж.
+        account_id: Счёт текущего запроса.
+        data: Тело повторного запроса.
+
+    Возвращает:
+        True, если счёт, сумма, получатель и расписание совпадают.
+    """
+    return (
+        str(existing.account_id) == str(account_id)
+        and Decimal(str(existing.amount)) == data.amount
+        and str(existing.recipient) == data.recipient
+        and str(existing.schedule) == data.schedule
+        and existing.next_payment_date == data.next_payment_date
+    )
+
+
+async def _load_autopayment(db, key: str) -> AutoPayment | None:
+    """Загружает автоплатёж с этим ключом идемпотентности.
+
+    Аргументы:
+        db: Банковская сессия.
+        key: Ключ идемпотентности.
+
+    Возвращает:
+        Строку автоплатежа либо None, если ключ принадлежит другой сущности.
+    """
+    existing = await db.scalar(select(AutoPayment).where(AutoPayment.idempotency_key == key))
+    if getattr(existing, "idempotency_key", None) != key:
+        return None
+    return existing
+
+
 @router.post("/accounts/{account_id}/autopayments", response_model=AutoPaymentResponse)
-async def create_autopayment(account_id: str, data: AutoPaymentCreate) -> AutoPaymentResponse:
+async def create_autopayment(
+    account_id: str,
+    data: AutoPaymentCreate,
+    request: Request = None,
+) -> AutoPaymentResponse:
+    """Создаёт автоплатёж один раз для ключа идемпотентности.
+
+    Повтор с тем же ключом возвращает первую строку и не создаёт вторую,
+    поэтому закрытие дня не списывает одну и ту же инструкцию дважды.
+
+    Аргументы:
+        account_id: Счёт, с которого списывается автоплатёж.
+        data: Сумма, получатель, расписание и ключ идемпотентности.
+        request: HTTP-запрос. В модульном тесте может отсутствовать.
+
+    Возвращает:
+        Созданный или ранее сохранённый автоплатёж.
+
+    Вызывает:
+        HTTPException: Нет ключа или ключ уже использован для другого автоплатежа.
+
+    Побочные эффекты:
+        Добавляет одну строку автоплатежа.
     """
-    Создать новый автоплатеж, привязанный к счету.
-    """
+    key = _require_autopayment_key(request, data.idempotency_key)
     async with get_db() as db:
+        existing = await _load_autopayment(db, key)
+        if existing is not None:
+            if not _same_autopayment(existing, account_id, data):
+                raise HTTPException(409, "Ключ идемпотентности уже использован другой операцией")
+            return AutoPaymentResponse.model_validate(existing)
         ap = AutoPayment(
             account_id=account_id,
             amount=data.amount,
             recipient=data.recipient,
             schedule=data.schedule,
             next_payment_date=data.next_payment_date,
+            idempotency_key=key,
         )
         db.add(ap)
-        await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            raced = await _load_autopayment(db, key)
+            if raced is not None and _same_autopayment(raced, account_id, data):
+                return AutoPaymentResponse.model_validate(raced)
+            raise HTTPException(409, "Ключ идемпотентности уже использован другой операцией") from None
         await db.refresh(ap)
         log_success(
             "BankAPI",
@@ -348,13 +509,17 @@ async def transfer_money(
     Проверка и валидация счета получателя выполняются безопасно внутри заблокированной транзакции.
     Подписывает сформированный чек-ответ приватным ключом Банка (Блок 5 схемы arch.txt).
     """
-    effective_idempotency_key = None
-    if data.idempotency_key:
-        effective_idempotency_key = str(data.idempotency_key).strip()
-    elif request is not None and request.headers.get("X-Idempotency-Key"):
-        effective_idempotency_key = str(request.headers.get("X-Idempotency-Key")).strip()
-    elif isinstance(x_idempotency_key, str) and x_idempotency_key:
-        effective_idempotency_key = x_idempotency_key.strip()
+    header_key = None
+    if request is not None:
+        raw_header = request.headers.get("X-Idempotency-Key")
+        if isinstance(raw_header, str) and raw_header.strip():
+            header_key = raw_header.strip()
+    elif isinstance(x_idempotency_key, str) and x_idempotency_key.strip():
+        header_key = x_idempotency_key.strip()
+    body_key = str(data.idempotency_key).strip() if data.idempotency_key else ""
+    effective_idempotency_key = header_key or body_key or None
+    if not effective_idempotency_key:
+        raise HTTPException(400, "Требуется заголовок X-Idempotency-Key")
 
     async with get_db() as db:
         # 1. Проверка идемпотентности: возврат кэшированного ответа без повторного списания
@@ -362,7 +527,11 @@ async def transfer_money(
             existing_rec = await db.scalar(
                 select(IdempotencyRecord).where(IdempotencyRecord.key == effective_idempotency_key)
             )
-            if existing_rec:
+            if (
+                getattr(existing_rec, "key", None) == effective_idempotency_key
+                and _cached_transfer_matches(existing_rec, data)
+                and getattr(existing_rec, "response_payload", None)
+            ):
                 log_info(
                     "BankAPI",
                     f"Идемпотентный повтор запроса: кэш для ключа {effective_idempotency_key}",
@@ -379,22 +548,20 @@ async def transfer_money(
                             response.headers["X-Bank-Cert-Serial"] = str(receipt["bank_cert_serial"])
                 return cached_data
 
+            if (
+                getattr(existing_rec, "key", None) == effective_idempotency_key
+                and not _cached_transfer_matches(existing_rec, data)
+            ):
+                raise HTTPException(409, "Ключ идемпотентности уже использован другой операцией")
+
             existing_tx = await db.scalar(
                 select(Transaction).where(
                     Transaction.idempotency_key == effective_idempotency_key,
                     Transaction.category == "expense",
                 )
             )
-            if existing_tx:
-                log_info(
-                    "BankAPI",
-                    f"Идемпотентный повтор: найдена транзакция {existing_tx.id} для ключа {effective_idempotency_key}",
-                )
-                return {
-                    "status": "success",
-                    "transaction_id": existing_tx.id,
-                    "idempotent_replay": True,
-                }
+            if getattr(existing_tx, "idempotency_key", None) == effective_idempotency_key:
+                raise HTTPException(409, "Ключ идемпотентности уже использован другой операцией")
 
         receiver_acc = None
 
@@ -518,6 +685,14 @@ async def transfer_money(
 
         db.add(tx_out)
         db.add(tx_in)
+        remember_bank_movement(
+            db,
+            key=effective_idempotency_key,
+            operation_type="bank_transfer",
+            account_id=str(sender.id),
+            amount=data.amount,
+            direction="expense",
+        )
 
         # Криптографическое подписание чека приватным ключом Банка (Блок 5 схемы arch.txt)
         request_nonce = None

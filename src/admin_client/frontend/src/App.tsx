@@ -135,16 +135,13 @@ function App() {
       throw new Error('errorEmptyPassword')
     }
 
-    // 3. Запрещаем отправку запросов на локальные и приватные адреса, 
-    // если только это не localhost (для тестов)
     const parsedUrl = new URL(baseUrl)
-    if (parsedUrl.hostname !== 'localhost' && parsedUrl.hostname !== '127.0.0.1') {
-      if (!parsedUrl.hostname.includes('.')) {
-        throw new Error('errorInvalidDomain')
-      }
+    const host = parsedUrl.hostname
+    if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || !host.includes('.')) {
+      throw new Error('errorInvalidDomain')
     }
 
-    // Выполняем аутентификацию через локальный sidecar (BFF) по mTLS
+    // Выполняет аутентификацию через локальный sidecar (BFF) по mTLS
     const response = await localFetch('/api/local/auth/login', {
       method: 'POST',
       headers: {
@@ -172,7 +169,7 @@ function App() {
       }
     }
 
-    // Сохраняем адрес сервера для подсказки при следующем вводе
+    // Сохраняет адрес сервера для подсказки при следующем вводе
     localStorage.setItem('admin_server', baseUrl.replace(/\/$/, ''))
     setIsAuthenticated(true)
   }

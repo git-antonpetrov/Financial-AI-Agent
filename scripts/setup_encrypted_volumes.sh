@@ -5,8 +5,23 @@
 # ==============================================================================
 set -euo pipefail
 
+# Сообщает, работает ли служба Docker. Остановленный демон не мешает печати команды переноса.
+docker_daemon_is_running() {
+    if command -v systemctl >/dev/null 2>&1; then
+        if systemctl is-active --quiet docker; then
+            return 0
+        fi
+    fi
+    if command -v pgrep >/dev/null 2>&1; then
+        if pgrep -x dockerd >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
 VOLUME_NAME=${1:-"fin_agent_secure_data"}
-MOUNT_POINT=${2:-"/var/lib/docker/volumes"}
+MOUNT_POINT=${2:-"/mnt/fin_agent_encrypted_volumes"}
 KEYFILE=${3:-"/etc/security/luks_keys/fin_agent.key"}
 SIZE_GB=${4:-20}
 STORAGE_DIR="/var/lib/secure_volumes"
@@ -27,6 +42,42 @@ for cmd in cryptsetup dd mkfs.ext4 blkid; do
         exit 1
     fi
 done
+
+# Останавливает монтирование поверх живого каталога Docker, потому что
+# такой mount скрывает существующие тома.
+if [[ "$MOUNT_POINT" == "/var/lib/docker/volumes" || "$MOUNT_POINT" == "/var/lib/docker" ]]; then
+    if docker_daemon_is_running; then
+        echo "[-] Ошибка: нельзя монтировать том поверх живого каталога Docker ${MOUNT_POINT}."
+        echo "    Остановите Docker и перенесите data-root на отдельную точку монтирования."
+        exit 1
+    fi
+    if [[ "${FIN_AGENT_FORCE_MOUNT:-}" != "1" ]]; then
+        echo "[-] Ошибка: точка монтирования ${MOUNT_POINT} совпадает с каталогом Docker."
+        echo "    Укажите отдельный каталог и перенесите data-root Docker на расшифрованный том."
+        echo "    Повторный запуск поверх остановленного Docker требует FIN_AGENT_FORCE_MOUNT=1."
+        exit 1
+    fi
+fi
+
+if [[ -d "$MOUNT_POINT" ]] && [[ -n "$(ls -A "$MOUNT_POINT" 2>/dev/null || true)" ]]; then
+    if [[ "${FIN_AGENT_FORCE_MOUNT:-}" != "1" ]]; then
+        echo "[-] Ошибка: каталог ${MOUNT_POINT} не пуст. Монтирование прервано."
+        exit 1
+    fi
+fi
+
+mkdir -p "$STORAGE_DIR"
+mkdir -p "$(dirname "$KEYFILE")"
+
+# Отклоняет ключ на том же блочном устройстве, что и контейнер LUKS, потому что
+# снимок диска хостера тогда содержит и ключ, и шифротекст.
+container_fs=$(df -P "$STORAGE_DIR" | awk 'NR==2 {print $1}')
+key_fs=$(df -P "$(dirname "$KEYFILE")" | awk 'NR==2 {print $1}')
+if [[ "$container_fs" == "$key_fs" && "${FIN_AGENT_ALLOW_SAME_DISK_LUKS_KEY:-}" != "1" ]]; then
+    echo "[-] Ошибка: ключ ${KEYFILE} и контейнер ${STORAGE_DIR} лежат на одном устройстве ${container_fs}."
+    echo "    Передайте ключ с носителя вне снимка виртуальной машины или через TPM."
+    exit 1
+fi
 
 # 2. Создание защищенного каталога ключей
 mkdir -p "$(dirname "$KEYFILE")"
@@ -77,6 +128,13 @@ if ! mount | grep -q "/dev/mapper/${MAPPER_NAME}"; then
 fi
 
 chmod 700 "$MOUNT_POINT"
+
+if docker_daemon_is_running; then
+    echo "[!] Docker запущен. Команда переноса data-root не выдаётся, пока служба не остановлена."
+else
+    echo "[+] Docker остановлен. Команда переноса data-root Docker на этот том:"
+    printf '%s\n' "mkdir -p '${MOUNT_POINT}/docker' && rsync -aHAX /var/lib/docker/ '${MOUNT_POINT}/docker/' && mkdir -p /etc/docker && printf '%s\n' '{\"data-root\":\"${MOUNT_POINT}/docker\"}' > /etc/docker/daemon.json"
+fi
 
 echo "======================================================================"
 echo "[+] УСПЕШНО: Зашифрованный том LUKS2 смонтирован и готов к работе:"

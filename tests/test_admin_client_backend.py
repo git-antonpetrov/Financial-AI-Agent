@@ -17,6 +17,16 @@ if backend_path not in sys.path:
 from fastapi import HTTPException
 from main import validate_server_url
 
+IPC_SECRET = "unit-ipc-secret"
+
+
+@pytest.fixture(autouse=True)
+def bind_ipc_secret(monkeypatch):
+    """Подставляет IPC-секрет, потому что sidecar без секрета отклоняет запросы."""
+    import main
+
+    monkeypatch.setattr(main, "SIDECAR_IPC_SECRET", IPC_SECRET)
+
 
 def test_validate_server_url_allows_localhost_and_public():
     """Проверяет успешный пропуск локальных адресов разработки и публичных доменов."""
@@ -112,7 +122,7 @@ def test_ipc_security_guard_enforces_secret():
 
     test_secret = "test-crypto-ipc-secret-123456"
     with patch.object(main, "SIDECAR_IPC_SECRET", test_secret):
-        client = TestClient(main.app)
+        client = TestClient(main.app, headers={})
 
         # 1. Запрос без токена блокируется middleware (403)
         res_no_token = client.post("/api/local/process")
@@ -127,9 +137,9 @@ def test_ipc_security_guard_enforces_secret():
         res_good_header = client.post("/api/local/process", headers={"X-Local-Secret": test_secret})
         assert res_good_header.status_code == 422
 
-        # 4. Запрос с корректным query-параметром ?secret= успешно проходит middleware (получает 422)
+        # 4. Запрос с секретом в query не принимается
         res_good_query = client.post(f"/api/local/process?secret={test_secret}")
-        assert res_good_query.status_code == 422
+        assert res_good_query.status_code == 403
 
 
 def test_ipc_security_guard_rejects_unauthorized_origin():
@@ -137,7 +147,7 @@ def test_ipc_security_guard_rejects_unauthorized_origin():
     from fastapi.testclient import TestClient
     import main
 
-    client = TestClient(main.app)
+    client = TestClient(main.app, headers={"X-Local-Secret": IPC_SECRET})
     res_bad_origin = client.get(
         "/api/local/progress/dummy-job",
         headers={"Origin": "http://evil-attacker-site.com"}
@@ -173,7 +183,7 @@ def test_local_auth_login_and_status():
     from fastapi.testclient import TestClient
     import main
 
-    client = TestClient(main.app)
+    client = TestClient(main.app, headers={"X-Local-Secret": IPC_SECRET})
 
     # 1. Проверка SSRF в server_url при логине
     res_ssrf = client.post(
@@ -214,7 +224,7 @@ def test_local_agent_endpoints_unauthorized_and_authorized():
     from fastapi.testclient import TestClient
     import main
 
-    client = TestClient(main.app)
+    client = TestClient(main.app, headers={"X-Local-Secret": IPC_SECRET})
 
     # 1. Запрос к агентам без авторизации возвращает 401
     with patch.object(main.remote_client, "is_authenticated", return_value=False):
@@ -273,7 +283,7 @@ def test_process_document_uses_session_credentials():
     import main
     import io
 
-    client = TestClient(main.app)
+    client = TestClient(main.app, headers={"X-Local-Secret": IPC_SECRET})
 
     # Настраиваем сессию в remote_client
     with patch.object(main.remote_client, "server_url", "https://localhost:8000"), \

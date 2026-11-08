@@ -1,21 +1,23 @@
 import sys
 from pathlib import Path
 
-# Добавляем корень проекта в sys.path
+# Добавляет корень проекта в sys.path.
 sys.path.append(str(Path(__file__).resolve().parents[3]))
 
 import asyncio
+import hmac
 import os
 from contextlib import asynccontextmanager
 
-import uvicorn
-
 # pyrefly: ignore [missing-import]
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, status
 
 # pyrefly: ignore [missing-import]
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
+from src.common.crl import client_serial_is_revoked
+from src.common.production_secrets import reject_known_placeholder_secrets
 from src.simulations.api.core.auth import run_simulation_revocation_listener
 from src.simulations.api.routers.bank import (
     pki_router as bank_pki_router,
@@ -35,23 +37,77 @@ from src.simulations.db.digital_ruble.db.client import (
 from src.simulations.db.invest.db.client import get_async_engine as get_invest_engine
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def validate_simulation_security() -> None:
+    """Проверяет строгий контур шлюза симуляции перед приёмом запросов.
+
+    При STRICT_SECURITY требует подпись анклава, подпись оракула, непустой
+    PROXY_INTERNAL_SECRET и запрещает известные плейсхолдеры секретов.
+
+    Вызывает:
+        RuntimeError: Строгий режим включён, а флаг или секрет не соответствует политике.
+    """
+    strict_sec = os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1", "yes")
+    if not strict_sec:
+        return
+    require_enclave = os.getenv("REQUIRE_ENCLAVE_SIGNATURE", "true").lower() in (
+        "true",
+        "1",
+        "yes",
+    )
+    if not require_enclave:
+        raise RuntimeError("STRICT_SECURITY: REQUIRE_ENCLAVE_SIGNATURE must be true in production")
+    require_oracle = os.getenv("REQUIRE_ORACLE_SIGNATURE", "true").lower() in (
+        "true",
+        "1",
+        "yes",
+    )
+    if not require_oracle:
+        raise RuntimeError("STRICT_SECURITY: REQUIRE_ORACLE_SIGNATURE must be true in production")
+    proxy_secret = os.getenv("PROXY_INTERNAL_SECRET", "").strip()
+    if not proxy_secret:
+        raise RuntimeError("STRICT_SECURITY: PROXY_INTERNAL_SECRET must be set")
+    reject_known_placeholder_secrets()
+
+
+def request_has_valid_proxy_secret(
+    path: str,
+    client_host: str | None,
+    presented_secret: str | None,
+) -> bool:
+    """Сообщает, пропускает ли шлюз запрос с данным секретом прокси.
+
+    Адрес loopback на /health проходит без секрета, потому что контейнер так
+    проверяет собственную работоспособность. Остальные запросы требуют точное
+    совпадение заголовка X-Proxy-Secret с PROXY_INTERNAL_SECRET.
+
+    Аргументы:
+        path: Путь запроса.
+        client_host: Адрес TCP-клиента. Пустое значение не считается loopback.
+        presented_secret: Значение заголовка X-Proxy-Secret.
+
+    Возвращает:
+        True, если запрос можно передать в обработчик.
+    """
+    if path == "/health" and (client_host or "") in _LOOPBACK_HOSTS:
+        return True
+    expected = os.getenv("PROXY_INTERNAL_SECRET", "").strip()
+    presented = (presented_secret or "").strip()
+    if not expected or not presented:
+        return False
+    return hmac.compare_digest(presented, expected)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Валидация строгого режима безопасности (SEC-10)
-    strict_sec = os.getenv("STRICT_SECURITY", "false").lower() in ("true", "1")
-    if strict_sec:
-        require_enclave = os.getenv("REQUIRE_ENCLAVE_SIGNATURE", "true").lower() in (
-            "true",
-            "1",
-        )
-        if not require_enclave:
-            raise RuntimeError("STRICT_SECURITY: REQUIRE_ENCLAVE_SIGNATURE must be true in production")
-        require_oracle = os.getenv("REQUIRE_ORACLE_SIGNATURE", "true").lower() in (
-            "true",
-            "1",
-        )
-        if not require_oracle:
-            raise RuntimeError("STRICT_SECURITY: REQUIRE_ORACLE_SIGNATURE must be true in production")
+    """Запускает проверку строгого контура и слушатель отзывов Redis.
+
+    Побочные эффекты:
+        Поднимает фоновую задачу Pub/Sub и закрывает пулы PostgreSQL при остановке.
+    """
+    validate_simulation_security()
 
     # Фоновая задача мгновенной синхронизации отзывов через Redis Pub/Sub (SEC-09)
     listener_task = None
@@ -152,6 +208,63 @@ app.add_middleware(
     ],
 )
 
+
+@app.middleware("http")
+async def proxy_secret_middleware(request: Request, call_next):
+    """Отклоняет прямой вызов шлюза без верного секрета обратного прокси.
+
+    Секрет закрывает обращение мимо Caddy. Проверка /health с loopback остаётся
+    без секрета, чтобы healthcheck контейнера не требовал заголовок. Если прокси
+    передал серийный номер, шлюз сверяет его с подписанным списком отзыва.
+    """
+    host = request.client.host if request.client else None
+    presented = request.headers.get("x-proxy-secret")
+    if not request_has_valid_proxy_secret(request.url.path, host, presented):
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"detail": "Неверный или отсутствующий X-Proxy-Secret"},
+        )
+    revoked = rejected_revoked_client(request)
+    if revoked is not None:
+        return revoked
+    return await call_next(request)
+
+
+def rejected_revoked_client(request: Request) -> JSONResponse | None:
+    """Возвращает отказ, если серийный номер клиентского сертификата отозван.
+
+    Аргументы:
+        request: Входящий запрос шлюза.
+
+    Возвращает:
+        Ответ 401 или 503. ``None``, если заголовок серийного номера отсутствует
+        или список отзыва не содержит этот номер.
+    """
+    serial = request.headers.get("x-client-cert-serial")
+    if not serial:
+        return None
+    strict = os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1", "yes")
+    try:
+        if client_serial_is_revoked(serial):
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={"detail": "Клиентский сертификат отозван"},
+            )
+    except FileNotFoundError:
+        if strict:
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"detail": "Список отзыва сертификатов недоступен"},
+            )
+    except ValueError:
+        if strict:
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"detail": "Список отзыва сертификатов недействителен"},
+            )
+    return None
+
+
 # Подключение роутеров
 app.include_router(bank_pki_router, prefix="/bank", tags=["Bank PKI"])
 app.include_router(bank_router, prefix="/bank", tags=["Bank"])
@@ -168,5 +281,6 @@ async def health_check():
 
 
 if __name__ == "__main__":
-    log_info("Simulation API", "Запуск сервера API...")
-    uvicorn.run("main:app", host="0.0.0.0", port=8002, reload=False)
+    from src.simulations.api.serve import main
+
+    main()

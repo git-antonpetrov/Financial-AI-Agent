@@ -263,7 +263,7 @@ def main():
 
     # Определение секрета
     env_secret = os.getenv("ADMIN_TOTP_SECRET", "").strip()
-    # Если .env существует, проверим значение там
+    # Если .env существует, проверяет значение там
     env_path = os.path.join(project_root, ".env")
     if not env_secret and os.path.exists(env_path):
         with open(env_path, "r", encoding="utf-8") as f:

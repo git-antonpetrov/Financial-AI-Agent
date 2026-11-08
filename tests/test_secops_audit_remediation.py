@@ -123,6 +123,77 @@ def test_sec10_strict_security_forbids_default_passwords():
                         settings.validate_production_env()
 
 
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("POSTGRES_PASSWORD", "change_this_strong_password_in_production"),
+        ("BANK_DB_PASSWORD", "change_this_bank_db_password"),
+        ("INVEST_DB_PASSWORD", "change_this_invest_db_password"),
+        ("DIGITAL_DB_PASSWORD", "change_this_digital_db_password"),
+        ("REDIS_PASSWORD", "change_this_redis_password"),
+        ("PGADMIN_DEFAULT_PASSWORD", "change_this_pgadmin_password"),
+        ("MINIO_ACCESS_KEY", "minio_access_key_placeholder"),
+        ("MINIO_SECRET_KEY", "minio_secret_key_placeholder"),
+        ("CHROMA_AUTH_TOKEN", "chroma_token_secret_placeholder"),
+        ("DATA_ENCRYPTION_KEY", "0123456789abcdef" * 4),
+        ("MINIO_KMS_SECRET_KEY", "financial-kms-key:MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="),
+        ("ADMIN_TOTP_SECRET", "JBSWY3DPEHPK3PXP"),
+        ("AGENT_BANK_BOOTSTRAP_TOKEN", "bootstrap_token_bank_agent_secret"),
+        ("AGENT_ORACLE_BOOTSTRAP_TOKEN", "bootstrap_token_oracle_agent_secret"),
+        ("ORACLE_BOOTSTRAP_TOKEN", "bootstrap_token_oracle_secret"),
+    ],
+)
+def test_sec10_strict_security_rejects_example_placeholders(name, value):
+    """При STRICT_SECURITY=true плейсхолдер из .env.example не принимается как секрет."""
+    safe_key = "fedcba9876543210" * 4
+    safe_totp = "MFRGGZDFMZTWQ2LKMFRGGZDFMZTWQ2LK"
+    safe_kms = "financial-kms-key:QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo="
+    env = {
+        "STRICT_SECURITY": "true",
+        "REQUIRE_MTLS": "true",
+        "REQUIRE_2FA": "true",
+        "DATA_ENCRYPTION_KEY": safe_key,
+        "ADMIN_TOTP_SECRET": safe_totp,
+        "MINIO_KMS_SECRET_KEY": safe_kms,
+        "MINIO_SSE_C_KEY": "c" * 32,
+        "PROXY_INTERNAL_SECRET": "unit-proxy-secret-not-from-example",
+        "POSTGRES_PASSWORD": "unit-postgres-password",
+        "BANK_DB_PASSWORD": "unit-bank-password",
+        "INVEST_DB_PASSWORD": "unit-invest-password",
+        "DIGITAL_DB_PASSWORD": "unit-digital-password",
+        "REDIS_PASSWORD": "unit-redis-password",
+        "PGADMIN_DEFAULT_PASSWORD": "unit-pgadmin-password",
+        "MINIO_ACCESS_KEY": "unit-minio-access",
+        "MINIO_SECRET_KEY": "unit-minio-secret",
+        "CHROMA_AUTH_TOKEN": "unit-chroma-token",
+        "AGENT_DIGITAL_BOOTSTRAP_TOKEN": "unit-bootstrap-digital",
+        "AGENT_BANK_BOOTSTRAP_TOKEN": "unit-bootstrap-bank",
+        "AGENT_INVEST_BOOTSTRAP_TOKEN": "unit-bootstrap-invest",
+        "AGENT_MAIN_BOOTSTRAP_TOKEN": "unit-bootstrap-main",
+        "ORACLE_BOOTSTRAP_TOKEN": "unit-bootstrap-oracle",
+        "AGENT_ORACLE_BOOTSTRAP_TOKEN": "unit-bootstrap-oracle-agent",
+    }
+    env[name] = value
+    with patch.dict(os.environ, env):
+        with patch.object(settings, "REQUIRE_MTLS", True), patch.object(settings, "REQUIRE_2FA", True):
+            with patch.object(settings, "DATA_ENCRYPTION_KEY", env["DATA_ENCRYPTION_KEY"]):
+                with patch.object(settings, "ADMIN_TOTP_SECRET", env["ADMIN_TOTP_SECRET"]):
+                    with patch.object(settings, "MINIO_KMS_SECRET_KEY", env["MINIO_KMS_SECRET_KEY"]):
+                        with patch.object(settings, "MINIO_SSE_C_KEY", env["MINIO_SSE_C_KEY"]):
+                            with patch.object(settings, "ADMIN_PASSWORD_HASH", ""):
+                                with pytest.raises(RuntimeError, match=f"detected in {name}"):
+                                    settings.validate_production_env()
+
+
+def test_placeholder_key_remains_allowed_when_strict_disabled(monkeypatch):
+    """Тестовый ключ из примера остаётся допустимым, пока STRICT_SECURITY выключен."""
+    from src.common.production_secrets import reject_known_placeholder_secrets
+
+    monkeypatch.setenv("STRICT_SECURITY", "false")
+    monkeypatch.setenv("DATA_ENCRYPTION_KEY", "0123456789abcdef" * 4)
+    reject_known_placeholder_secrets()
+
+
 # --- SEC-11: Key ID (KID) и формат ENC2 ---
 
 def test_sec11_enc2_with_kid_roundtrip():

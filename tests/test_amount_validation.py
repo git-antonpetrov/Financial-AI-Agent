@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from decimal import Decimal
 from pydantic import ValidationError
@@ -23,7 +25,8 @@ def test_bank_transfer_request_amount_validation():
             amount=Decimal("-100.00"),
             transfer_type="account",
             destination="acc_2"
-        )
+        ,
+            idempotency_key="idem-test")
 
     # Нулевая сумма
     with pytest.raises(ValidationError):
@@ -32,7 +35,8 @@ def test_bank_transfer_request_amount_validation():
             amount=Decimal("0.00"),
             transfer_type="account",
             destination="acc_2"
-        )
+        ,
+            idempotency_key="idem-test")
 
     # Корректная сумма
     req = TransferRequest(
@@ -40,7 +44,8 @@ def test_bank_transfer_request_amount_validation():
         amount=Decimal("150.50"),
         transfer_type="account",
         destination="acc_2"
-    )
+    ,
+            idempotency_key="idem-test")
     assert req.amount == Decimal("150.50")
 
 
@@ -83,7 +88,8 @@ def test_invest_open_product_amount_and_term_validation():
             from_bank_account_id="acc_1",
             initial_amount=Decimal("-1000.00"),
             term_months=12
-        )
+        ,
+            idempotency_key="idem-open-test")
 
     # Нулевая сумма
     with pytest.raises(ValidationError):
@@ -92,7 +98,8 @@ def test_invest_open_product_amount_and_term_validation():
             from_bank_account_id="acc_1",
             initial_amount=Decimal("0.00"),
             term_months=12
-        )
+        ,
+            idempotency_key="idem-open-test")
 
     # Отрицательный или нулевой срок вклада
     with pytest.raises(ValidationError):
@@ -101,7 +108,8 @@ def test_invest_open_product_amount_and_term_validation():
             from_bank_account_id="acc_1",
             initial_amount=Decimal("1000.00"),
             term_months=0
-        )
+        ,
+            idempotency_key="idem-open-test")
 
     # Корректный вклад
     req = OpenProductRequest(
@@ -109,7 +117,8 @@ def test_invest_open_product_amount_and_term_validation():
         from_bank_account_id="acc_1",
         initial_amount=Decimal("25000.00"),
         term_months=6
-    )
+    ,
+            idempotency_key="idem-open-test")
     assert req.initial_amount == Decimal("25000.00")
     assert req.term_months == 6
 
@@ -133,14 +142,17 @@ def test_ruble_fund_withdraw_amount_validation():
 def test_ruble_transfer_request_amount_validation():
     # Отрицательная сумма
     with pytest.raises(ValidationError):
-        RubleTransferRequest(to_wallet_id="w_2", amount=Decimal("-25.00"))
+        RubleTransferRequest(to_wallet_id="w_2", amount=Decimal("-25.00"),
+            idempotency_key="idem-test")
 
     # Нулевая сумма
     with pytest.raises(ValidationError):
-        RubleTransferRequest(to_wallet_id="w_2", amount=Decimal("0.00"))
+        RubleTransferRequest(to_wallet_id="w_2", amount=Decimal("0.00"),
+            idempotency_key="idem-test")
 
     # Корректная сумма
-    rt = RubleTransferRequest(to_wallet_id="w_2", amount=Decimal("100.00"))
+    rt = RubleTransferRequest(to_wallet_id="w_2", amount=Decimal("100.00"),
+            idempotency_key="idem-test")
     assert rt.amount == Decimal("100.00")
 
 
@@ -192,7 +204,10 @@ def test_http_endpoints_reject_non_positive_amounts(monkeypatch):
             "transfer_type": "account",
             "destination": "acc_2"
         },
-        headers={"X-Bootstrap-Token": "bank_tok"}
+        headers={
+            "X-Bootstrap-Token": "bank_tok",
+            "X-Proxy-Secret": os.environ["PROXY_INTERNAL_SECRET"],
+        }
     )
     assert res_bank.status_code == 422
 
@@ -205,7 +220,10 @@ def test_http_endpoints_reject_non_positive_amounts(monkeypatch):
             "initial_amount": 0.0,
             "term_months": 12
         },
-        headers={"X-Bootstrap-Token": "invest_tok"}
+        headers={
+            "X-Bootstrap-Token": "invest_tok",
+            "X-Proxy-Secret": os.environ["PROXY_INTERNAL_SECRET"],
+        }
     )
     assert res_invest.status_code == 422
 
@@ -216,6 +234,9 @@ def test_http_endpoints_reject_non_positive_amounts(monkeypatch):
             "to_wallet_id": "w_2",
             "amount": -100.0
         },
-        headers={"X-Bootstrap-Token": "ruble_tok"}
+        headers={
+            "X-Bootstrap-Token": "ruble_tok",
+            "X-Proxy-Secret": os.environ["PROXY_INTERNAL_SECRET"],
+        }
     )
     assert res_ruble.status_code == 422
