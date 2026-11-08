@@ -1,6 +1,6 @@
 """Решает, можно ли выполнить банковское движение по ключу идемпотентности."""
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from fastapi import HTTPException
 from sqlalchemy.future import select
@@ -18,6 +18,24 @@ def canonical_amount(amount: Decimal) -> str:
         Каноническую запись суммы.
     """
     return format(Decimal(str(amount)).quantize(Decimal("0.01")), "f")
+
+
+def same_amount(stored: object, amount: Decimal) -> bool:
+    """Сравнивает сохранённую сумму с суммой запроса после нормализации до копеек.
+
+    Аргументы:
+        stored: Значение из записи. Это строка или Decimal.
+        amount: Сумма текущего запроса.
+
+    Возвращает:
+        True, если обе суммы задают одну и ту же величину.
+    """
+    if stored is None:
+        return False
+    try:
+        return canonical_amount(Decimal(str(stored))) == canonical_amount(amount)
+    except (InvalidOperation, ValueError):
+        return False
 
 
 def claim_matches(row: object, key: str, operation_type: str, account_id: str, amount: Decimal, direction: str) -> bool:
@@ -39,9 +57,40 @@ def claim_matches(row: object, key: str, operation_type: str, account_id: str, a
     return (
         getattr(row, "operation_type", None) == operation_type
         and str(getattr(row, "account_id", "")) == str(account_id)
-        and str(getattr(row, "amount", "")) == canonical_amount(amount)
+        and same_amount(getattr(row, "amount", None), amount)
         and getattr(row, "direction", None) == direction
     )
+
+
+def movement_state(
+    row: object | None,
+    key: str,
+    operation_type: str,
+    account_id: str,
+    amount: Decimal,
+    direction: str,
+) -> str:
+    """Определяет, зафиксировано ли банковское движение с этим ключом.
+
+    Аргументы:
+        row: Найденная запись, пустое значение или чужой объект сессии.
+        key: Ключ идемпотентности.
+        operation_type: Тип операции.
+        account_id: Счёт движения.
+        amount: Сумма.
+        direction: ``expense`` или ``income``.
+
+    Возвращает:
+        ``posted``, если это же движение уже зафиксировано. ``absent``, если записи нет.
+        ``unknown``, если сессия вернула объект другого вида. ``conflict``, если ключ занят другой операцией.
+    """
+    if row is None:
+        return "absent"
+    if getattr(row, "key", None) != key:
+        return "unknown"
+    if claim_matches(row, key, operation_type, account_id, amount, direction):
+        return "posted"
+    return "conflict"
 
 
 async def begin_bank_movement(

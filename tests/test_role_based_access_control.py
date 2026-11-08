@@ -172,8 +172,8 @@ def test_current_user_requires_explicit_role():
 
 def test_create_access_token_with_roles():
     """Проверяет генерацию и декодирование JWT токенов для разных ролей."""
-    # 1. Superadmin (по умолчанию)
-    admin_token = create_access_token({"sub": "admin"})
+    # 1. Superadmin передаётся явно: конструктор больше не подставляет роль сам.
+    admin_token = create_access_token({"sub": "admin"}, role=Role.SUPERADMIN)
     payload_admin = decode_access_token(admin_token)
     assert payload_admin["role"] == "superadmin"
     assert "security:manage" in payload_admin["permissions"]
@@ -194,6 +194,39 @@ def test_create_access_token_with_roles():
     assert "audit:read" in payload_aud["permissions"]
     assert "audit:verify" in payload_aud["permissions"]
     assert "documents:write" not in payload_aud["permissions"]
+
+
+def test_token_constructors_reject_empty_and_unknown_role():
+    """Пустая или неизвестная роль не становится SUPERADMIN и поднимает ValueError."""
+    with pytest.raises(ValueError):
+        create_access_token({"sub": "admin"})
+    with pytest.raises(ValueError):
+        create_access_token({"sub": "admin"}, role="")
+    with pytest.raises(ValueError):
+        create_access_token({"sub": "admin"}, role="   ")
+    with pytest.raises(ValueError):
+        create_access_token({"sub": "admin"}, role="root")
+    with pytest.raises(ValueError):
+        create_access_token({"sub": "admin", "role": "root"})
+    with pytest.raises(ValueError):
+        create_refresh_token({"sub": "admin"})
+    with pytest.raises(ValueError):
+        create_refresh_token({"sub": "admin"}, role="owner")
+
+    payload_token = create_access_token({"sub": "auditor", "role": "auditor"})
+    assert decode_access_token(payload_token)["role"] == Role.AUDITOR.value
+    explicit = create_access_token(
+        {"sub": "operator", "role": "auditor"},
+        role=Role.OPERATOR,
+    )
+    assert decode_access_token(explicit)["role"] == Role.OPERATOR.value
+
+
+def test_login_mapping_keeps_admin_as_superadmin():
+    """Логин по-прежнему явно сопоставляет учётную запись admin с SUPERADMIN."""
+    from server import USER_ROLE_MAPPING
+
+    assert USER_ROLE_MAPPING["admin"] is Role.SUPERADMIN
 
 
 def test_refresh_token_rotation_preserves_role():

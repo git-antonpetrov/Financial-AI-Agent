@@ -124,7 +124,7 @@ def setup_mock_redis(monkeypatch):
 
 def test_access_token_short_lifespan_and_claims():
     """Проверяет короткий срок действия access-токена (15 минут) и наличие type=access."""
-    token = create_access_token({"sub": "admin"})
+    token = create_access_token({"sub": "admin"}, role="superadmin")
     payload = decode_access_token(token)
 
     assert payload.get("sub") == "admin"
@@ -141,7 +141,7 @@ def test_access_token_short_lifespan_and_claims():
 
 def test_refresh_token_lifespan_and_claims():
     """Проверяет срок действия refresh-токена (7 дней) и наличие type=refresh."""
-    refresh_token = create_refresh_token({"sub": "admin"})
+    refresh_token = create_refresh_token({"sub": "admin"}, role="superadmin")
     payload = decode_access_token(refresh_token)
 
     assert payload.get("sub") == "admin"
@@ -156,7 +156,7 @@ def test_refresh_token_lifespan_and_claims():
 @pytest.mark.anyio
 async def test_refresh_token_cannot_be_used_as_access_token():
     """Проверяет запрет использования refresh-токена для доступа к API (get_current_admin)."""
-    refresh_token = create_refresh_token({"sub": "admin"})
+    refresh_token = create_refresh_token({"sub": "admin"}, role="superadmin")
 
     with pytest.raises(HTTPException) as exc_info:
         await get_current_admin(refresh_token)
@@ -165,7 +165,7 @@ async def test_refresh_token_cannot_be_used_as_access_token():
 
 def test_refresh_token_rotation_and_invalidation(setup_mock_redis):
     """Проверяет успешную ротацию токена и инвалидацию старого refresh-токена."""
-    old_refresh = create_refresh_token({"sub": "admin"})
+    old_refresh = create_refresh_token({"sub": "admin"}, role="superadmin")
     old_payload = decode_access_token(old_refresh)
     old_jti = old_payload["jti"]
 
@@ -183,7 +183,7 @@ def test_refresh_token_rotation_and_invalidation(setup_mock_redis):
 
 def test_refresh_token_reuse_detection_blocked(setup_mock_redis):
     """Проверяет блокировку повторного использования одного и того же refresh-токена (Reuse Detection)."""
-    refresh_token = create_refresh_token({"sub": "admin"})
+    refresh_token = create_refresh_token({"sub": "admin"}, role="superadmin")
 
     # Первая ротация — успешна
     verify_and_rotate_refresh_token(refresh_token)
@@ -201,7 +201,7 @@ def test_api_auth_refresh_endpoint(setup_mock_redis, monkeypatch):
     client = TestClient(app)
 
     # 1. Создаем начальный refresh токен
-    initial_refresh = create_refresh_token({"sub": "admin"})
+    initial_refresh = create_refresh_token({"sub": "admin"}, role="superadmin")
 
     # 2. Вызываем /api/auth/refresh
     response = client.post("/api/auth/refresh", json={"refresh_token": initial_refresh})
@@ -222,8 +222,8 @@ def test_api_auth_logout_revokes_both_tokens(setup_mock_redis):
     from server import app
     client = TestClient(app)
 
-    access_token = create_access_token({"sub": "admin"})
-    refresh_token = create_refresh_token({"sub": "admin"})
+    access_token = create_access_token({"sub": "admin"}, role="superadmin")
+    refresh_token = create_refresh_token({"sub": "admin"}, role="superadmin")
     access_jti = decode_access_token(access_token)["jti"]
     refresh_jti = decode_access_token(refresh_token)["jti"]
 

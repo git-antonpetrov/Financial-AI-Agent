@@ -1,4 +1,5 @@
 import datetime
+import json
 import os
 from pathlib import Path
 
@@ -40,6 +41,7 @@ class RootCAEngine:
         self.key_path = self.data_dir / "ca.key"
         self.cert_path = self.data_dir / "ca.crt"
         self.serial_path = self.data_dir / "serial.txt"
+        self.revoked_path = self.data_dir / "revoked.json"
 
         self._cached_cert: x509.Certificate | None = None
         self._cached_private_key: rsa.RSAPrivateKey | None = None
@@ -86,7 +88,7 @@ class RootCAEngine:
         )
         self.key_path.write_bytes(encrypted_pem)
         try:
-            # Устанавливаем строгие права доступа (только владелец)
+            # Устанавливает строгие права доступа (только владелец)
             os.chmod(self.key_path, 0o600)
         except (AttributeError, PermissionError, OSError):
             pass
@@ -209,6 +211,97 @@ class RootCAEngine:
         tmp_path.replace(self.serial_path)
 
         return current_serial
+
+    def load_revoked_serials(self) -> list[tuple[int, datetime.datetime]]:
+        """Возвращает серийные номера, записанные в реестр отзыва корневого центра.
+
+        Возвращает:
+            Пары из серийного номера и времени отзыва в UTC. Пустой реестр даёт пустой список.
+
+        Вызывает:
+            ValueError: Файл реестра повреждён и не содержит список записей.
+        """
+        if not self.revoked_path.is_file():
+            return []
+        payload = json.loads(self.revoked_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, list):
+            raise ValueError("Реестр отзыва должен быть списком")
+        revoked: list[tuple[int, datetime.datetime]] = []
+        for item in payload:
+            revoked_at = datetime.datetime.fromisoformat(str(item["revoked_at"]))
+            if revoked_at.tzinfo is None:
+                revoked_at = revoked_at.replace(tzinfo=datetime.UTC)
+            revoked.append((int(item["serial"]), revoked_at))
+        return revoked
+
+    def revoke_serial(self, serial: int, revoked_at: datetime.datetime | None = None) -> None:
+        """Добавляет серийный номер в реестр отзыва, если его там ещё нет.
+
+        Аргументы:
+            serial: Серийный номер выпускаемого или заменяемого сертификата.
+            revoked_at: Время отзыва в UTC. Пустое значение означает текущий момент.
+
+        Побочные эффекты:
+            Создаёт или заменяет ``revoked.json`` атомарной записью.
+        """
+        current = self.load_revoked_serials()
+        if any(existing == serial for existing, _revoked_at in current):
+            return
+        moment = revoked_at or datetime.datetime.now(datetime.UTC)
+        current.append((serial, moment))
+        payload = [
+            {
+                "serial": item_serial,
+                "revoked_at": item_time.astimezone(datetime.UTC).isoformat(),
+            }
+            for item_serial, item_time in current
+        ]
+        temporary = self.revoked_path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(payload), encoding="utf-8")
+        temporary.replace(self.revoked_path)
+
+    def write_certificate_revocation_list(
+        self,
+        target_path: Path | str,
+        revoked: list[tuple[int, datetime.datetime]] | None = None,
+    ) -> None:
+        """Подписывает список отзыва RFC 5280 и записывает его в PEM.
+
+        Пустой список тоже является действующим CRL: он сообщает, что
+        отозванных серийных номеров нет, и имеет срок следующей публикации
+        семь суток. Пустой аргумент ``revoked`` берёт номера из реестра центра.
+
+        Аргументы:
+            target_path: Путь файла ``ca.crl``.
+            revoked: Пары из серийного номера и времени отзыва в UTC.
+                ``None`` читает ``revoked.json``.
+
+        Побочные эффекты:
+            Создаёт или заменяет файл списка отзыва.
+        """
+        target = Path(target_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if revoked is None:
+            revoked = self.load_revoked_serials()
+        certificate = self.get_ca_cert()
+        private_key = self.get_ca_private_key()
+        now = datetime.datetime.now(datetime.UTC)
+        builder = (
+            x509.CertificateRevocationListBuilder()
+            .issuer_name(certificate.subject)
+            .last_update(now)
+            .next_update(now + datetime.timedelta(days=7))
+        )
+        for serial_number, revoked_at in revoked or []:
+            revoked_certificate = (
+                x509.RevokedCertificateBuilder()
+                .serial_number(serial_number)
+                .revocation_date(revoked_at)
+                .build()
+            )
+            builder = builder.add_revoked_certificate(revoked_certificate)
+        revocation_list = builder.sign(private_key, hashes.SHA256())
+        target.write_bytes(revocation_list.public_bytes(serialization.Encoding.PEM))
 
     def export_ca_certificate(self, target_path: Path | str) -> None:
         """

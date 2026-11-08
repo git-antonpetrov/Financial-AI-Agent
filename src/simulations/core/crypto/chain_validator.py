@@ -33,10 +33,40 @@ class X509ChainValidator:
         crl_pem: str | None = None,
         max_drift_seconds: int = 300,
         ca_cert_path: str | Path | None = None,
+        crl_path: str | Path | None = None,
     ):
         self.max_drift_seconds = max_drift_seconds
-        self.crl_pem = crl_pem
         self.root_ca_cert = self._resolve_root_ca(root_ca_cert or ca_cert_path)
+        self.crl_pem = crl_pem if crl_pem is not None else self._read_crl_pem(crl_path, ca_cert_path)
+
+    def _read_crl_pem(
+        self,
+        crl_path: str | Path | None,
+        ca_cert_path: str | Path | None,
+    ) -> str | None:
+        """Читает PEM списка отзыва рядом с корневым сертификатом или по явному пути.
+
+        Аргументы:
+            crl_path: Явный путь к ``ca.crl``.
+            ca_cert_path: Путь к ``ca.crt``. Рядом с ним ищется ``ca.crl``.
+
+        Возвращает:
+            Текст PEM или ``None``, если файл списка не найден.
+        """
+        candidates: list[Path] = []
+        if crl_path:
+            candidates.append(Path(crl_path))
+        env_path = os.getenv("CRL_PATH", "").strip()
+        if env_path:
+            candidates.append(Path(env_path))
+        if ca_cert_path:
+            certificate_path = Path(ca_cert_path)
+            if certificate_path.is_file():
+                candidates.append(certificate_path.parent / "ca.crl")
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate.read_text(encoding="utf-8")
+        return None
 
     def _resolve_root_ca(self, cert_or_pem: x509.Certificate | str | Path | None) -> x509.Certificate | None:
         """Разрешает сертификат Root CA из переданного аргумента, файлов или синглтона банка."""
@@ -166,7 +196,7 @@ class X509ChainValidator:
         if issuer_ca is None:
             return False, "Доверенный корневой сертификат (Root CA) не настроен"
 
-        # 1. Проверка срока действия проверяемого сертификата и сертификата эмитента
+        # 1. Проверка срока действия проверяетого сертификата и сертификата эмитента
         is_valid_time, time_msg = self.validate_certificate_lifetime(leaf_cert)
         if not is_valid_time:
             return False, time_msg
@@ -201,7 +231,7 @@ class X509ChainValidator:
             if is_ca:
                 return False, "Сертификат издателя не содержит обязательного расширения KeyUsage (key_cert_sign)"
 
-        # 4. Проверка статуса CA для проверяемого сертификата (Leaf vs Intermediate CA)
+        # 4. Проверка статуса CA для проверяетого сертификата (Leaf vs Intermediate CA)
         try:
             leaf_bc = leaf_cert.extensions.get_extension_for_oid(x509.ExtensionOID.BASIC_CONSTRAINTS).value
             has_ca_flag = bool(getattr(leaf_bc, "ca", False))
@@ -221,7 +251,7 @@ class X509ChainValidator:
             if is_ca:
                 return False, "Промежуточный сертификат CA обязан содержать расширение BasicConstraints: CA=True"
 
-        # 4.1 Проверка KeyUsage для проверяемого сертификата
+        # 4.1 Проверка KeyUsage для проверяетого сертификата
         try:
             leaf_ku = leaf_cert.extensions.get_extension_for_oid(x509.ExtensionOID.KEY_USAGE).value
             if is_ca:
@@ -255,10 +285,12 @@ class X509ChainValidator:
             if ca_path_len is not None and ca_path_len < 1:
                 return False, "Сертификат эмитента исчерпал лимит вложенности центров сертификации (path_length < 1)"
 
-        # 5. Проверка по локальному CRL (если передан)
+        # 5. Проверка по локальному CRL, если список передан или найден рядом с корневым сертификатом
         if self.crl_pem:
             try:
                 crl_obj = x509.load_pem_x509_crl(self.crl_pem.encode("utf-8"), default_backend())
+                if not crl_obj.is_signature_valid(issuer_ca.public_key()):
+                    return False, "Подпись списка отзыва не совпадает с корневым сертификатом"
                 if crl_obj.get_revoked_certificate_by_serial_number(leaf_cert.serial_number):
                     return False, f"Сертификат с серийным номером {leaf_cert.serial_number} отозван (CRL)"
             except Exception as e:

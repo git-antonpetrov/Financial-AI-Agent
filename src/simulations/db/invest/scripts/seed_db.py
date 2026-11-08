@@ -167,7 +167,7 @@ async def seed_data():
                 strat = random.choice(strategies) if random.random() > 0.5 else None
                 strat_id = strat.id if strat else None
 
-                # Если подписан на стратегию, случайным образом генерируем доход
+                # Если подписан на стратегию, случайным образом генерирует доход
                 income = Decimal(str(round(random.uniform(-5000, 20000), 2))) if strat_id else Decimal("0.00")
                 next_comm = random_next_payment_date() if strat_id else None
 

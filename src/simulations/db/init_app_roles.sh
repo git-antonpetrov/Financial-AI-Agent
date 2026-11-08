@@ -37,6 +37,18 @@ EOSQL
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname bank_db <<EOSQL
 GRANT USAGE, CREATE ON SCHEMA public TO bank_app;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO bank_app;
+DO \$\$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'auto_payments'
+    ) THEN
+        ALTER TABLE auto_payments ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR;
+        CREATE UNIQUE INDEX IF NOT EXISTS ix_auto_payments_idempotency_key
+            ON auto_payments (idempotency_key);
+    END IF;
+END
+\$\$;
 EOSQL
 
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname invest_db <<EOSQL

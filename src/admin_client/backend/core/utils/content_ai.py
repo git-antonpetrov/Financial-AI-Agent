@@ -301,7 +301,7 @@ class ContentCaptureRecognizer:
                         f"Content AI завис: прогресс не меняется ({percent}%) более {idle_timeout} секунд"
                     )
 
-                # Периодически проверяем наличие ошибок в пакете
+                # Периодически проверяет наличие ошибок в пакете
                 if elapsed > 0 and elapsed % 10 == 0:
                     try:
                         get_batch_xml = (

@@ -74,6 +74,11 @@ def test_deploy_vds_prod_bash_script_structure():
     assert "certs_data" in content
     assert "admin-server" in content
     assert "caddy-ingress" in content
+    assert "aes-xts" in content
+    assert "512" in content
+    assert "encrypted_docker_volumes" not in content
+    assert "verify_host_private_key_modes" in content
+    assert "ещё не создан" in content
 
 
 def test_deploy_vds_prod_python_orchestrator_no_docker(tmp_path, monkeypatch):
@@ -257,7 +262,13 @@ def test_luks_gate_accepts_open_mapper(monkeypatch):
             return 0, "Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/mapper/docker_crypt 1 1 1 1% /\n"
         if args[0] == "cryptsetup":
             assert args == ["cryptsetup", "status", "docker_crypt"]
-            return 0, "active\n"
+            assert args[2] != "encrypted_docker_volumes"
+            return 0, (
+                "/dev/mapper/docker_crypt is active.\n"
+                "  type:    LUKS2\n"
+                "  cipher:  aes-xts-plain64\n"
+                "  keysize: 512 bits\n"
+            )
         return 1, ""
 
     original_exists = deploy_mod.os.path.exists
@@ -270,6 +281,103 @@ def test_luks_gate_accepts_open_mapper(monkeypatch):
     monkeypatch.setattr(deploy_mod, "command_output", fake_command)
     monkeypatch.setattr(deploy_mod.os.path, "exists", fake_exists)
     deploy_mod.assert_docker_root_on_open_luks()
+
+
+def test_luks_gate_accepts_other_mapper_name(monkeypatch):
+    """Проверяет, что политика смотрит на шифр, а не на имя encrypted_docker_volumes."""
+    import scripts.deploy_vds_prod as deploy_mod
+
+    def fake_command(args):
+        if args[0] == "docker":
+            return 0, "/var/lib/docker\n"
+        if args[0] == "findmnt":
+            return 0, "/dev/mapper/dm_fin_agent_secure_data\n"
+        if args[0] == "cryptsetup":
+            assert args[2] == "dm_fin_agent_secure_data"
+            return 0, (
+                "/dev/mapper/dm_fin_agent_secure_data is active.\n"
+                "  type:    LUKS2\n"
+                "  cipher:  aes-xts-plain64\n"
+                "  keysize: 512 bits\n"
+            )
+        return 1, ""
+
+    original_exists = deploy_mod.os.path.exists
+
+    def fake_exists(path):
+        if path == "/var/lib/docker":
+            return True
+        return original_exists(path)
+
+    monkeypatch.setattr(deploy_mod, "command_output", fake_command)
+    monkeypatch.setattr(deploy_mod.os.path, "exists", fake_exists)
+    deploy_mod.assert_docker_root_on_open_luks()
+
+
+def test_luks_gate_rejects_weak_cipher(monkeypatch):
+    """Проверяет отказ, если открытый LUKS использует не aes-xts или ключ короче 512 бит."""
+    import scripts.deploy_vds_prod as deploy_mod
+
+    def fake_command(args):
+        if args[0] == "docker":
+            return 0, "/var/lib/docker\n"
+        if args[0] == "findmnt":
+            return 0, "/dev/mapper/docker_crypt\n"
+        if args[0] == "cryptsetup":
+            return 0, (
+                "/dev/mapper/docker_crypt is active.\n"
+                "  type:    LUKS2\n"
+                "  cipher:  aes-xts-plain64\n"
+                "  keysize: 256 bits\n"
+            )
+        return 1, ""
+
+    original_exists = deploy_mod.os.path.exists
+
+    def fake_exists(path):
+        if path == "/var/lib/docker":
+            return True
+        return original_exists(path)
+
+    monkeypatch.setattr(deploy_mod, "command_output", fake_command)
+    monkeypatch.setattr(deploy_mod.os.path, "exists", fake_exists)
+    with pytest.raises(SystemExit) as exc:
+        deploy_mod.assert_docker_root_on_open_luks()
+    assert exc.value.code == 1
+
+
+def test_luks_status_rejects_non_luks_and_non_xts():
+    """Проверяет разбор текста cryptsetup без привязки к имени mapper."""
+    from scripts.deploy_vds_prod import evaluate_luks_status
+
+    accepted, reason = evaluate_luks_status(
+        "type: LUKS1\ncipher: aes-xts-plain\nkeysize: 512 bits\n"
+    )
+    assert accepted is True
+    assert reason == ""
+
+    plain_ok, plain_reason = evaluate_luks_status(
+        "type: PLAIN\ncipher: aes-xts-plain64\nkeysize: 512 bits\n"
+    )
+    assert plain_ok is False
+    assert "LUKS" in plain_reason
+
+    cbc_ok, cbc_reason = evaluate_luks_status(
+        "type: LUKS2\ncipher: aes-cbc-essiv:sha256\nkeysize: 256 bits\n"
+    )
+    assert cbc_ok is False
+    assert "aes-xts" in cbc_reason
+
+
+def test_encrypted_volume_script_refuses_live_docker_and_prints_move():
+    """Проверяет запрет монтирования поверх живого Docker и команду переноса data-root."""
+    root_dir = Path(__file__).resolve().parent.parent
+    content = (root_dir / "scripts" / "setup_encrypted_volumes.sh").read_text(encoding="utf-8")
+    assert "docker_daemon_is_running" in content
+    assert "нельзя монтировать том поверх живого каталога Docker" in content
+    assert "rsync -aHAX /var/lib/docker/" in content
+    assert "data-root" in content
+    assert "encrypted_docker_volumes" not in content
 
 
 def test_luks_gate_rejects_closed_mapper(monkeypatch):

@@ -68,6 +68,11 @@ except ImportError:
                 "Модуль затирания ключей недоступен. Запуск без NIST SP 800-88 запрещён."
             )
 
+try:
+    from src.common.production_secrets import reject_known_placeholder_secrets
+except ImportError:
+    from common.production_secrets import reject_known_placeholder_secrets
+
 VALID_ADMIN_USERS: set[str] = {"admin", "operator", "auditor"}
 
 __all__ = [
@@ -320,7 +325,7 @@ class Settings:
                             f"Не удалось прочитать публичный ключ из файла {cand}: {e}",
                         )
 
-        # 4. Если сертификат еще не загружен, проверяем наличие X.509 сертификата для сервера
+        # 4. Если сертификат еще не загружен, проверяет наличие X.509 сертификата для сервера
         if not self.SERVER_CERT:
             for cand in pub_candidates:
                 if cand and os.path.exists(cand):
@@ -359,7 +364,15 @@ class Settings:
         return bool(self.MINIO_KMS_SECRET_KEY or self.MINIO_SSE_C_KEY)
 
     def validate_production_env(self) -> None:
-        """Проверяет наличие обязательных переменных окружения для безопасной работы в продакшене."""
+        """Проверяет обязательные секреты и файлы ключей перед боевым запуском.
+
+        При STRICT_SECURITY=true дополнительно требует mTLS, 2FA, непустой
+        секрет прокси и отклоняет известные плейсхолдеры из примера окружения.
+
+        Вызывает:
+            RuntimeError: Не хватает ключа, файл отсутствует или секрет совпадает
+                с плейсхолдером.
+        """
         missing = []
         has_priv = bool(os.getenv("JWT_PRIVATE_KEY") or os.getenv("JWT_PRIVATE_KEY_PATH"))
         if not has_priv:
@@ -370,7 +383,7 @@ class Settings:
         if priv_path and not os.path.isfile(priv_path):
             missing.append(f"Файл JWT_PRIVATE_KEY_PATH не найден на диске: {priv_path}")
 
-        # Проверка читаемости PEM приватного ключа
+        # Проверка читаетости PEM приватного ключа
         if self.PRIVATE_KEY:
             try:
                 from cryptography.hazmat.primitives import serialization
@@ -413,43 +426,26 @@ class Settings:
         if missing:
             raise RuntimeError(f"Отсутствуют обязательные переменные окружения безопасности: {', '.join(missing)}")
 
-        # SEC-10: Строгая валидация STRICT_SECURITY
+        # Проверяет флаги и плейсхолдеры, потому что STRICT_SECURITY включён в compose.
         if os.getenv("STRICT_SECURITY", "true").lower() == "true":
             if self.REQUIRE_MTLS is not True:
                 raise RuntimeError("STRICT_SECURITY: REQUIRE_MTLS must be true")
             if self.REQUIRE_2FA is not True:
                 raise RuntimeError("STRICT_SECURITY: REQUIRE_2FA must be true")
 
-            forbidden_passwords = {
-                "change_me",
-                "secret",
-                "admin123",
-                "minioadmin",
-                "financial-core-proxy-token-2026",
-                "change_this_proxy_internal_secret",
-            }
-            for key, val in os.environ.items():
-                k_lower = key.lower()
-                if any(term in k_lower for term in ("password", "secret", "token", "key")):
-                    if val.strip().lower() in forbidden_passwords:
-                        raise RuntimeError(f"STRICT_SECURITY: insecure default password or secret detected in {key}")
-            for sec_name, sec_val in [
-                ("ADMIN_PASSWORD_HASH", getattr(self, "ADMIN_PASSWORD_HASH", "")),
-                ("ADMIN_TOTP_SECRET", getattr(self, "ADMIN_TOTP_SECRET", "")),
-                ("DATA_ENCRYPTION_KEY", getattr(self, "DATA_ENCRYPTION_KEY", "")),
-                ("MINIO_KMS_SECRET_KEY", getattr(self, "MINIO_KMS_SECRET_KEY", "")),
-                ("MINIO_SSE_C_KEY", getattr(self, "MINIO_SSE_C_KEY", "")),
-            ]:
-                if sec_val and str(sec_val).strip().lower() in forbidden_passwords:
-                    raise RuntimeError(f"STRICT_SECURITY: insecure default password or secret detected in {sec_name}")
+            reject_known_placeholder_secrets(
+                extra={
+                    "ADMIN_PASSWORD_HASH": str(getattr(self, "ADMIN_PASSWORD_HASH", "") or ""),
+                    "ADMIN_TOTP_SECRET": str(getattr(self, "ADMIN_TOTP_SECRET", "") or ""),
+                    "DATA_ENCRYPTION_KEY": str(getattr(self, "DATA_ENCRYPTION_KEY", "") or ""),
+                    "MINIO_KMS_SECRET_KEY": str(getattr(self, "MINIO_KMS_SECRET_KEY", "") or ""),
+                    "MINIO_SSE_C_KEY": str(getattr(self, "MINIO_SSE_C_KEY", "") or ""),
+                }
+            )
 
             proxy_secret = os.getenv("PROXY_INTERNAL_SECRET", "").strip()
             if not proxy_secret:
                 raise RuntimeError("STRICT_SECURITY: PROXY_INTERNAL_SECRET must be set")
-            if proxy_secret.lower() in forbidden_passwords:
-                raise RuntimeError(
-                    "STRICT_SECURITY: insecure default password or secret detected in PROXY_INTERNAL_SECRET"
-                )
 
         if not self.ADMIN_TOTP_SECRET:
             log_info(
@@ -518,26 +514,57 @@ def get_password_hash(password: str) -> str:
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
-def create_access_token(data: dict, role: str | Role | None = None) -> str:
+def resolve_declared_role(role: str | Role | None, payload_role: object) -> str:
+    """Возвращает роль из перечисления Role.
+
+    Пустая или неизвестная роль поднимает ValueError и не заменяется на SUPERADMIN.
+    Явный аргумент важнее поля role в данных токена. None в аргументе читает это поле.
+
+    Аргументы:
+        role: Роль, переданная конструктором токена.
+        payload_role: Значение поля role в полезной нагрузке. Используется только
+            когда аргумент role равен None.
+
+    Возвращает:
+        Строковое значение роли из перечисления.
+
+    Вызывает:
+        ValueError: Роль пустая, состоит из пробелов или отсутствует в перечислении.
     """
-    Создает подписанный асимметричным приватным ключом RSA (RS256)
-    короткоживущий (15 мин) access-токен с уникальным jti и правами RBAC.
+    candidate = payload_role if role is None else role
+    if isinstance(candidate, Role):
+        return candidate.value
+    if candidate is None or not str(candidate).strip():
+        raise ValueError("Роль токена не задана")
+    role_text = str(candidate).strip().lower()
+    try:
+        return Role(role_text).value
+    except ValueError as exc:
+        raise ValueError(f"Неизвестная роль токена: {role_text}") from exc
+
+
+def create_access_token(data: dict, role: str | Role | None = None) -> str:
+    """Создаёт короткоживущий access-токен RS256 с указанной ролью RBAC.
+
+    Срок действия берётся из ACCESS_TOKEN_EXPIRE_MINUTES. Конструктор не
+    подставляет SUPERADMIN, если роль пустая или не входит в перечисление.
+
+    Аргументы:
+        data: Поля полезной нагрузки. Поле sub задаёт учётную запись.
+        role: Роль RBAC. None читает поле role из data.
+
+    Возвращает:
+        Подписанный JWT типа access.
+
+    Вызывает:
+        ValueError: Роль пустая или неизвестная.
     """
     to_encode = data.copy()
     now = datetime.now(UTC)
     expire = now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
 
-    raw_role = role or to_encode.get("role") or Role.SUPERADMIN
-    if isinstance(raw_role, Role):
-        role_str = raw_role.value
-    else:
-        role_str = str(raw_role).lower().strip()
-
-    try:
-        role_enum = Role(role_str)
-    except ValueError:
-        role_enum = Role.SUPERADMIN
-        role_str = Role.SUPERADMIN.value
+    role_str = resolve_declared_role(role, to_encode.get("role"))
+    role_enum = Role(role_str)
 
     perms = [p.value for p in ROLE_PERMISSIONS.get(role_enum, set())]
     sub = to_encode.get("sub", "admin")
@@ -558,25 +585,26 @@ def create_access_token(data: dict, role: str | Role | None = None) -> str:
 
 
 def create_refresh_token(data: dict, role: str | Role | None = None) -> str:
-    """
-    Создает подписанный асимметричным приватным ключом RSA (RS256) refresh-токен
-    (7 дней) для ротации (RTR) с сохранением роли.
+    """Создаёт refresh-токен RS256 и сохраняет переданную роль.
+
+    Срок действия берётся из REFRESH_TOKEN_EXPIRE_DAYS. Конструктор не
+    подставляет SUPERADMIN, если роль пустая или не входит в перечисление.
+
+    Аргументы:
+        data: Поля полезной нагрузки. Поле sub задаёт учётную запись.
+        role: Роль RBAC. None читает поле role из data.
+
+    Возвращает:
+        Подписанный JWT типа refresh.
+
+    Вызывает:
+        ValueError: Роль пустая или неизвестная.
     """
     to_encode = data.copy()
     now = datetime.now(UTC)
     expire = now + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
 
-    raw_role = role or to_encode.get("role") or Role.SUPERADMIN
-    if isinstance(raw_role, Role):
-        role_str = raw_role.value
-    else:
-        role_str = str(raw_role).lower().strip()
-
-    try:
-        Role(role_str)
-    except ValueError:
-        role_str = Role.SUPERADMIN.value
-
+    role_str = resolve_declared_role(role, to_encode.get("role"))
     sub = to_encode.get("sub", "admin")
     to_encode.update(
         {
@@ -623,7 +651,7 @@ async def get_current_admin(token: str = Depends(oauth2_scheme)) -> CurrentUser:
     except jwt.PyJWTError:
         raise credentials_exception
 
-    # Проверяем отзыв токена в Redis по jti или токену целиком
+    # Проверяет отзыв токена в Redis по jti или по строке токена целиком.
     jti = payload.get("jti")
     is_revoked = False
     if redis_blacklist:
@@ -666,7 +694,7 @@ async def get_current_admin(token: str = Depends(oauth2_scheme)) -> CurrentUser:
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Извлекаем роль и разрешения (SEC-07: никакой роли по умолчанию)
+    # Извлекает роль и разрешения (SEC-07: никакой роли по умолчанию)
     raw_role = payload.get("role")
     if not raw_role:
         raise HTTPException(
@@ -753,7 +781,7 @@ def verify_and_rotate_refresh_token(refresh_token: str) -> tuple[str, str]:
                     detail="Authentication service temporarily unavailable",
                 )
 
-        # Инвалидируем использованный refresh-токен
+        # Инвалидирует использованный refresh-токен
         try:
             now_ts = int(datetime.now(UTC).timestamp())
             exp = payload.get("exp")
@@ -895,80 +923,157 @@ def generate_key_id(agent_name: str, public_key_pem: str) -> str:
 _revoked_certs_memory: set[str] = set()
 
 
+def _strict_security_enabled() -> bool:
+    """Сообщает, включён ли строгий режим безопасности.
+
+    Возвращает:
+        True, если STRICT_SECURITY не задан или равен истине.
+    """
+    return os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1", "yes")
+
+
+def _redis_unavailable(detail: str, cause: Exception | None = None) -> HTTPException:
+    """Собирает отказ, когда Redis не подтвердил отзыв.
+
+    Аргументы:
+        detail: Текст ответа клиенту.
+        cause: Исходная ошибка Redis.
+
+    Возвращает:
+        HTTP 503. Исключение ещё не выброшено.
+    """
+    error = HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
+    if cause is not None:
+        error.__cause__ = cause
+    return error
+
+
 def revoke_agent_key_in_redis(
     agent_name: str,
     kid: str | None = None,
     ttl_seconds: int = 86400 * 90,
     redis_conn=None,
-):
-    """Помещает отозванный ключ агента в черный список Redis и локальную память для мгновенного отклонения запросов."""
+) -> None:
+    """Записывает отзыв ключа агента в Redis и в локальную память.
+
+    Аргументы:
+        agent_name: Имя агента. Пустая строка не создаёт ключ агента.
+        kid: Идентификатор конкретного ключа. Пустое значение отзывает агента целиком.
+        ttl_seconds: Срок записи в Redis, в секундах.
+        redis_conn: Клиент Redis. Без него берётся общий клиент процесса.
+
+    Вызывает:
+        HTTPException: Строгий режим включён, а Redis не записал отзыв.
+
+    Побочные эффекты:
+        Пишет ключи revoked:agent и revoked:agent_key и публикует security:revocations.
+    """
     client = redis_conn or redis_blacklist
     a_clean = agent_name.strip().lower() if agent_name else ""
     if a_clean:
         _revoked_certs_memory.add(f"agent:{a_clean}")
     if kid:
         _revoked_certs_memory.add(f"agent_key:{kid}")
-    if client:
-        try:
-            if kid:
-                client.setex(f"revoked:agent_key:{kid}", ttl_seconds, "revoked")
-                try:
-                    client.publish("security:revocations", f"agent_key:{kid}")
-                except Exception as pe:
-                    log_warning("Безопасность", f"Сбой публикации в Redis PubSub: {pe}")
-            if a_clean:
-                client.setex(f"revoked:agent:{a_clean}", ttl_seconds, "revoked")
-                try:
-                    client.publish("security:revocations", f"agent:{a_clean}")
-                except Exception as pe:
-                    log_warning("Безопасность", f"Сбой публикации в Redis PubSub: {pe}")
-        except Exception as e:
-            log_error("Безопасность", f"Ошибка сохранения отзыва ключа агента в Redis: {e}")
+    if client is None:
+        if _strict_security_enabled():
+            raise _redis_unavailable("Отзыв ключа агента не записан: Redis недоступен")
+        return
+    try:
+        if kid:
+            client.setex(f"revoked:agent_key:{kid}", ttl_seconds, "revoked")
+            try:
+                client.publish("security:revocations", f"agent_key:{kid}")
+            except Exception as publish_error:
+                log_warning("Безопасность", f"Сбой публикации в Redis PubSub: {publish_error}")
+        if a_clean:
+            client.setex(f"revoked:agent:{a_clean}", ttl_seconds, "revoked")
+            try:
+                client.publish("security:revocations", f"agent:{a_clean}")
+            except Exception as publish_error:
+                log_warning("Безопасность", f"Сбой публикации в Redis PubSub: {publish_error}")
+    except Exception as error:
+        log_error("Безопасность", f"Ошибка сохранения отзыва ключа агента в Redis: {error}")
+        if _strict_security_enabled():
+            raise _redis_unavailable("Отзыв ключа агента не записан", error) from error
 
 
 def is_agent_key_revoked_in_redis(agent_name: str, kid: str | None = None, redis_conn=None) -> bool:
-    """Проверяет статус отзыва ключа агента в локальной памяти и черном списке Redis."""
+    """Проверяет отзыв ключа агента в памяти процесса и в Redis.
+
+    Аргументы:
+        agent_name: Имя агента.
+        kid: Идентификатор ключа. Пустое значение проверяет только агента.
+        redis_conn: Клиент Redis. Без него берётся общий клиент процесса.
+
+    Возвращает:
+        True, если агент или ключ есть в списке отзыва.
+
+    Вызывает:
+        HTTPException: Строгий режим включён, а Redis не ответил на проверку.
+    """
     a_clean = agent_name.strip().lower() if agent_name else ""
     if kid and f"agent_key:{kid}" in _revoked_certs_memory:
         return True
     if a_clean and f"agent:{a_clean}" in _revoked_certs_memory:
         return True
     client = redis_conn or redis_blacklist
-    if client:
-        try:
-            if kid and client.exists(f"revoked:agent_key:{kid}") in (1, True, "1"):
-                return True
-            if a_clean and client.exists(f"revoked:agent:{a_clean}") in (1, True, "1"):
-                return True
-        except Exception as e:
-            log_warning("Безопасность", f"Ошибка проверки отзыва агента в Redis: {e}")
+    if client is None:
+        if _strict_security_enabled():
+            raise _redis_unavailable("Проверка отзыва ключа агента недоступна")
+        return False
+    try:
+        if kid and client.exists(f"revoked:agent_key:{kid}") in (1, True, "1"):
+            return True
+        if a_clean and client.exists(f"revoked:agent:{a_clean}") in (1, True, "1"):
+            return True
+    except Exception as error:
+        log_warning("Безопасность", f"Ошибка проверки отзыва агента в Redis: {error}")
+        if _strict_security_enabled():
+            raise _redis_unavailable("Проверка отзыва ключа агента недоступна", error) from error
     return False
 
 
 def unrevoke_agent_key_in_redis(agent_name: str, kid: str | None = None, redis_conn=None) -> None:
-    """Снимает блокировку с агента/ключа в локальной памяти и Redis при реактивации."""
+    """Снимает блокировку агента или ключа в памяти процесса и в Redis.
+
+    Аргументы:
+        agent_name: Имя агента.
+        kid: Идентификатор ключа. Пустое значение снимает отзыв агента целиком.
+        redis_conn: Клиент Redis. Без него берётся общий клиент процесса.
+
+    Вызывает:
+        HTTPException: Строгий режим включён, а Redis не снял отзыв.
+
+    Побочные эффекты:
+        Удаляет ключи revoked:agent и revoked:agent_key.
+    """
     client = redis_conn or redis_blacklist
     a_clean = agent_name.strip().lower() if agent_name else ""
     if a_clean:
         _revoked_certs_memory.discard(f"agent:{a_clean}")
     if kid:
         _revoked_certs_memory.discard(f"agent_key:{kid}")
-    if client:
-        try:
-            if a_clean:
-                client.delete(f"revoked:agent:{a_clean}")
-                try:
-                    client.publish("security:revocations", f"unrevoked:agent:{a_clean}")
-                except Exception as pe:
-                    log_warning("Безопасность", f"Сбой публикации в Redis PubSub: {pe}")
-            if kid:
-                client.delete(f"revoked:agent_key:{kid}")
-                try:
-                    client.publish("security:revocations", f"unrevoked:agent_key:{kid}")
-                except Exception as pe:
-                    log_warning("Безопасность", f"Сбой публикации в Redis PubSub: {pe}")
-        except Exception as e:
-            log_warning("Безопасность", f"Ошибка снятия блокировки агента в Redis: {e}")
+    if client is None:
+        if _strict_security_enabled():
+            raise _redis_unavailable("Снятие отзыва ключа агента не записано: Redis недоступен")
+        return
+    try:
+        if a_clean:
+            client.delete(f"revoked:agent:{a_clean}")
+            try:
+                client.publish("security:revocations", f"unrevoked:agent:{a_clean}")
+            except Exception as publish_error:
+                log_warning("Безопасность", f"Сбой публикации в Redis PubSub: {publish_error}")
+        if kid:
+            client.delete(f"revoked:agent_key:{kid}")
+            try:
+                client.publish("security:revocations", f"unrevoked:agent_key:{kid}")
+            except Exception as publish_error:
+                log_warning("Безопасность", f"Сбой публикации в Redis PubSub: {publish_error}")
+    except Exception as error:
+        log_warning("Безопасность", f"Ошибка снятия блокировки агента в Redis: {error}")
+        if _strict_security_enabled():
+            raise _redis_unavailable("Снятие отзыва ключа агента не записано", error) from error
 
 
 async def run_revocation_listener(redis_client_instance=None):
@@ -1491,68 +1596,62 @@ def revoke_certificate_in_redis(
     reason: str | None = None,
     agent_id: str | None = None,
 ) -> None:
-    """
-    Помещает серийный номер, отпечаток сертификата или идентификатор агента в черный список отзыва (CRL / Blacklist).
+    """Записывает отзыв сертификата в память процесса и в Redis.
+
+    Аргументы:
+        serial: Серийный номер в десятичной или шестнадцатеричной записи.
+        fingerprint: Отпечаток сертификата.
+        ttl_seconds: Срок записи в Redis, в секундах.
+        redis_conn: Клиент Redis. Без него берётся общий клиент процесса.
+        reason: Причина отзыва. В ключ Redis не пишется, её сохраняет журнал аудита.
+        agent_id: Идентификатор агента или CN.
+
+    Вызывает:
+        HTTPException: Строгий режим включён, а Redis не записал отзыв.
+
+    Побочные эффекты:
+        Пишет ключи ``revoked:cert`` и ``revoked:agent`` и публикует ``security:revocations``.
     """
     client = redis_conn or redis_blacklist
+    if reason:
+        log_warning("PKI", f"Причина отзыва сертификата: {reason}")
+    publications: list[tuple[str, str]] = []
     if serial:
         s_clean = str(serial).strip().lower()
         _revoked_certs_memory.add(f"serial:{s_clean}")
-        if client:
-            try:
-                client.setex(f"revoked:cert:serial:{s_clean}", ttl_seconds, "revoked")
-                client.setex(f"revoked:cert:{s_clean}", ttl_seconds, "revoked")
-                try:
-                    client.publish("security:revocations", f"serial:{s_clean}")
-                except Exception:
-                    pass
-            except Exception as e:
-                log_warning(
-                    "PKI",
-                    f"Не удалось сохранить отзыв сертификата {serial} в Redis: {e}",
-                )
+        publications.append((f"revoked:cert:serial:{s_clean}", f"serial:{s_clean}"))
+        publications.append((f"revoked:cert:{s_clean}", f"serial:{s_clean}"))
         try:
-            val = int(s_clean, 0)
-            hex_val = format(val, "x")
-            _revoked_certs_memory.add(f"serial:{hex_val}")
-            if client:
-                client.setex(f"revoked:cert:serial:{hex_val}", ttl_seconds, "revoked")
-                try:
-                    client.publish("security:revocations", f"serial:{hex_val}")
-                except Exception:
-                    pass
+            hex_val = format(int(s_clean, 0), "x")
         except ValueError:
-            pass
-
+            hex_val = ""
+        if hex_val:
+            _revoked_certs_memory.add(f"serial:{hex_val}")
+            publications.append((f"revoked:cert:serial:{hex_val}", f"serial:{hex_val}"))
     if fingerprint:
         fp_clean = str(fingerprint).strip().lower()
         _revoked_certs_memory.add(f"fp:{fp_clean}")
-        if client:
-            try:
-                client.setex(f"revoked:cert:fp:{fp_clean}", ttl_seconds, "revoked")
-                client.setex(f"revoked:cert:{fp_clean}", ttl_seconds, "revoked")
-                try:
-                    client.publish("security:revocations", f"fp:{fp_clean}")
-                except Exception:
-                    pass
-            except Exception as e:
-                log_warning(
-                    "PKI",
-                    f"Не удалось сохранить отзыв отпечатка {fingerprint} в Redis: {e}",
-                )
-
+        publications.append((f"revoked:cert:fp:{fp_clean}", f"fp:{fp_clean}"))
+        publications.append((f"revoked:cert:{fp_clean}", f"fp:{fp_clean}"))
     if agent_id:
         a_clean = str(agent_id).strip().lower()
         _revoked_certs_memory.add(f"agent:{a_clean}")
-        if client:
+        publications.append((f"revoked:agent:{a_clean}", f"agent:{a_clean}"))
+    if client is None:
+        if _strict_security_enabled() and publications:
+            raise _redis_unavailable("Отзыв сертификата не записан: Redis недоступен")
+        return
+    try:
+        for redis_key, channel in publications:
+            client.setex(redis_key, ttl_seconds, "revoked")
             try:
-                client.setex(f"revoked:agent:{a_clean}", ttl_seconds, "revoked")
-                try:
-                    client.publish("security:revocations", f"agent:{a_clean}")
-                except Exception:
-                    pass
-            except Exception as e:
-                log_warning("PKI", f"Не удалось сохранить отзыв агента {agent_id} в Redis: {e}")
+                client.publish("security:revocations", channel)
+            except Exception as publish_error:
+                log_warning("PKI", f"Сбой публикации отзыва сертификата в Redis: {publish_error}")
+    except Exception as error:
+        log_warning("PKI", f"Не удалось сохранить отзыв сертификата в Redis: {error}")
+        if _strict_security_enabled():
+            raise _redis_unavailable("Отзыв сертификата не записан", error) from error
 
 
 def is_certificate_revoked_in_redis(
@@ -1645,6 +1744,45 @@ def is_certificate_revoked_in_redis(
     return False
 
 
+def _reject_revoked_client_certificate(cert_info: dict[str, Any]) -> None:
+    """Отклоняет сертификат, серийный номер которого есть в подписанном списке отзыва.
+
+    Аргументы:
+        cert_info: Метаданные клиентского сертификата, которые передал обратный прокси.
+
+    Вызывает:
+        HTTPException: Сертификат отозван либо в строгом режиме список отзыва недоступен.
+    """
+    from src.common.crl import client_serial_is_revoked
+
+    serial = cert_info.get("serial")
+    verified = bool(cert_info.get("verified"))
+    if not serial and not verified:
+        return
+    try:
+        if serial and client_serial_is_revoked(str(serial)):
+            log_warning("mTLS", f"Отказ в доступе: клиентский сертификат (serial: {serial}) отозван по CRL")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Клиентский сертификат mTLS отозван (Certificate has been revoked)",
+            )
+    except HTTPException:
+        raise
+    except FileNotFoundError as exc:
+        if _strict_security_enabled() and verified:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Список отзыва сертификатов недоступен",
+            ) from exc
+    except ValueError as exc:
+        log_warning("mTLS", f"Список отзыва сертификатов недействителен: {exc}")
+        if _strict_security_enabled():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Список отзыва сертификатов недействителен",
+            ) from exc
+
+
 def verify_mtls_client_certificate(request: Request) -> dict[str, Any]:
     """
     Зависимость FastAPI для проверки клиентского mTLS-сертификата.
@@ -1653,7 +1791,8 @@ def verify_mtls_client_certificate(request: Request) -> dict[str, Any]:
     """
     cert_info = parse_mtls_client_certificate(request)
 
-    # 1. Проверка отзыва сертификата в черном списке (CRL / Revocation list)
+    # 1. Проверка отзыва сертификата в подписанном CRL и в черном списке Redis
+    _reject_revoked_client_certificate(cert_info)
     if cert_info.get("serial") or cert_info.get("fingerprint"):
         if is_certificate_revoked_in_redis(cert_info.get("serial"), cert_info.get("fingerprint")):
             log_warning(
@@ -1691,7 +1830,7 @@ def verify_mtls_client_certificate(request: Request) -> dict[str, Any]:
         client_cn = cert_info.get("common_name") or ""
         client_subj = cert_info.get("subject") or ""
         is_subject_allowed = any(
-            allowed == client_cn or allowed == client_subj or allowed in client_subj
+            allowed == client_cn or allowed == client_subj
             for allowed in settings.ALLOWED_MTLS_SUBJECTS
         )
         if not is_subject_allowed:
@@ -1707,7 +1846,11 @@ def verify_mtls_client_certificate(request: Request) -> dict[str, Any]:
     # Проверка разрешенных эмитентов (CA)
     if settings.ALLOWED_MTLS_ISSUERS:
         client_issuer = cert_info.get("issuer") or ""
-        is_issuer_allowed = any(allowed in client_issuer for allowed in settings.ALLOWED_MTLS_ISSUERS)
+        issuer_cn = extract_cn_from_subject(client_issuer) or ""
+        is_issuer_allowed = any(
+            allowed == client_issuer or allowed == issuer_cn
+            for allowed in settings.ALLOWED_MTLS_ISSUERS
+        )
         if not is_issuer_allowed:
             log_warning(
                 "mTLS",

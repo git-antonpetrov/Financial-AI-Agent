@@ -358,7 +358,7 @@ class BankCertificateAuthority:
                 backend=default_backend(),
             )
 
-            # Валидируем сертификат банка по доверенному Root CA
+            # Валидирует сертификат банка по доверенному Root CA
             if not cls.verify_certificate_against_ca(
                 bank_cert.public_bytes(serialization.Encoding.PEM).decode("utf-8"),
                 ca_cert.public_bytes(serialization.Encoding.PEM).decode("utf-8"),

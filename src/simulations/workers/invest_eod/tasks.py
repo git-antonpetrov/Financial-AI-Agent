@@ -5,7 +5,6 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from dateutil.relativedelta import relativedelta
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
@@ -18,7 +17,7 @@ from src.simulations.core.utils.console_logger import log_error, log_info
 from src.simulations.db.bank.db.client import (
     get_async_session_maker as get_bank_session_maker,
 )
-from src.simulations.api.bank_claims import begin_bank_movement, canonical_amount, remember_bank_movement
+from src.simulations.core.bank_claims import begin_bank_movement, canonical_amount, remember_bank_movement
 from src.simulations.db.bank.db.models import Account, Transaction, get_moscow_date
 from src.simulations.db.invest.db.models import (
     BrokerAccount,
@@ -136,7 +135,7 @@ async def process_savings_accounts(session: AsyncSession, current_date: date) ->
 
     current_datetime = datetime.combine(current_date, datetime.max.time())
 
-    # Берем только АКТИВНЫЕ счета, у которых наступила дата выплаты (с блокировкой строки для исключения гонок)
+    # Оставляет только активные счета с наступившей датой выплаты и блокирует строку.
     result = await session.execute(
         select(SavingsAccount)
         .where(
@@ -151,15 +150,17 @@ async def process_savings_accounts(session: AsyncSession, current_date: date) ->
     for acc in accounts:
         try:
             async with _item_savepoint(session):
+                if acc.status != "active" or acc.payout_key:
+                    continue
                 if acc.next_payment_amount and Decimal(str(acc.next_payment_amount)) > Decimal("0.00"):
-                    # Выплачиваем проценты (капитализация)
+                    # Выплачивает проценты (капитализация)
                     acc.balance = Decimal(str(acc.balance)) + Decimal(str(acc.next_payment_amount))
 
-                # Считаем сумму следующей выплаты: баланс * (ставка / 100) / 12 месяцев
+                # Считает сумму следующей выплаты: баланс * (ставка / 100) / 12 месяцев
                 monthly_rate = Decimal(str(acc.interest_rate)) / Decimal(100) / Decimal(12)
                 acc.next_payment_amount = (Decimal(str(acc.balance)) * monthly_rate).quantize(Decimal("0.01"))
 
-                # Сдвигаем дату на 1 месяц вперед
+                # Сдвигает дату на 1 месяц вперед
                 acc.next_payment_date = acc.next_payment_date + relativedelta(months=1)
                 processed += 1
         except Exception as e:
@@ -190,26 +191,36 @@ async def process_deposits(session: AsyncSession, current_date: date) -> None:
     for dep in deposits:
         try:
             async with _item_savepoint(session):
-                if dep.next_payment_amount and Decimal(str(dep.next_payment_amount)) > Decimal("0.00"):
+                if dep.status != "active":
+                    continue
+                if dep.payout_key and not str(dep.payout_key).startswith("eod-mature:"):
+                    continue
+                payout_already_scheduled = bool(dep.payout_key)
+                if (
+                    not payout_already_scheduled
+                    and dep.next_payment_amount
+                    and Decimal(str(dep.next_payment_amount)) > Decimal("0.00")
+                ):
                     dep.balance = Decimal(str(dep.balance)) + Decimal(str(dep.next_payment_amount))
 
-                monthly_rate = Decimal(str(dep.interest_rate)) / Decimal(100) / Decimal(12)
-                dep.next_payment_amount = (Decimal(str(dep.balance)) * monthly_rate).quantize(Decimal("0.01"))
+                if not payout_already_scheduled:
+                    monthly_rate = Decimal(str(dep.interest_rate)) / Decimal(100) / Decimal(12)
+                    dep.next_payment_amount = (Decimal(str(dep.balance)) * monthly_rate).quantize(Decimal("0.01"))
 
-                # Проверяем не истек ли срок вклада
+                # Сверяет дату открытия и срок с текущей датой закрытия.
                 if dep.opened_at:
                     maturity_date = dep.opened_at.date() + relativedelta(months=int(dep.term_months))
                 else:
                     maturity_date = current_date + relativedelta(months=1)
 
                 if current_date >= maturity_date:
-                    amount_to_return = Decimal(str(dep.balance))
                     client_id = str(dep.client_id) if dep.client_id else ""
                     deposit_number = str(dep.account_number) if dep.account_number else str(dep.id)
                     payout_key = dep.payout_key or f"eod-mature:{dep.id}"
                     if not dep.payout_key:
                         dep.payout_key = payout_key
-                        dep.payout_amount = canonical_amount(amount_to_return)
+                        dep.payout_amount = canonical_amount(Decimal(str(dep.balance)))
+                    amount_to_return = Decimal(str(dep.payout_amount or dep.balance))
                     refund_ok = await return_deposit_to_bank(
                         client_id=client_id,
                         deposit_number=deposit_number,
@@ -262,8 +273,10 @@ async def process_broker_accounts(session: AsyncSession, current_date: date) -> 
     for acc in accounts:
         try:
             async with _item_savepoint(session):
+                if acc.status != "active":
+                    continue
                 if not acc.strategy:
-                    # Если нет стратегии, просто сдвигаем дату, деньги лежат мертвым грузом
+                    # Если нет стратегии, просто сдвигает дату, деньги лежат мертвым грузом
                     acc.next_commission_date = acc.next_commission_date + relativedelta(months=1)
                     continue
 
@@ -271,7 +284,7 @@ async def process_broker_accounts(session: AsyncSession, current_date: date) -> 
                 strategy = acc.strategy
                 base_monthly_yield = Decimal(str(strategy.expected_yield)) / Decimal(12)
 
-                # Задаем разброс (шум) в зависимости от риска
+                # Задаёт разброс (шум) в зависимости от риска
                 risk_noise = {
                     "Low": Decimal("0.5"),  # +- 0.5% колебания
                     "Medium": Decimal("2.0"),  # +- 2.0% колебания
@@ -281,20 +294,20 @@ async def process_broker_accounts(session: AsyncSession, current_date: date) -> 
                 noise = Decimal(str(round(random.uniform(-float(noise_level), float(noise_level)), 4)))
                 actual_monthly_yield = base_monthly_yield + noise
 
-                # Считаем доход за прошедший месяц
+                # Считает доход за прошедший месяц
                 income = (Decimal(str(acc.balance)) * (actual_monthly_yield / Decimal(100))).quantize(Decimal("0.01"))
                 acc.monthly_income = income
 
-                # Применяем доход к балансу (он может быть и отрицательным!)
+                # Применяет доход к балансу (он может быть и отрицательным!)
                 acc.balance = Decimal(str(acc.balance)) + acc.monthly_income
 
-                # Если месяц закрыт в плюс, берем комиссию за успех (Success Fee)
+                # Если месяц закрыт в плюс, берёт комиссию за успех (Success Fee)
                 if acc.monthly_income > Decimal("0.00"):
                     rate = Decimal(str(strategy.commission_fee)) / Decimal(100)
                     fee = (Decimal(str(acc.monthly_income)) * rate).quantize(Decimal("0.01"))
                     acc.balance = Decimal(str(acc.balance)) - fee
 
-                # Сдвигаем дату следующего расчета
+                # Сдвигает дату следующего расчета
                 acc.next_commission_date = acc.next_commission_date + relativedelta(months=1)
                 processed += 1
         except Exception as e:

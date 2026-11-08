@@ -101,7 +101,13 @@ class NonceStore:
             self._memory_cache.pop(nonce, None)
 
     def clear(self) -> None:
-        """Очищает память (для тестов)."""
+        """Очищает память nonce только при явном тестовом флаге.
+
+        Вызывает:
+            RuntimeError: Вызов сделан без FINANCIAL_AI_ALLOW_TEST_BRIDGES.
+        """
+        if os.getenv("FINANCIAL_AI_ALLOW_TEST_BRIDGES", "").lower() not in ("1", "true", "yes"):
+            raise RuntimeError("Очистка nonce запрещена без FINANCIAL_AI_ALLOW_TEST_BRIDGES")
         with self._lock:
             self._memory_cache.clear()
 
@@ -292,7 +298,7 @@ class EnclaveVerifier:
             for canonical_data in canonical_candidates:
                 try:
                     if isinstance(public_key, rsa.RSAPublicKey):
-                        # Пробуем PSS, при ошибке PKCS1v15 для совместимости
+                        # Проверяет подпись RSA-PSS, а при несовпадении — PKCS1v15.
                         try:
                             public_key.verify(
                                 signature_bytes,
@@ -352,6 +358,12 @@ def get_enclave_verifier() -> EnclaveVerifier:
 
 
 def reset_enclave_verifier_for_tests() -> None:
-    """Сбрасывает синглтон верификатора анклава для изоляции тестов."""
+    """Сбрасывает синглтон верификатора анклава только при явном тестовом флаге.
+
+    Вызывает:
+        RuntimeError: Вызов сделан без FINANCIAL_AI_ALLOW_TEST_BRIDGES.
+    """
     global _ENCLAVE_VERIFIER_INSTANCE
+    if os.getenv("FINANCIAL_AI_ALLOW_TEST_BRIDGES", "").lower() not in ("1", "true", "yes"):
+        raise RuntimeError("Сброс верификатора анклава запрещён без FINANCIAL_AI_ALLOW_TEST_BRIDGES")
     _ENCLAVE_VERIFIER_INSTANCE = None

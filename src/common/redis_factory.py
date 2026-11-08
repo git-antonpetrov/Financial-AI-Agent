@@ -24,6 +24,9 @@ def redis_connection_kwargs(
 
     Возвращает:
         Словарь аргументов конструктора redis.Redis.
+
+    Вызывает:
+        RuntimeError: TLS включён, а файл корневого сертификата отсутствует.
     """
     raw_timeout = os.getenv("REDIS_CONNECT_TIMEOUT", "2")
     try:
@@ -49,11 +52,12 @@ def redis_connection_kwargs(
     except Exception:
         pass
     if use_ssl:
+        if not ca_file or not os.path.isfile(ca_file):
+            raise RuntimeError(f"TLS Redis включён, но файл CA не найден: {ca_file}")
         kwargs["ssl"] = True
         kwargs["ssl_check_hostname"] = True
-        if ca_file and os.path.isfile(ca_file):
-            kwargs["ssl_ca_certs"] = ca_file
-            kwargs["ssl_cert_reqs"] = "required"
+        kwargs["ssl_ca_certs"] = ca_file
+        kwargs["ssl_cert_reqs"] = "required"
     return kwargs
 
 

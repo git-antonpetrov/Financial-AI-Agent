@@ -62,6 +62,7 @@ def test_docker_compose_zero_trust_in_transit_encryption():
     redis_svc = services["redis"]
     redis_cmd = redis_svc.get("command", "")
     assert "--tls-port 6379" in redis_cmd
+    assert "--tls-protocols TLSv1.3" in redis_cmd
     assert "--port 0" in redis_cmd
     assert "--tls-cert-file /certs/redis.crt" in redis_cmd
     assert any("redis_certs:/certs:ro" in v or "certs_data:/certs:ro" in v for v in redis_svc.get("volumes", []))
@@ -77,6 +78,8 @@ def test_docker_compose_zero_trust_in_transit_encryption():
 
     svc_vols = services["simulation-api"].get("volumes", [])
     assert any("bank_certs:/certs:ro" in v for v in svc_vols), "simulation-api должен монтировать bank_certs:/certs:ro"
+    assert "CRL_PATH=/certs/ca.crl" in services["admin-server"].get("environment", [])
+    assert "CRL_PATH=/certs/ca.crl" in services["simulation-api"].get("environment", [])
 
     for s_name in ["vector-worker", "invest-worker", "digital-worker", "bank-worker"]:
         svc_vols = services[s_name].get("volumes", [])
@@ -319,6 +322,11 @@ def test_vector_worker_does_not_receive_proxy_secret():
     admin_env = services["admin-server"]["environment"]
     assert any("PROXY_INTERNAL_SECRET" in item for item in admin_env)
     assert "env_file" in services["admin-server"]
+
+    simulation_env = services["simulation-api"]["environment"]
+    assert any("PROXY_INTERNAL_SECRET" in item for item in simulation_env)
+    assert "simulation_net" in services["redis"]["networks"]
+    assert "simulation_net" in services["simulation-api"]["networks"]
 
 
 def test_caddy_mounts_platform_cert_on_docker_addresses():

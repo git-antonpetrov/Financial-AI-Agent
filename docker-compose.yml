@@ -272,11 +272,13 @@ services:
         condition: service_healthy
     environment:
       - STRICT_SECURITY=true
+      - PROXY_INTERNAL_SECRET=${PROXY_INTERNAL_SECRET:?PROXY_INTERNAL_SECRET is required}
       - BANK_DATABASE_URL=postgresql+asyncpg://bank_app:${BANK_DB_PASSWORD}@postgres-db:5432/bank_db
       - INVEST_DATABASE_URL=postgresql+asyncpg://invest_app:${INVEST_DB_PASSWORD}@postgres-db:5432/invest_db
       - RUBLE_DATABASE_URL=postgresql+asyncpg://digital_app:${DIGITAL_DB_PASSWORD}@postgres-db:5432/digital_db
       - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-verify-full}
       - SSL_CERT_FILE=/certs/ca.crt
+      - CRL_PATH=/certs/ca.crl
       - DATA_ENCRYPTION_KEY=${DATA_ENCRYPTION_KEY}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -293,7 +295,7 @@ services:
     volumes:
       - bank_certs:/certs:ro
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8002/health')\" || exit 1"]
+      test: ["CMD-SHELL", "python -c \"import ssl,urllib.request; ctx=ssl.create_default_context(cafile='/certs/ca.crt'); urllib.request.urlopen('https://localhost:8002/health', context=ctx)\" || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -358,6 +360,7 @@ services:
       --tls-cert-file /certs/redis.crt 
       --tls-key-file /certs/redis.key 
       --tls-ca-cert-file /certs/ca.crt 
+      --tls-protocols TLSv1.3 
       --tls-auth-clients no 
       --requirepass ${REDIS_PASSWORD}
     volumes:
@@ -416,6 +419,7 @@ services:
       - REDIS_SSL=${REDIS_SSL:-true}
       - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-verify-full}
       - SSL_CERT_FILE=/certs/ca.crt
+      - CRL_PATH=/certs/ca.crl
       - REDIS_SSL_CA_CERTS=/certs/ca.crt
       - PROXY_INTERNAL_SECRET=${PROXY_INTERNAL_SECRET:?PROXY_INTERNAL_SECRET is required}
     volumes:
@@ -541,7 +545,7 @@ services:
   caddy:
     image: caddy:2-alpine
     container_name: caddy-server
-    # Читает закрытый ключ платформы с правами 0600, потому что файл принадлежит пользователю Root CA.
+    # Читает ключ платформы с режимом 0600. Root открывает файл, принадлежащий uid сервиса.
     user: "0:0"
     restart: unless-stopped
     depends_on:

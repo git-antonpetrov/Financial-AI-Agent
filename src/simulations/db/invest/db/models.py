@@ -45,7 +45,7 @@ class SavingsAccount(Base):
     close_idempotency_key = Column(String, nullable=True, unique=True, index=True)
     close_response_payload = Column(EncryptedText, nullable=True)
     payout_key = Column(String, nullable=True, index=True)
-    payout_amount = Column(String, nullable=True)
+    payout_amount = Column(EncryptedDecimal, nullable=True)
 
 
 class Deposit(Base):
@@ -64,7 +64,7 @@ class Deposit(Base):
     close_idempotency_key = Column(String, nullable=True, unique=True, index=True)
     close_response_payload = Column(EncryptedText, nullable=True)
     payout_key = Column(String, nullable=True, index=True)
-    payout_amount = Column(String, nullable=True)
+    payout_amount = Column(EncryptedDecimal, nullable=True)
 
 
 class BrokerAccount(Base):

@@ -62,7 +62,7 @@ async def process_auto_payments(session: AsyncSession, current_date: date) -> No
     for ap in autopayments:
         try:
             async with _item_savepoint(session):
-                # Получаем счет с пессимистической блокировкой строки во избежание гонок
+                # Получает счет с пессимистической блокировкой строки во избежание гонок
                 account = await session.get(Account, ap.account_id, with_for_update=True)
                 if not account or account.status != "active":
                     continue
@@ -74,16 +74,12 @@ async def process_auto_payments(session: AsyncSession, current_date: date) -> No
                     select(Transaction).where(Transaction.idempotency_key == autopay_key)
                 )
                 if getattr(already_posted, "idempotency_key", None) == autopay_key:
-                    if ap.schedule == "monthly":
-                        ap.next_payment_date = ap.next_payment_date + relativedelta(months=1)
-                    else:
-                        ap.next_payment_date = ap.next_payment_date + timedelta(days=7)
                     continue
                 if acc_bal >= ap_amt:
-                    # Списываем деньги
+                    # Списывает деньги
                     account.balance = acc_bal - ap_amt
 
-                    # Создаем транзакцию
+                    # Создаёт транзакцию автоплатежа.
                     tx = Transaction(
                         account_id=account.id,
                         category="expense",
@@ -97,7 +93,7 @@ async def process_auto_payments(session: AsyncSession, current_date: date) -> No
                     )
                     session.add(tx)
 
-                    # Обновляем дату следующего платежа
+                    # Обновляет дату следующего платежа
                     if ap.schedule == "monthly":
                         ap.next_payment_date = ap.next_payment_date + relativedelta(months=1)
                     else:  # Еженедельное расписание (weekly)
@@ -117,7 +113,7 @@ async def process_auto_payments(session: AsyncSession, current_date: date) -> No
                         time=get_moscow_time(),
                     )
                     session.add(tx)
-                    # Сдвигаем на завтра чтобы попробовать снова
+                    # Сдвигает на завтра чтобы попробовать снова
                     ap.next_payment_date = ap.next_payment_date + timedelta(days=1)
         except Exception as e:
             log_error("Bank EOD", f"Ошибка при обработке автоплатежа {ap.id}: {e}")
@@ -215,7 +211,7 @@ async def process_salaries(session: AsyncSession, current_date: date) -> None:
     )
     accounts = result.scalars().all()
 
-    # Чтобы не начислять зп на все 3 счета одного клиента, будем вести учет, кому уже начислили
+    # Чтобы не начислять зп на все 3 счета одного клиента, ведёт учёт уже начисленных клиентов
     paid_clients = set()
     processed = 0
 

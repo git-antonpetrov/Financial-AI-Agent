@@ -78,10 +78,10 @@ async def seed_data():
     await init_db()
 
     async with AsyncSessionLocal() as session:
-        # Проверяем, есть ли уже данные (чтобы не дублировать)
-        # Если хотим пересоздавать — можно добавить Base.metadata.drop_all(engine) в init_db
+        # Пропускает вставку, если в базе уже есть счета.
+        # При необходимости пересоздания — можно добавить Base.metadata.drop_all(engine) в init_db
 
-        # 1. Создаем тарифы
+        # 1. Создаёт тарифы
         print("Создаем тарифы...")
         tariffs_data = [
             Tariff(
@@ -118,7 +118,7 @@ async def seed_data():
         session.add_all(tariffs_data)
         await session.commit()
 
-        # 2. Создаем клиентов
+        # 2. Создаёт клиентов
         print("Используем фиксированные UUID для клиентов...")
         client_ids = [
             "11111111-1111-1111-1111-111111111111",  # Иванов Иван Иванович
@@ -126,7 +126,7 @@ async def seed_data():
             "33333333-3333-3333-3333-333333333333",  # Васильков Василий Васильевич
         ]
 
-        # 3. Создаем счета, карты и транзакции для каждого
+        # 3. Создаёт счета, карты и транзакции для каждого
         print("Создаем счета, карты и транзакции...")
 
         operation_types_expense = ["transfer_sbp", "transfer_non_sbp", "purchase"]
@@ -142,7 +142,7 @@ async def seed_data():
         ]
 
         for client_id in client_ids:
-            # Даем каждому клиенту 1-2 счета
+            # Даёт каждому клиенту 1-2 счета
             num_accounts = random.randint(1, 2)
             for _ in range(num_accounts):
                 tariff = random.choice(tariffs_data)
@@ -154,7 +154,7 @@ async def seed_data():
                     tariff_id=tariff.id,
                 )
                 session.add(account)
-                await session.flush()  # Получаем account.id
+                await session.flush()  # Получает account.id
 
                 # Автоплатежи (50% шанс)
                 if random.random() > 0.5:

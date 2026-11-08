@@ -83,6 +83,9 @@ def test_initialized_volume_reapplies_roles_without_error():
     wrapper = WRAPPER.read_text(encoding="utf-8")
     assert "PG_VERSION" in wrapper
     assert "sh /docker-entrypoint-initdb.d/02-init_app_roles.sh" in wrapper
+    assert "ADD COLUMN IF NOT EXISTS idempotency_key" in script
+    assert "ix_auto_payments_idempotency_key" in script
+    assert "table_name = 'auto_payments'" in script
 
     catalog = {
         "roles": {},

@@ -2,7 +2,7 @@ import asyncio
 import sys
 from pathlib import Path
 
-# Добавляем корень проекта в sys.path
+# Добавляет корень проекта в sys.path.
 sys.path.append(str(Path(__file__).resolve().parents[4]))
 
 from dotenv import load_dotenv
@@ -18,7 +18,7 @@ from src.simulations.workers.invest_eod.tasks import run_invest_eod
 async def main():
     log_info("Invest EOD Worker", "Инициализация воркера...")
 
-    # Создаем асинхронный планировщик с явным указанием московского времени
+    # Создаёт асинхронный планировщик в часовом поясе Москвы.
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
 
     # Запуск по расписанию в 23:15 по Москве

@@ -16,9 +16,9 @@ def _log(level_color: str, level_name: str, process_name: str, message: str) -> 
     """
     Форматирует и выводит сообщение в консоль согласно корпоративному стандарту.
 
-    Args:
+    Аргументы:
         level_color: ANSI-код цвета уровня логирования.
-        level_name: Название уровня логирования (Error, Warning, Info, Success).
+        level_name: Название уровня логирования: Error, Warning, Info или Success.
         process_name: Идентификатор подсистемы или процесса.
         message: Текст сообщения.
     """

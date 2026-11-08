@@ -72,7 +72,7 @@ const translateStatusMessage = (msg: string | undefined, lang: 'en' | 'ru') => {
 
   let translatedMsg = msg;
 
-  // Сначала обрабатываем динамические переводы по регулярным выражениям
+  // Сначала обрабатывает динамические переводы по регулярным выражениям
   const successRegex = /^Успешно! Документ (.*) отправлен в очередь на обработку\.$/;
   const match = translatedMsg.match(successRegex);
   if (match) {
@@ -337,7 +337,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
     try {
       setRequests(prev => prev.map(r => ids.includes(r.id) ? { ...r, status: 'approved' } : r))
 
-      // Добавляем файлы в очередь вкладки RAG
+      // Добавляет файлы в очередь вкладки RAG
       const newLocalFiles = approvingRequests.map(req => {
         const file = requestFiles[req.id]
         return {
@@ -357,7 +357,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
       setSelectedRequests(new Set())
       setActiveTab('rag')
 
-      // Обновляем статусы через локальный BFF
+      // Обновляет статусы через локальный BFF
       const res = await localFetch('/api/local/agent-requests/approve', {
         method: 'POST',
         headers: {
@@ -492,7 +492,7 @@ export default function Dashboard({ lang, setLang, onLogout }: DashboardProps) {
 
       const idsToStart = new Set(filesToStart.map(f => f.id));
 
-      // Обновление состояния запускаемых задач
+      // Обновление состояния запускаетых задач
       setLocalFiles(prevFiles =>
         prevFiles.map(f =>
           idsToStart.has(f.id)

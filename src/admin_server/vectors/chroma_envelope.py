@@ -17,7 +17,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 MAGIC_ENVELOPE_V1 = b"ENC1"
 MAGIC_ENVELOPE_V2_PREFIX = b"ENC2:"
 
-# Ключи метаданных, сохраняемые в открытом виде для фильтрации ChromaDB (where={"short_name": ...})
+# Ключи метаданных, сохраняетые в открытом виде для фильтрации ChromaDB (where={"short_name": ...})
 DEFAULT_PRESERVED_KEYS = {
     "short_name",
     "system_name",
@@ -254,10 +254,10 @@ def encrypt_chroma_metadata(
         if key_str in preserved:
             encrypted_meta[key_str] = v
         elif isinstance(v, str):
-            # Шифруем строковые значения метаданных (например, title, description)
+            # Шифрует строковые значения метаданных (например, title, description)
             encrypted_meta[key_str] = encrypt_chroma_chunk(v, key=key, kid=kid)
         else:
-            # Числовые и логические значения оставляем без изменений
+            # Числовые и логические значения оставляет без изменений
             encrypted_meta[key_str] = v
 
     encrypted_meta["is_encrypted"] = True

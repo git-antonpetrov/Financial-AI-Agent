@@ -208,7 +208,7 @@ def setup_vds(project_dir: str | None = None) -> dict[str, str]:
         with open(example_path, "r", encoding="utf-8") as f:
             env_lines = f.readlines()
 
-    # Парсим существующие ключи
+    # Разбирает существующие ключи
     env_dict: dict[str, str] = {}
     for line in env_lines:
         line_s = line.strip()
@@ -322,11 +322,11 @@ def setup_vds(project_dir: str | None = None) -> dict[str, str]:
     env_dict["ADMIN_LOCAL_DOMAIN"] = env_dict.get("ADMIN_LOCAL_DOMAIN", "admin.fin-ai-agent.local")
     env_dict["FORCE_REGENERATE"] = env_dict.get("FORCE_REGENERATE", "false")
 
-    # Перезаписываем или обновляем .env
+    # Перезаписывает или обновляет .env
     written_keys = set()
     output_lines = []
 
-    # Сохраняем исходный порядок и комментарии
+    # Сохраняет исходный порядок и комментарии
     for line in env_lines:
         line_s = line.strip()
         if line_s and not line_s.startswith("#") and "=" in line_s:
@@ -339,7 +339,7 @@ def setup_vds(project_dir: str | None = None) -> dict[str, str]:
                 continue
         output_lines.append(line)
 
-    # Добавляем ключи, которых не было в исходном файле
+    # Добавляет ключи, которых не было в исходном файле
     missing_keys = [k for k in env_dict if k not in written_keys]
     if missing_keys:
         output_lines.append("\n# Security Hardening & Zero-Trust In-Transit TLS\n")

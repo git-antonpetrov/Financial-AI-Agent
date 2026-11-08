@@ -92,7 +92,7 @@ def test_create_access_token_jti_and_iat():
     from security import create_access_token, settings
     import jwt
 
-    token = create_access_token({"sub": "admin"})
+    token = create_access_token({"sub": "admin"}, role="superadmin")
     payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
 
     assert payload.get("sub") == "admin"

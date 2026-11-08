@@ -141,7 +141,7 @@ function App() {
       throw new Error('errorInvalidDomain')
     }
 
-    // Выполняем аутентификацию через локальный sidecar (BFF) по mTLS
+    // Выполняет аутентификацию через локальный sidecar (BFF) по mTLS
     const response = await localFetch('/api/local/auth/login', {
       method: 'POST',
       headers: {
@@ -169,7 +169,7 @@ function App() {
       }
     }
 
-    // Сохраняем адрес сервера для подсказки при следующем вводе
+    // Сохраняет адрес сервера для подсказки при следующем вводе
     localStorage.setItem('admin_server', baseUrl.replace(/\/$/, ''))
     setIsAuthenticated(true)
   }

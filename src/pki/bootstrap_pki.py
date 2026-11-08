@@ -66,6 +66,57 @@ def certificate_remains_usable(
     return set(required_dns_names).issubset(present)
 
 
+def restrict_private_key_permissions(root: Path) -> None:
+    """Выставляет режим 0600 каждому закрытому ключу в каталоге.
+
+    Аргументы:
+        root: Корень тома, в котором лежат файлы ``*.key``, включая ``private.key`` MinIO.
+
+    Побочные эффекты:
+        Меняет права существующих файлов ключей. Отсутствующий каталог не создаёт
+        и не считает ошибкой, потому что том может появиться только после bootstrap.
+    """
+    if not root.exists():
+        return
+    for key_path in root.rglob("*"):
+        if key_path.is_file() and key_path.name.endswith(".key"):
+            os.chmod(key_path, 0o600)
+
+
+# uid:gid процессов, которые читают ключ со своего тома.
+# Совпадают с useradd в образах сервисов и с пользователями официальных образов.
+KEY_OWNER_BY_DIRECTORY = {
+    "BANK_CERTS_DIR": (10001, 10001),
+    "ADMIN_CERTS_DIR": (10001, 10001),
+    "REDIS_CERTS_DIR": (999, 1000),
+    "POSTGRES_CERTS_DIR": (70, 70),
+    "MINIO_CERTS_DIR": (1000, 1000),
+}
+
+
+def assign_private_key_owner(root: Path, uid: int, gid: int) -> None:
+    """Отдаёт закрытые ключи пользователю сервиса, который их читает.
+
+    Режим файла остаётся 0600. Чужой uid в контейнере тогда не открывает ключ,
+    а процесс сервиса открывает. Без прав root смена владельца пропускается.
+
+    Аргументы:
+        root: Каталог тома с ключами.
+        uid: Идентификатор пользователя сервиса.
+        gid: Идентификатор группы сервиса.
+
+    Побочные эффекты:
+        Меняет владельца существующих файлов ``*.key``.
+    """
+    if not root.exists():
+        return
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        return
+    for key_path in root.rglob("*"):
+        if key_path.is_file() and key_path.name.endswith(".key"):
+            os.chown(key_path, uid, gid)
+
+
 def bootstrap_pki(
     data_dir: Path | str,
     export_dir: Path | str,
@@ -87,7 +138,8 @@ def bootstrap_pki(
         Манифест с серийными номерами и статусом VALID или ISSUED.
 
     Побочные эффекты:
-        Создаёт каталоги и записывает сертификаты.
+        Создаёт каталоги, записывает сертификаты и выставляет режим 0600
+        каждому закрытому ключу в каталоге экспорта и выделенных томах.
     """
     data_path = Path(data_dir).resolve()
     export_path = Path(export_dir).resolve()
@@ -266,6 +318,13 @@ def bootstrap_pki(
             except Exception:
                 pass
 
+        previous_serial = None
+        if cert_file.is_file():
+            try:
+                previous_serial = x509.load_pem_x509_certificate(cert_file.read_bytes()).serial_number
+            except (ValueError, OSError):
+                previous_serial = None
+
         cert, key = issuer.issue_certificate(
             common_name=spec["cn"],
             role=spec["role"],
@@ -279,6 +338,8 @@ def bootstrap_pki(
         )
 
         issuer.save_cert_and_key(cert, key, cert_file, key_file)
+        if previous_serial is not None and previous_serial != cert.serial_number:
+            ca_engine.revoke_serial(previous_serial)
         if spec["name"] == "enclave-ca" and key_file.exists():
             key_file.unlink()
         fp = get_cert_fingerprint(cert)
@@ -291,6 +352,13 @@ def bootstrap_pki(
             "fingerprint": fp,
             "status": "ISSUED",
         }
+
+    for serial_text in os.getenv("REVOKE_SERIALS", "").split(","):
+        if serial_text.strip():
+            ca_engine.revoke_serial(int(serial_text.strip(), 0))
+    crl_export_target = export_path / "ca.crl"
+    ca_engine.write_certificate_revocation_list(crl_export_target)
+    print(f"[+] Список отзыва ca.crl записан -> {crl_export_target}")
 
     # 3. Специальная адаптация под структуру томов MinIO
     minio_dir = export_path / "minio"
@@ -314,11 +382,13 @@ def bootstrap_pki(
     ca_public_dir = export_path / "ca_public"
     ca_public_dir.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(export_path / "ca.crt", ca_public_dir / "ca.crt")
+    shutil.copyfile(export_path / "ca.crl", ca_public_dir / "ca.crl")
 
     # bank_certs: сертификаты банковского сервиса и публичный CA
     bank_dir = export_path / "bank_certs"
     bank_dir.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(export_path / "ca.crt", bank_dir / "ca.crt")
+    shutil.copyfile(export_path / "ca.crl", bank_dir / "ca.crl")
     shutil.copyfile(export_path / "bank.crt", bank_dir / "bank.crt")
     shutil.copyfile(export_path / "bank.key", bank_dir / "bank.key")
 
@@ -326,6 +396,7 @@ def bootstrap_pki(
     admin_dir = export_path / "admin_certs"
     admin_dir.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(export_path / "ca.crt", admin_dir / "ca.crt")
+    shutil.copyfile(export_path / "ca.crl", admin_dir / "ca.crl")
     shutil.copyfile(export_path / "admin_server.crt", admin_dir / "admin_server.crt")
     shutil.copyfile(export_path / "admin_server.key", admin_dir / "admin_server.key")
 
@@ -373,12 +444,12 @@ def bootstrap_pki(
 
     # Копирование в выделенные целевые тома из переменных окружения
     dedicated_mounts = {
-        "CA_PUBLIC_DIR": (ca_public_dir, ["ca.crt"]),
-        "BANK_CERTS_DIR": (bank_dir, ["ca.crt", "bank.crt", "bank.key"]),
+        "CA_PUBLIC_DIR": (ca_public_dir, ["ca.crt", "ca.crl"]),
+        "BANK_CERTS_DIR": (bank_dir, ["ca.crt", "ca.crl", "bank.crt", "bank.key"]),
         "ENCLAVE_CERTS_DIR": (enclave_dir, ["ca.crt", "enclave_ca.crt"]),
         "ADMIN_CERTS_DIR": (
             admin_dir,
-            ["ca.crt", "admin_server.crt", "admin_server.key"],
+            ["ca.crt", "ca.crl", "admin_server.crt", "admin_server.key"],
         ),
         "ADMIN_CLIENT_CERTS_DIR": (
             admin_client_dir,
@@ -414,6 +485,16 @@ def bootstrap_pki(
             if minio_target.exists():
                 shutil.rmtree(minio_target)
             shutil.copytree(minio_src_tree, minio_target)
+
+    # copyfile не переносит режим, поэтому каждый закрытый ключ получает 0600 отдельно.
+    restrict_private_key_permissions(export_path)
+    for env_var in dedicated_mounts:
+        dedicated_path = os.getenv(env_var)
+        if dedicated_path:
+            restrict_private_key_permissions(Path(dedicated_path))
+            owner = KEY_OWNER_BY_DIRECTORY.get(env_var)
+            if owner is not None:
+                assign_private_key_owner(Path(dedicated_path), owner[0], owner[1])
 
     # Изоляция закрытых ключей от общего корня раздела certs_data в Docker (SEC-02: Zero-Trust Key Isolation)
     # Закрытые ключи сервисов доступны исключительно через специализированные изолированные тома:

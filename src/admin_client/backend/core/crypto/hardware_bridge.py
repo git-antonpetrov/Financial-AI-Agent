@@ -157,12 +157,12 @@ class HardwareSigningBridge:
         """
         Вычисляет аппаратную цифровую подпись данных в микрочипе TPM 2.0.
 
-        Args:
+        Аргументы:
             canonical_bytes: Байты данных для подписания.
-            scheme: Схема подписания ('PSS' или 'PKCS1').
+            scheme: Схема подписания, PSS или PKCS1.
 
-        Returns:
-            str: Цифровая подпись в кодировке Base64.
+        Возвращает:
+            Цифровая подпись в кодировке Base64.
         """
         if not self._key_handle:
             raise RuntimeError("Аппаратный ключ TPM не инициализирован")
@@ -458,12 +458,12 @@ class SimulatedTPMBridge:
         """
         Вычисляет цифровую подпись данных с обязательным вызовом биометрического подтверждения.
 
-        Args:
+        Аргументы:
             canonical_bytes: Байты данных для подписания.
-            scheme: Схема подписания ('PSS' или 'PKCS1').
+            scheme: Схема подписания, PSS или PKCS1.
 
-        Returns:
-            str: Цифровая подпись в кодировке Base64.
+        Возвращает:
+            Цифровая подпись в кодировке Base64.
         """
         if not self.biometric_prompt_callback():
             raise PermissionError("Биометрическая аутентификация Windows Hello отклонена пользователем")

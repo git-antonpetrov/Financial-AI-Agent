@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from decimal import Decimal
 from pydantic import ValidationError
@@ -202,7 +204,10 @@ def test_http_endpoints_reject_non_positive_amounts(monkeypatch):
             "transfer_type": "account",
             "destination": "acc_2"
         },
-        headers={"X-Bootstrap-Token": "bank_tok"}
+        headers={
+            "X-Bootstrap-Token": "bank_tok",
+            "X-Proxy-Secret": os.environ["PROXY_INTERNAL_SECRET"],
+        }
     )
     assert res_bank.status_code == 422
 
@@ -215,7 +220,10 @@ def test_http_endpoints_reject_non_positive_amounts(monkeypatch):
             "initial_amount": 0.0,
             "term_months": 12
         },
-        headers={"X-Bootstrap-Token": "invest_tok"}
+        headers={
+            "X-Bootstrap-Token": "invest_tok",
+            "X-Proxy-Secret": os.environ["PROXY_INTERNAL_SECRET"],
+        }
     )
     assert res_invest.status_code == 422
 
@@ -226,6 +234,9 @@ def test_http_endpoints_reject_non_positive_amounts(monkeypatch):
             "to_wallet_id": "w_2",
             "amount": -100.0
         },
-        headers={"X-Bootstrap-Token": "ruble_tok"}
+        headers={
+            "X-Bootstrap-Token": "ruble_tok",
+            "X-Proxy-Secret": os.environ["PROXY_INTERNAL_SECRET"],
+        }
     )
     assert res_ruble.status_code == 422

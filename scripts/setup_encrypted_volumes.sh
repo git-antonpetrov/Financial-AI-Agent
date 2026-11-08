@@ -5,6 +5,21 @@
 # ==============================================================================
 set -euo pipefail
 
+# Сообщает, работает ли служба Docker. Остановленный демон не мешает печати команды переноса.
+docker_daemon_is_running() {
+    if command -v systemctl >/dev/null 2>&1; then
+        if systemctl is-active --quiet docker; then
+            return 0
+        fi
+    fi
+    if command -v pgrep >/dev/null 2>&1; then
+        if pgrep -x dockerd >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
 VOLUME_NAME=${1:-"fin_agent_secure_data"}
 MOUNT_POINT=${2:-"/mnt/fin_agent_encrypted_volumes"}
 KEYFILE=${3:-"/etc/security/luks_keys/fin_agent.key"}
@@ -28,13 +43,18 @@ for cmd in cryptsetup dd mkfs.ext4 blkid; do
     fi
 done
 
-# Останавливает монтирование поверх уже занятого каталога Docker, потому что
+# Останавливает монтирование поверх живого каталога Docker, потому что
 # такой mount скрывает существующие тома.
 if [[ "$MOUNT_POINT" == "/var/lib/docker/volumes" || "$MOUNT_POINT" == "/var/lib/docker" ]]; then
+    if docker_daemon_is_running; then
+        echo "[-] Ошибка: нельзя монтировать том поверх живого каталога Docker ${MOUNT_POINT}."
+        echo "    Остановите Docker и перенесите data-root на отдельную точку монтирования."
+        exit 1
+    fi
     if [[ "${FIN_AGENT_FORCE_MOUNT:-}" != "1" ]]; then
         echo "[-] Ошибка: точка монтирования ${MOUNT_POINT} совпадает с каталогом Docker."
         echo "    Укажите отдельный каталог и перенесите data-root Docker на расшифрованный том."
-        echo "    Повторный запуск поверх живых томов требует FIN_AGENT_FORCE_MOUNT=1."
+        echo "    Повторный запуск поверх остановленного Docker требует FIN_AGENT_FORCE_MOUNT=1."
         exit 1
     fi
 fi
@@ -108,6 +128,13 @@ if ! mount | grep -q "/dev/mapper/${MAPPER_NAME}"; then
 fi
 
 chmod 700 "$MOUNT_POINT"
+
+if docker_daemon_is_running; then
+    echo "[!] Docker запущен. Команда переноса data-root не выдаётся, пока служба не остановлена."
+else
+    echo "[+] Docker остановлен. Команда переноса data-root Docker на этот том:"
+    printf '%s\n' "mkdir -p '${MOUNT_POINT}/docker' && rsync -aHAX /var/lib/docker/ '${MOUNT_POINT}/docker/' && mkdir -p /etc/docker && printf '%s\n' '{\"data-root\":\"${MOUNT_POINT}/docker\"}' > /etc/docker/daemon.json"
+fi
 
 echo "======================================================================"
 echo "[+] УСПЕШНО: Зашифрованный том LUKS2 смонтирован и готов к работе:"

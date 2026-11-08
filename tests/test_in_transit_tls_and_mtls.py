@@ -255,6 +255,18 @@ def test_verify_mtls_strict_mode_allowed_subjects(monkeypatch):
     assert exc_info.value.status_code == 403
     assert "не авторизован" in exc_info.value.detail
 
+    embedded = {
+        "type": "http",
+        "headers": [
+            (b"x-proxy-secret", os.environ["PROXY_INTERNAL_SECRET"].encode()),
+            (b"x-client-cert-verify", b"SUCCESS"),
+            (b"x-client-cert-subject", b"CN=not-admin-client,O=FinancialAI"),
+        ],
+    }
+    with pytest.raises(HTTPException) as embedded_error:
+        verify_mtls_client_certificate(Request(embedded))
+    assert embedded_error.value.status_code == 403
+
 
 def test_verify_mtls_strict_mode_allowed_issuers(monkeypatch):
     """
@@ -291,6 +303,19 @@ def test_verify_mtls_strict_mode_allowed_issuers(monkeypatch):
         verify_mtls_client_certificate(Request(unauth_scope))
     assert exc_info.value.status_code == 403
     assert "доверенных центров" in exc_info.value.detail
+
+    embedded_issuer = {
+        "type": "http",
+        "headers": [
+            (b"x-proxy-secret", os.environ["PROXY_INTERNAL_SECRET"].encode()),
+            (b"x-client-cert-verify", b"SUCCESS"),
+            (b"x-client-cert-subject", b"CN=admin-client"),
+            (b"x-client-cert-issuer", b"CN=Not FinancialAI Internal Root CA,O=Other"),
+        ],
+    }
+    with pytest.raises(HTTPException) as embedded_issuer_error:
+        verify_mtls_client_certificate(Request(embedded_issuer))
+    assert embedded_issuer_error.value.status_code == 403
 
 
 # ------------------------------------------------------------------------------
@@ -358,7 +383,31 @@ def test_zero_trust_pki_dockerfile_and_bootstrap_exist():
     dockerfile_ca = root_dir / "src" / "pki" / "Dockerfile.ca"
     bootstrap_py = root_dir / "src" / "pki" / "bootstrap_pki.py"
     assert dockerfile_ca.exists(), "src/pki/Dockerfile.ca должен существовать"
+    dockerfile = dockerfile_ca.read_text(encoding="utf-8")
+    assert "/export/postgres_certs" in dockerfile
+    assert "/export/redis_certs" in dockerfile
+    assert "/export/minio_certs" in dockerfile
     assert bootstrap_py.exists(), "src/pki/bootstrap_pki.py должен существовать"
+    api_dockerfile = (root_dir / "src" / "simulations" / "api" / "Dockerfile").read_text(encoding="utf-8")
+    assert 'src.simulations.api.serve' in api_dockerfile
+
+
+def test_simulation_gateway_tls_is_1_3_only():
+    """Проверяет, что контекст шлюза симуляции не опускается ниже TLS 1.3."""
+    import ssl
+
+    from src.simulations.api.serve import restrict_to_tls_13, tls_material
+
+    context = restrict_to_tls_13(ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER))
+    assert context.minimum_version == ssl.TLSVersion.TLSv1_3
+    try:
+        tls_material()
+    except SystemExit as error:
+        assert "не найден" in str(error)
+    else:
+        certificate, key = tls_material()
+        assert certificate
+        assert key
 
 
 def test_pki_bootstrap_in_transit_certificates(tmp_path, monkeypatch):
@@ -376,6 +425,7 @@ def test_pki_bootstrap_in_transit_certificates(tmp_path, monkeypatch):
     manifest = bootstrap_pki(data_dir=data_dir, export_dir=export_dir, passphrase="test-passphrase-2026")
 
     assert (export_dir / "ca.crt").exists()
+    assert (export_dir / "ca.crl").exists()
     assert (export_dir / "server.crt").exists()
     assert (export_dir / "server.key").exists()
     assert (export_dir / "client.crt").exists()

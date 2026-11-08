@@ -1,3 +1,1 @@
-"""
-FastAPI routers for Admin Server.
-"""
+"""Маршруты FastAPI сервера администратора."""

@@ -244,3 +244,42 @@ def test_process_deposits_maturity_refund_idempotent(monkeypatch):
 
     asyncio.run(_test())
 
+
+def test_failed_maturity_payout_does_not_compound_interest_again(monkeypatch):
+    """Не начисляет процент повторно, если выплата в банк уже запланирована и снова не прошла."""
+
+    async def _test():
+        dep = Deposit(
+            id="dep_retry",
+            client_id="cl_retry",
+            account_number="42301810000000000009",
+            balance=Decimal("70700.00"),
+            interest_rate=Decimal("12.00"),
+            term_months=3,
+            status="active",
+            next_payment_date=datetime(2026, 10, 1),
+            next_payment_amount=Decimal("700.00"),
+            opened_at=datetime(2026, 7, 1),
+            payout_key="eod-mature:dep_retry",
+            payout_amount="70700.00",
+        )
+        bank_session = AsyncMock()
+        bank_session.scalar = AsyncMock(return_value=None)
+        invest_session = AsyncMock()
+        invest_session.commit = AsyncMock()
+        mock_dep_res = MagicMock()
+        mock_dep_res.scalars().all.return_value = [dep]
+        invest_session.execute = AsyncMock(return_value=mock_dep_res)
+        monkeypatch.setattr(
+            "src.simulations.workers.invest_eod.tasks.get_bank_session_maker",
+            lambda: lambda: make_async_cm(bank_session),
+        )
+
+        await process_deposits(invest_session, date(2026, 10, 2))
+
+        assert dep.balance == Decimal("70700.00")
+        assert dep.status == "active"
+        assert dep.payout_amount == "70700.00"
+
+    asyncio.run(_test())
+

@@ -350,7 +350,7 @@ def extract_metadata_from_markdown(markdown_text: str) -> dict:
         return {}
 
     text = markdown_text.lstrip("\ufeff")
-    # Ищем блок между первым --- и закрывающим ---
+    # Ищет блок между первым и закрывающим разделителем ---.
     match = re.match(r"^---\s*\r?\n(.*?)\r?\n---\s*(?:\r?\n|$)", text, flags=re.DOTALL)
     if not match:
         return {}
@@ -411,7 +411,7 @@ def process_task(task: dict):
     )
 
     try:
-        # 1. Скачиваем файл из MinIO
+        # 1. Скачивает файл из MinIO
         markdown_text = None
         try:
             get_kwargs = {"bucket_name": bucket, "object_name": file_path}
@@ -465,13 +465,13 @@ def process_task(task: dict):
                     update_document_status(file_hash, agent, "error", err_msg)
                     return
 
-        # Получаем/создаем коллекцию для конкретного агента
+        # Получает/создаёт коллекцию для конкретного агента
         collection_name = f"knowledge-{agent}"
         client = get_chroma_client()
         collection = client.get_or_create_collection(name=collection_name)
 
         if action == "delete":
-            # Для action=delete ожидаем файл, где каждая строка - это short_name документа для удаления
+            # Для action=delete ожидает файл, где каждая строка - это short_name документа для удаления
             lines = markdown_text.split("\n")
             deleted_count = 0
             for line in lines:
@@ -603,7 +603,7 @@ def process_task(task: dict):
                         time.sleep(CHUNK_SLEEP_SECONDS)
             except Exception as e:
                 log_error("Векторизация", f"Ошибка векторизации для '{short_name}': {e}")
-                # Транзакционный откат: удаляем все добавленные частичные вектора данного документа
+                # Транзакционный откат: удаляет все добавленные частичные вектора данного документа
                 try:
                     collection.delete(where={"short_name": short_name})
                     log_warning(
@@ -653,7 +653,7 @@ def recover_abandoned_tasks():
     recovered = 0
     try:
         while True:
-            # Атомарно перемещаем хвост очереди обработки в голову основной очереди
+            # Атомарно перемещает хвост очереди обработки в голову основной очереди
             task_data = redis_client.rpoplpush(PROCESSING_QUEUE_NAME, QUEUE_NAME)
             if not task_data:
                 break
@@ -716,7 +716,7 @@ def main():
                         f"Unhandled worker error: {e}",
                     )
             finally:
-                # Удаляем задачу из очереди обработки только после завершения process_task
+                # Удаляет задачу из очереди только после завершения process_task.
                 try:
                     redis_client.lrem(PROCESSING_QUEUE_NAME, 1, message_json)
                 except Exception as e:

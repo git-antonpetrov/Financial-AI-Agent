@@ -94,6 +94,47 @@ def test_pki_bootstrap_full_lifecycle(pki_test_env):
     assert (export_dir / "minio" / "CAs" / "ca.crt").exists()
 
 
+def test_bootstrap_sets_mode_0600_on_private_keys(tmp_path, monkeypatch):
+    """Проверяет, что после copyfile каждый закрытый ключ получает режим 0600."""
+    import sys
+
+    bootstrap_module = sys.modules["src.pki.bootstrap_pki"]
+    recorded: list[tuple[str, int]] = []
+    original_chmod = bootstrap_module.os.chmod
+
+    def spy_chmod(path, mode):
+        recorded.append((os.fspath(path), mode))
+        return original_chmod(path, mode)
+
+    monkeypatch.setattr(bootstrap_module.os, "chmod", spy_chmod)
+    for env_name in (
+        "BANK_CERTS_DIR",
+        "ADMIN_CERTS_DIR",
+        "ADMIN_CLIENT_CERTS_DIR",
+        "CA_PUBLIC_DIR",
+        "POSTGRES_CERTS_DIR",
+        "REDIS_CERTS_DIR",
+        "MINIO_CERTS_DIR",
+        "ENCLAVE_CERTS_DIR",
+    ):
+        monkeypatch.delenv(env_name, raising=False)
+
+    export_dir = tmp_path / "certs_export"
+    bootstrap_pki(
+        data_dir=tmp_path / "ca_data",
+        export_dir=export_dir,
+        passphrase="StrictProductionPassphrase_2026_Test!",
+        force=True,
+    )
+
+    key_records = [(path, mode) for path, mode in recorded if path.endswith(".key")]
+    assert key_records
+    assert {mode for _, mode in key_records} == {0o600}
+    normalized = [path.replace("\\", "/") for path, _ in key_records]
+    assert any(path.endswith("minio/private.key") for path in normalized)
+    assert (export_dir / "minio" / "private.key").is_file()
+
+
 def test_pki_x509_extensions_and_key_usage(pki_test_env):
     """Проверяет корректность расширений X.509 v3: BasicConstraints, KeyUsage и ExtendedKeyUsage."""
     export_dir = pki_test_env["export_dir"]
@@ -239,3 +280,96 @@ def test_admin_certificate_with_public_name_is_reused(pki_test_env):
     first_serial = pki_test_env["manifest"]["services"]["admin-server"]["serial"]
     assert second["services"]["admin-server"]["status"] == "VALID"
     assert second["services"]["admin-server"]["serial"] == first_serial
+
+
+def test_replaced_client_certificate_is_rejected_by_crl(pki_test_env, monkeypatch):
+    """Проверяет, что заменённый клиентский сертификат попадает в CRL и больше не проходит проверку."""
+    export_dir = pki_test_env["export_dir"]
+    old_bytes = (export_dir / "admin_client.crt").read_bytes()
+    old_cert = x509.load_pem_x509_certificate(old_bytes)
+    (export_dir / "admin_client.key").unlink()
+    bootstrap_pki(
+        data_dir=pki_test_env["data_dir"],
+        export_dir=export_dir,
+        passphrase=pki_test_env["passphrase"],
+        force=False,
+    )
+
+    revocation_list = x509.load_pem_x509_crl((export_dir / "ca.crl").read_bytes())
+    assert revocation_list.get_revoked_certificate_by_serial_number(old_cert.serial_number) is not None
+    assert (export_dir / "admin_certs" / "ca.crl").is_file()
+    assert (export_dir / "bank_certs" / "ca.crl").is_file()
+
+    validator = X509ChainValidator(ca_cert_path=export_dir / "ca.crt", crl_path=export_dir / "ca.crl")
+    rejected, _message = validator.validate_certificate_chain(old_bytes)
+    assert rejected is False
+    accepted, message = validator.validate_certificate_chain(export_dir / "admin_client.crt")
+    assert accepted is True, message
+
+    monkeypatch.setenv("CRL_PATH", str(export_dir / "ca.crl"))
+    monkeypatch.setenv("ROOT_CA_CERT_PATH", str(export_dir / "ca.crt"))
+    monkeypatch.setenv("STRICT_SECURITY", "false")
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "url": "http://testserver/api/health",
+            "headers": [
+                (b"x-proxy-secret", os.environ["PROXY_INTERNAL_SECRET"].encode()),
+                (b"x-client-cert-verify", b"SUCCESS"),
+                (b"x-client-cert-subject", b"CN=superadmin-workstation"),
+                (b"x-client-cert-serial", str(old_cert.serial_number).encode("utf-8")),
+            ],
+        }
+    )
+    with pytest.raises(HTTPException) as revoked:
+        verify_mtls_client_identity(request)
+    assert revoked.value.status_code == 401
+
+
+def test_certificate_revoke_fails_closed_without_redis(monkeypatch):
+    """Не подтверждает отзыв сертификата, если строгий режим не записал его в Redis."""
+
+    class BrokenRedis:
+        def setex(self, *_args, **_kwargs):
+            raise ConnectionError("redis down")
+
+        def publish(self, *_args, **_kwargs):
+            return 1
+
+    monkeypatch.setenv("STRICT_SECURITY", "true")
+    monkeypatch.setattr("security.redis_blacklist", None)
+    with pytest.raises(HTTPException) as missing:
+        revoke_certificate_in_redis(serial="5150")
+    assert missing.value.status_code == 503
+
+    with pytest.raises(HTTPException) as broken:
+        revoke_certificate_in_redis(serial="5151", redis_conn=BrokenRedis())
+    assert broken.value.status_code == 503
+
+
+def test_assign_private_key_owner_sets_service_uid(tmp_path, monkeypatch):
+    """Отдаёт закрытые ключи выделенного тома пользователю целевого сервиса."""
+    from pathlib import Path
+
+    bootstrap_module = sys.modules["src.pki.bootstrap_pki"]
+
+    key_file = tmp_path / "bank.key"
+    cert_file = tmp_path / "bank.crt"
+    key_file.write_text("key", encoding="utf-8")
+    cert_file.write_text("cert", encoding="utf-8")
+    recorded: list[tuple[str, int, int]] = []
+    monkeypatch.setattr(bootstrap_module.os, "geteuid", lambda: 0, raising=False)
+    monkeypatch.setattr(
+        bootstrap_module.os,
+        "chown",
+        lambda path, uid, gid: recorded.append((Path(path).name, uid, gid)),
+        raising=False,
+    )
+
+    bootstrap_module.assign_private_key_owner(tmp_path, 10001, 10001)
+
+    assert recorded == [("bank.key", 10001, 10001)]
+    assert bootstrap_module.KEY_OWNER_BY_DIRECTORY["BANK_CERTS_DIR"] == (10001, 10001)
+    assert bootstrap_module.KEY_OWNER_BY_DIRECTORY["ADMIN_CERTS_DIR"] == (10001, 10001)
+    assert bootstrap_module.KEY_OWNER_BY_DIRECTORY["REDIS_CERTS_DIR"] == (999, 1000)

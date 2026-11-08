@@ -145,7 +145,7 @@ def find_cert_in_windows_store(
                 ("hCertStore", ctypes.c_void_p),
             ]
 
-        # Нормализация ожидаемого публичного ключа в DER байты
+        # Нормализация ожидаетого публичного ключа в DER байты
         exp_der: bytes | None = None
         if expected_public_key is not None:
             if isinstance(expected_public_key, (rsa.RSAPublicKey, ec.EllipticCurvePublicKey)):
@@ -388,8 +388,8 @@ def resolve_and_validate_client_certificate(
        Если найден, но подпись неверна — CertificateValidationError.
     5. Если передан expected_public_key, проверка совпадения с открытым ключом сертификата.
 
-    Returns:
-        Tuple[str, x509.Certificate]: PEM строка и объект распарсенного сертификата.
+    Возвращает:
+        PEM-строку и объект разобранного сертификата.
     """
     # 1. Поиск клиентского сертификата
     pem_data = ""

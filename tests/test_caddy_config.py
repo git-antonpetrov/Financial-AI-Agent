@@ -46,7 +46,8 @@ def test_caddyfile_internal_simulation_routing():
     content = load_caddyfile()
     assert "simulation-api.internal" in content
     assert "client_auth" in content, "Внутренний маршрут должен использовать client_auth"
-    assert "reverse_proxy simulation-api:8002" in content
+    assert "reverse_proxy https://simulation-api:8002" in content
+    assert content.count("header_up X-Client-Cert-Serial {tls_client_serial}") >= 3
 
 
 def test_caddyfile_security_headers():
@@ -106,5 +107,5 @@ def test_simulation_proxy_keeps_internal_agent_headers():
     assert "header_up -X-Agent-Cert" not in simulation
     assert "header_up -X-Enclave-Cert" not in simulation
     assert "header_up -X-Signature" not in simulation
-    assert "reverse_proxy simulation-api:8002" in simulation
+    assert "reverse_proxy https://simulation-api:8002" in simulation
 

@@ -23,7 +23,28 @@ from src.simulations.db.digital_ruble.db.models import Wallet
 from src.simulations.db.invest.db.models import Deposit, SavingsAccount
 
 
+def scalar_for(account, added):
+    """Возвращает счёт или уже добавленную заявку идемпотентности.
+
+    Аргументы:
+        account: Банковский счёт фикстуры.
+        added: Объекты, которые сессия запомнила через add.
+    """
+
+    async def bank_scalar(stmt):
+        sql = str(stmt)
+        if "bank_idempotency_claims" in sql:
+            for entity in added:
+                if getattr(entity, "key", None):
+                    return entity
+            return None
+        return account
+
+    return bank_scalar
+
+
 def make_async_cm(session):
+    """Открывает сессию как асинхронный контекст и заменяет пустой scalar."""
     if not hasattr(session, "add") or isinstance(session.add, AsyncMock):
         session.add = MagicMock()
     if hasattr(session, "scalar") and isinstance(session.scalar, AsyncMock):
@@ -49,12 +70,17 @@ def test_open_deposit_compensates_on_invest_db_failure(monkeypatch):
         added_bank_entities = []
 
         bank_session = AsyncMock()
+        balances_at_commit: list[Decimal] = []
+
         async def bank_scalar(stmt):
-            return bank_acc
+            return await scalar_for(bank_acc, added_bank_entities)(stmt)
+
+        async def bank_commit():
+            balances_at_commit.append(bank_acc.balance)
 
         bank_session.scalar = AsyncMock(side_effect=bank_scalar)
         bank_session.add = MagicMock(side_effect=lambda entity: added_bank_entities.append(entity))
-        bank_session.commit = AsyncMock()
+        bank_session.commit = bank_commit
 
         invest_session = AsyncMock()
         # Имитируем сбой коммита в базе инвестиций
@@ -76,8 +102,9 @@ def test_open_deposit_compensates_on_invest_db_failure(monkeypatch):
 
         assert exc_info.value.status_code == 500
         assert "Ошибка создания вклада" in str(exc_info.value.detail)
+        assert balances_at_commit[0] == Decimal("35000.00")
         assert bank_acc.balance == Decimal("50000.00")
-        assert added_bank_entities == []
+        assert added_bank_entities
 
     asyncio.run(_test())
 
@@ -91,9 +118,14 @@ def test_open_savings_compensates_on_invest_db_failure(monkeypatch):
         added_bank_entities = []
 
         bank_session = AsyncMock()
-        bank_session.scalar = AsyncMock(return_value=bank_acc)
+        balances_at_commit: list[Decimal] = []
+
+        async def bank_commit():
+            balances_at_commit.append(bank_acc.balance)
+
+        bank_session.scalar = AsyncMock(side_effect=scalar_for(bank_acc, added_bank_entities))
         bank_session.add = MagicMock(side_effect=lambda entity: added_bank_entities.append(entity))
-        bank_session.commit = AsyncMock()
+        bank_session.commit = bank_commit
 
         invest_session = AsyncMock()
         invest_session.commit = AsyncMock(side_effect=RuntimeError("Integrity error in savings_db"))
@@ -113,8 +145,9 @@ def test_open_savings_compensates_on_invest_db_failure(monkeypatch):
 
         assert exc_info.value.status_code == 500
         assert "Ошибка создания накопительного счета" in str(exc_info.value.detail)
+        assert balances_at_commit[0] == Decimal("20000.00")
         assert bank_acc.balance == Decimal("30000.00")
-        assert added_bank_entities == []
+        assert added_bank_entities
 
     asyncio.run(_test())
 
@@ -128,9 +161,14 @@ def test_open_broker_account_compensates_on_invest_db_failure(monkeypatch):
         added_bank_entities = []
 
         bank_session = AsyncMock()
-        bank_session.scalar = AsyncMock(return_value=bank_acc)
+        balances_at_commit: list[Decimal] = []
+
+        async def bank_commit():
+            balances_at_commit.append(bank_acc.balance)
+
+        bank_session.scalar = AsyncMock(side_effect=scalar_for(bank_acc, added_bank_entities))
         bank_session.add = MagicMock(side_effect=lambda entity: added_bank_entities.append(entity))
-        bank_session.commit = AsyncMock()
+        bank_session.commit = bank_commit
 
         invest_session = AsyncMock()
         invest_session.commit = AsyncMock(side_effect=RuntimeError("Deadlock in broker creation"))
@@ -150,8 +188,9 @@ def test_open_broker_account_compensates_on_invest_db_failure(monkeypatch):
 
         assert exc_info.value.status_code == 500
         assert "Ошибка создания брокерского счета" in str(exc_info.value.detail)
+        assert balances_at_commit[0] == Decimal("15000.00")
         assert bank_acc.balance == Decimal("20000.00")
-        assert added_bank_entities == []
+        assert added_bank_entities
 
     asyncio.run(_test())
 
@@ -238,7 +277,7 @@ def test_fund_wallet_compensates_on_ruble_failure(monkeypatch):
         added_txs = []
 
         bank_session = AsyncMock()
-        bank_session.scalar = AsyncMock(return_value=bank_acc)
+        bank_session.scalar = AsyncMock(side_effect=scalar_for(bank_acc, added_txs))
         bank_session.add = MagicMock(side_effect=lambda entity: added_txs.append(entity))
         bank_session.commit = AsyncMock()
 
@@ -351,7 +390,7 @@ def test_fund_compensation_removes_only_the_new_credit(monkeypatch):
 
 
 def test_withdraw_compensation_removes_only_the_bank_credit(monkeypatch):
-    """Сбой списания кошелька снимает зачисление с банка и не увеличивает кошелёк."""
+    """Сбой зачисления банка возвращает списание на кошелёк и не увеличивает банк."""
 
     async def _test():
         wallet = Wallet(id="w_wd", balance=Decimal("400.00"), client_id="c_1", status="active")
@@ -362,18 +401,24 @@ def test_withdraw_compensation_removes_only_the_bank_credit(monkeypatch):
             currency="RUB",
             status="active",
         )
-        calls = {"n": 0}
+        added_rows: list[object] = []
 
-        async def ruble_scalar(_stmt):
-            calls["n"] += 1
-            if calls["n"] >= 3:
-                raise RuntimeError("списание кошелька не записано")
+        async def ruble_scalar(stmt):
+            sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+            for row in added_rows:
+                key = getattr(row, "idempotency_key", None)
+                if key and str(key) in sql:
+                    return row
             return wallet
 
+        async def ruble_delete(row):
+            if row in added_rows:
+                added_rows.remove(row)
+
         ruble_session = AsyncMock()
-        ruble_session.scalar = AsyncMock(side_effect=ruble_scalar)
-        ruble_session.add = MagicMock()
-        ruble_session.delete = AsyncMock()
+        ruble_session.scalar = ruble_scalar
+        ruble_session.add = added_rows.append
+        ruble_session.delete = ruble_delete
         ruble_session.commit = AsyncMock()
         bank_session = AsyncMock()
         bank_session.scalar = AsyncMock(return_value=bank_acc)
@@ -382,11 +427,16 @@ def test_withdraw_compensation_removes_only_the_bank_credit(monkeypatch):
         bank_session.commit = AsyncMock()
         monkeypatch.setattr("src.simulations.api.routers.ruble.ruble_db", lambda: _context(ruble_session))
         monkeypatch.setattr("src.simulations.api.routers.ruble.bank_db", lambda: _context(bank_session))
+
+        async def credit_fails(*_args, **_kwargs):
+            raise HTTPException(503, "зачисление банка не записано")
+
+        monkeypatch.setattr("src.simulations.api.routers.ruble._credit_bank_for_ruble", credit_fails)
         req = FundWithdrawRequest(bank_account_id="b_wd", amount=Decimal("25.00"), idempotency_key="withdraw-reverse")
         with pytest.raises(HTTPException) as exc_info:
             await withdraw_wallet("w_wd", req)
 
-        assert exc_info.value.status_code == 500
+        assert exc_info.value.status_code == 503
         assert wallet.balance == Decimal("400.00")
         assert bank_acc.balance == Decimal("50.00")
 
@@ -394,7 +444,7 @@ def test_withdraw_compensation_removes_only_the_bank_credit(monkeypatch):
 
 
 def test_open_savings_and_broker_do_not_credit_bank_when_debit_fails(monkeypatch):
-    """Сбой списания удаляет копилку и брокерский счёт и не прибавляет деньги банку."""
+    """Сбой списания не создаёт активную копилку или брокерский счёт и не прибавляет деньги банку."""
 
     async def _test():
         bank_acc = Account(
@@ -405,15 +455,15 @@ def test_open_savings_and_broker_do_not_credit_bank_when_debit_fails(monkeypatch
             status="active",
         )
         bank_added: list[object] = []
-        removed: list[str] = []
+        created: list[object] = []
 
         invest_session = AsyncMock()
         invest_session.scalar = AsyncMock(return_value=None)
-        invest_session.add = MagicMock()
+        invest_session.add = MagicMock(side_effect=created.append)
         invest_session.commit = AsyncMock()
         invest_session.refresh = AsyncMock()
         bank_session = AsyncMock()
-        bank_session.scalar = AsyncMock(return_value=bank_acc)
+        bank_session.scalar = AsyncMock(side_effect=scalar_for(bank_acc, bank_added))
         bank_session.add = MagicMock(side_effect=bank_added.append)
         bank_session.commit = AsyncMock()
         monkeypatch.setattr("src.simulations.api.routers.invest.invest_db", lambda: _context(invest_session))
@@ -422,11 +472,7 @@ def test_open_savings_and_broker_do_not_credit_bank_when_debit_fails(monkeypatch
         async def debit_fails(*_args, **_kwargs):
             raise HTTPException(503, "списание не записано")
 
-        async def remove_row(_model, row_id):
-            removed.append(str(row_id))
-
         monkeypatch.setattr("src.simulations.api.routers.invest.debit_bank_once", debit_fails)
-        monkeypatch.setattr("src.simulations.api.routers.invest._remove_invest_row", remove_row)
         savings_req = OpenProductRequest(
             client_id="c_1",
             from_bank_account_id="b_open",
@@ -446,6 +492,6 @@ def test_open_savings_and_broker_do_not_credit_bank_when_debit_fails(monkeypatch
 
         assert bank_acc.balance == Decimal("1000.00")
         assert bank_added == []
-        assert len(removed) == 2
+        assert created == []
 
     asyncio.run(_test())

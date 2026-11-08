@@ -92,7 +92,7 @@ async def seed_data():
             wallets.append(wallet)
             session.add(wallet)
 
-        await session.flush()  # Получаем ID кошельков
+        await session.flush()  # Получает ID кошельков
 
         log_info("Digital Ruble DB", "Создаем историю транзакций...")
         for _ in range(15):
@@ -131,7 +131,7 @@ def execute(ctx):
             receiver = random.choice([w for w in wallets if w.id != creator.id])
             amount = Decimal(str(round(random.uniform(10000, 50000), 2)))
 
-            # Обеспечиваем, чтобы у создателя было достаточно денег для заморозки
+            # Обеспечивает, чтобы у создателя было достаточно денег для заморозки
             creator.balance = Decimal(str(creator.balance)) + amount
             creator.frozen_balance = Decimal(str(creator.frozen_balance)) + amount
 

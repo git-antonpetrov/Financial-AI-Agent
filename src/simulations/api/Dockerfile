@@ -9,7 +9,7 @@ RUN groupadd -g 10001 appgroup && \
 COPY src/simulations/api/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Копируем общие модули и исходный код проекта
+# Копирует общие модули и исходный код проекта
 COPY --chown=appuser:appgroup src/common /app/src/common
 COPY --chown=appuser:appgroup src/simulations /app/src/simulations
 
@@ -17,4 +17,4 @@ ENV PYTHONPATH=/app
 
 USER appuser
 
-CMD ["uvicorn", "src.simulations.api.main:app", "--host", "0.0.0.0", "--port", "8002"]
+CMD ["python", "-m", "src.simulations.api.serve"]

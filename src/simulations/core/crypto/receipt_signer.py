@@ -252,7 +252,13 @@ def get_receipt_signer() -> ReceiptSigner:
 
 
 def reset_receipt_signer_for_tests() -> None:
-    """Сбрасывает синглтон подписанта чеков для изолированного тестирования."""
+    """Сбрасывает синглтон подписанта чеков только при явном тестовом флаге.
+
+    Вызывает:
+        RuntimeError: Вызов сделан без FINANCIAL_AI_ALLOW_TEST_BRIDGES.
+    """
     global _RECEIPT_SIGNER_INSTANCE
+    if os.getenv("FINANCIAL_AI_ALLOW_TEST_BRIDGES", "").lower() not in ("1", "true", "yes"):
+        raise RuntimeError("Сброс подписанта чеков запрещён без FINANCIAL_AI_ALLOW_TEST_BRIDGES")
     _RECEIPT_SIGNER_INSTANCE = None
     ReceiptSigner._active_ca = None

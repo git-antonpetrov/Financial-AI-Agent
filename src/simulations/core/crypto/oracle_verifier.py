@@ -230,6 +230,12 @@ def get_oracle_verifier() -> OracleVerifier:
 
 
 def reset_oracle_verifier_for_tests() -> None:
-    """Сбрасывает синглтон верификатора оракула для изоляции тестов."""
+    """Сбрасывает синглтон верификатора оракула только при явном тестовом флаге.
+
+    Вызывает:
+        RuntimeError: Вызов сделан без FINANCIAL_AI_ALLOW_TEST_BRIDGES.
+    """
     global _ORACLE_VERIFIER_INSTANCE
+    if os.getenv("FINANCIAL_AI_ALLOW_TEST_BRIDGES", "").lower() not in ("1", "true", "yes"):
+        raise RuntimeError("Сброс верификатора оракула запрещён без FINANCIAL_AI_ALLOW_TEST_BRIDGES")
     _ORACLE_VERIFIER_INSTANCE = None

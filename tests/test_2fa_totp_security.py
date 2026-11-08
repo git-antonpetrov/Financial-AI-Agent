@@ -298,7 +298,7 @@ def test_2fa_status_and_setup_endpoints(monkeypatch):
     res_setup_unauth = client.post("/api/auth/2fa/setup")
     assert res_setup_unauth.status_code == 401
 
-    admin_token = create_access_token({"sub": "admin"})
+    admin_token = create_access_token({"sub": "admin"}, role="superadmin")
     res_setup_auth = client.post(
         "/api/auth/2fa/setup",
         headers={"Authorization": f"Bearer {admin_token}"}
@@ -326,7 +326,7 @@ def test_2fa_verify_test_endpoint():
     """Проверяет эндпоинт проверки кода при начальной привязке аутентификатора."""
     from server import app
     client = TestClient(app)
-    admin_token = create_access_token({"sub": "admin"})
+    admin_token = create_access_token({"sub": "admin"}, role="superadmin")
 
     secret = pyotp.random_base32()
     totp = pyotp.TOTP(secret)

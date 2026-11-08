@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from src.common.db.asyncpg_ssl import build_asyncpg_ssl, database_url_without_ssl_query
 from src.simulations.core.utils.console_logger import log_error, log_info, log_warning
 
-# Импортируем Base, чтобы при init_db все модели были привязаны к нему
+# Импортирует Base, чтобы при init_db все модели были привязаны к нему
 from src.simulations.db.digital_ruble.db.database import Base
 
 

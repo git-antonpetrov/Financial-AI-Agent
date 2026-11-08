@@ -32,7 +32,7 @@ from setup_vds_security_env import setup_vds  # noqa: E402
 
 def find_docker_compose_cmd() -> list[str]:
     """Определяет команду для вызова Docker Compose."""
-    # Проверяем плагин v2: docker compose version
+    # Проверяет плагин v2: docker compose version
     if shutil.which("docker"):
         try:
             res = subprocess.run(["docker", "compose", "version"], capture_output=True, text=True)
@@ -41,7 +41,7 @@ def find_docker_compose_cmd() -> list[str]:
         except Exception:
             pass
 
-    # Проверяем standalone docker-compose v1
+    # Проверяет standalone docker-compose v1
     if shutil.which("docker-compose"):
         return ["docker-compose"]
 
@@ -90,18 +90,56 @@ def block_source(path: str) -> str:
     return ""
 
 
-def assert_docker_root_on_open_luks(docker_bin: str = "docker") -> None:
-    """Останавливает запуск, если каталог Docker не лежит на открытом томе LUKS.
+def evaluate_luks_status(status_text: str) -> tuple[bool, str]:
+    """Проверяет, что вывод cryptsetup status описывает LUKS aes-xts от 512 бит.
 
-    Повторяет проверку scripts/deploy_vds_prod.sh: корень берётся из docker info,
-    источник блока — из findmnt или df, а cryptsetup status подтверждает, что
-    mapper открыт. Функция не монтирует каталоги и не накрывает живые тома.
+    Имя mapper в тексте не сравнивается с константой: важен открытый LUKS и шифр.
+
+    Аргументы:
+        status_text: Стандартный вывод ``cryptsetup status``.
+
+    Возвращает:
+        Пара из признака соответствия и причины отказа. При успехе причина пустая.
+    """
+    cipher = ""
+    device_type = ""
+    key_bits = 0
+    for raw_line in status_text.splitlines():
+        line = raw_line.strip().lower()
+        if ":" not in line:
+            continue
+        label, raw_value = line.split(":", 1)
+        value = raw_value.strip()
+        if label == "type":
+            device_type = value
+        elif label == "cipher":
+            cipher = value
+        elif label == "keysize":
+            digits = "".join(character for character in value if character.isdigit())
+            key_bits = int(digits) if digits else 0
+    if "luks" not in device_type:
+        return False, f"устройство не является LUKS (type={device_type or 'unknown'})"
+    if not cipher.startswith("aes-xts") or key_bits < 512:
+        return False, (
+            "шифр должен быть aes-xts с ключом не меньше 512 бит "
+            f"(cipher={cipher or 'unknown'}, keysize={key_bits})"
+        )
+    return True, ""
+
+
+def assert_docker_root_on_open_luks(docker_bin: str = "docker") -> None:
+    """Останавливает запуск, если каталог Docker не лежит на открытом LUKS aes-xts.
+
+    Корень берётся из docker info, источник блока — из findmnt или df.
+    cryptsetup status подтверждает, что mapper открыт, тип — LUKS, шифр — aes-xts,
+    а ключ не короче 512 бит. Имя mapper не зафиксировано. Функция не монтирует
+    каталоги и не накрывает живые тома.
 
     Аргументы:
         docker_bin: Имя исполняемого файла Docker.
 
     Вызывает:
-        SystemExit: Каталог не найден или устройство не является открытым LUKS.
+        SystemExit: Каталог не найден, устройство не LUKS или шифр слабее политики.
     """
     code, output = command_output([docker_bin, "info", "-f", "{{.DockerRootDir}}"])
     docker_root = output.strip() if code == 0 else ""
@@ -114,15 +152,23 @@ def assert_docker_root_on_open_luks(docker_bin: str = "docker") -> None:
     source = block_source(docker_root)
     mapper_prefix = "/dev/mapper/"
     luks_name = source[len(mapper_prefix):] if source.startswith(mapper_prefix) else ""
-    crypt_ok = False
-    if luks_name:
-        status_code, _status_text = command_output(["cryptsetup", "status", luks_name])
-        crypt_ok = status_code == 0
-    if not source.startswith(mapper_prefix) or not crypt_ok:
+    if not source.startswith(mapper_prefix) or not luks_name:
         print(
             f"[-] Тома Docker ({docker_root} на {source}) не находятся на расшифрованном LUKS. "
             "Запуск остановлен."
         )
+        sys.exit(1)
+
+    status_code, status_text = command_output(["cryptsetup", "status", luks_name])
+    if status_code != 0 or not status_text.strip():
+        print(
+            f"[-] Тома Docker ({docker_root} на {source}) не находятся на расшифрованном LUKS. "
+            "Запуск остановлен."
+        )
+        sys.exit(1)
+    accepted, reason = evaluate_luks_status(status_text)
+    if not accepted:
+        print(f"[-] LUKS {source} отклонён: {reason}. Запуск остановлен.")
         sys.exit(1)
     print(f"      Каталог Docker находится на LUKS-устройстве {source}.")
 

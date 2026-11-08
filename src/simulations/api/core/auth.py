@@ -185,7 +185,7 @@ def verify_agent_token(token: str, allowed_env_vars: list[str], domain_name: str
         if secrets.compare_digest(token, expected):
             return token
 
-    # Проверка: если токен валиден для другого домена симуляций, возвращаем 403 Forbidden
+    # Проверка: если токен валиден для другого домена симуляций, возвращает 403 Forbidden
     other_env_vars = [
         "AGENT_BANK_BOOTSTRAP_TOKEN",
         "AGENT_INVEST_BOOTSTRAP_TOKEN",
@@ -388,10 +388,15 @@ async def check_enclave_or_token_auth(
             redis_cli = getattr(verifier.nonce_store, "redis_client", None)
             if redis_cli is not None:
                 try:
+                    cn_lookup = cn_str.strip().lower() if cn_str else ""
+                    agent_revoked = bool(cn_lookup) and (
+                        redis_cli.exists(f"revoked:agent:{cn_lookup}")
+                        or redis_cli.exists(f"revoked:agent_key:{cn_lookup}")
+                    )
                     if (
                         redis_cli.exists(f"revoked:cert:serial:{serial_str}")
                         or redis_cli.exists(f"revoked:cert:fp:{fp_str}")
-                        or (cn_str and redis_cli.exists(f"revoked:agent:{cn_str}"))
+                        or agent_revoked
                     ):
                         log_warning(
                             "Simulation Auth",
@@ -477,7 +482,7 @@ async def check_enclave_or_token_auth(
                 detail="Для аутентификации Анклава требуются все заголовки: X-Enclave-Signature, X-Nonce, X-Timestamp",
             )
 
-        # Читаем тело запроса
+        # Читает тело запроса
         body = await request.body()
         verifier = get_enclave_verifier()
 
@@ -500,11 +505,11 @@ async def check_enclave_or_token_auth(
             )
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=reason)
 
-        # Запоминаем проверенный nonce в состоянии запроса для включения в Signed Receipt
+        # Запоминает проверенный nonce в состоянии запроса для включения в Signed Receipt
         request.state.enclave_nonce = nonce
         request.state.authenticated_entity = "enclave"
 
-        # Если вместе с подписью Анклава передан токен конкретного агента, проводим его доменную валидацию
+        # Если вместе с подписью Анклава передан токен конкретного агента, проводит его доменную валидацию
         optional_token = extract_token_from_headers(
             x_bootstrap_token=request.headers.get("X-Bootstrap-Token"),
             authorization=request.headers.get("Authorization"),

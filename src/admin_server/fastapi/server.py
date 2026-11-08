@@ -42,6 +42,7 @@ from security import (
     record_admin_nonce_if_new,
     require_permission,
     revoke_agent_key_in_redis,
+    revoke_certificate_in_redis,
     run_revocation_listener,
     set_pending_totp_secret,
     settings,
@@ -209,7 +210,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Financial MAS - Admin Server", version="1.0.0", lifespan=lifespan)
 
-# Ограничиваем CORS только необходимыми origin, так как работаем из WebView
+# Ограничивает CORS списком origin, потому что клиент работает из WebView.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -219,7 +220,7 @@ app.add_middleware(
         "https://tauri.localhost",
         "http://tauri.localhost",
         "asset://localhost",
-        "https://admin.fin-ai-agent.ru",  # Разрешаем CORS для production домена
+        "https://admin.fin-ai-agent.ru",  # Разрешает CORS для production домена
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
@@ -617,14 +618,14 @@ async def login(
                 details="2FA successfully onboarded and persisted to encrypted storage",
             )
 
-        # Отмечаем завершение привязки 2FA в Redis
+        # Отмечает завершение привязки 2FA в Redis
         if redis_client:
             try:
                 redis_client.set(f"auth:totp_enrolled:{form_data.username}", "1")
             except Exception:
                 pass
 
-    # Сбрасываем счетчик неудачных попыток при успешной авторизации
+    # Сбрасывает счетчик неудачных попыток при успешной авторизации
     try:
         redis_client.delete(failed_key)
     except Exception:
@@ -865,7 +866,7 @@ async def pair_2fa(
             ),
         )
 
-    # Сбрасываем счетчик неудачных попыток при успешной проверке пароля
+    # Сбрасывает счетчик неудачных попыток при успешной проверке пароля
     if redis_client:
         try:
             redis_client.delete(failed_key)
@@ -873,9 +874,9 @@ async def pair_2fa(
             pass
 
     # 1. Если это супер-администратор и ADMIN_TOTP_SECRET уже настроен:
-    #    - Отдаем настроенный постоянный секрет супер-администратора.
+    #    - Отдаёт настроенный постоянный секрет супер-администратора.
     # 2. Для оператора, аудитора или при первом онбординге:
-    #    - Генерируем новый персональный 160-битный секрет и сохраняем его в pending до подтверждения кодом.
+    #    - Генерирует новый персональный 160-битный секрет и сохраняет его в pending до подтверждения кодом.
     if settings.ADMIN_TOTP_SECRET and payload.username.lower() == "admin":
         secret = settings.ADMIN_TOTP_SECRET
     else:
@@ -1006,9 +1007,7 @@ async def logout(
     current_admin: str = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Отзыв токенов. Добавляет jti и токен доступа (а также refresh_token при наличии) в Redis Blacklist.
-    """
+    """Отзывает токены и добавляет jti и токен доступа в чёрный список Redis."""
     from security import redis_blacklist
 
     if redis_blacklist is None:
@@ -1275,7 +1274,7 @@ async def admin_revoke_agent_key(
     db: AsyncSession = Depends(get_db),
     current_admin: CurrentUser = Depends(require_permission(Permission.KEYS_REVOKE)),
 ):
-    """Отзыв скомпрометированного ключа агента администратором с мгновенной инвалидацией в Redis."""
+    """Отзывает скомпрометированный ключ агента и записывает отзыв в Redis."""
     try:
         revoked_keys = await crud.revoke_agent_key(db, agent_name, req.kid, req.reason)
     except ValueError as e:
@@ -1306,6 +1305,48 @@ async def admin_revoke_agent_key(
         agent_name=agent_name,
         key_id=req.kid,
     )
+
+
+@app.post("/api/certificates/revoke")
+async def admin_revoke_certificate(
+    req: schemas.CertificateRevokeRequest,
+    db: AsyncSession = Depends(get_db),
+    current_admin: CurrentUser = Depends(require_permission(Permission.SECURITY_MANAGE)),
+):
+    """Записывает мгновенный отзыв серийного номера в Redis.
+
+    Повторный запуск PKI с тем же номером в ``REVOKE_SERIALS`` подписывает этот номер
+    в ``ca.crl``. До этой публикации шлюз администратора уже отклоняет сертификат по Redis.
+
+    Аргументы:
+        req: Серийный номер, отпечаток и причина.
+        db: Сессия журнала аудита.
+        current_admin: Администратор с правом управления безопасностью.
+
+    Возвращает:
+        Статус записи отзыва.
+
+    Вызывает:
+        HTTPException: Redis не подтвердил запись.
+
+    Побочные эффекты:
+        Пишет ключи ``revoked:cert`` и событие аудита ``CERT_REVOKED``.
+    """
+    revoke_certificate_in_redis(
+        serial=req.serial,
+        fingerprint=req.fingerprint,
+        reason=req.reason,
+        redis_conn=redis_client,
+    )
+    await audit.log_audit_event(
+        db,
+        actor=current_admin,
+        action="CERT_REVOKED",
+        status="WARNING",
+        resource=f"certificate:{req.serial}",
+        details={"fingerprint": req.fingerprint, "reason": req.reason},
+    )
+    return {"status": "success", "serial": req.serial}
 
 
 @app.post("/api/agents/{agent_name}/suspend", response_model=schemas.AgentActionResponse)
@@ -1347,7 +1388,6 @@ async def admin_reactivate_agent(
         await crud.reactivate_agent(db, agent_name)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    # Снимаем блокировку в локальной памяти и Redis при реактивации
     unrevoke_agent_key_in_redis(agent_name, redis_conn=redis_client)
     log_success("Admin Agent Key", f"Admin {current_admin} reactivated agent {agent_name}")
     await audit.log_audit_event(
@@ -1367,10 +1407,10 @@ async def admin_reactivate_agent(
 @app.post("/api/agent_requests", response_model=schemas.AgentRequestResponse)
 @app.post("/api/agent-requests", response_model=schemas.AgentRequestResponse)
 async def create_agent_request(req: schemas.AgentRequestJWT, db: AsyncSession = Depends(get_db)):
-    """
-    Создание заявки на документ от агента.
-    Проверяет валидность агента, статус отзыва/блокировки в Redis и БД,
-    соответствие kid и криптографическую подпись RS256.
+    """Создаёт заявку на документ от агента.
+
+    Проверяет агента, отзыв и блокировку в Redis и в базе, соответствие kid
+    и подпись RS256.
     """
     try:
         unverified_headers = jwt.get_unverified_header(req.token)
@@ -1469,7 +1509,7 @@ async def create_agent_request(req: schemas.AgentRequestJWT, db: AsyncSession = 
             detail=f"Replay attack detected: request token identifier '{jti or token_fp}' has already been processed",
         )
 
-    # 6. Извлекаем все поля заявки строго из верифицированного payload
+    # 6. Извлекает все поля заявки строго из верифицированного payload
     verified_agent_name = verified_payload.get("agent_name")
     if verified_agent_name != agent_name:
         log_warning(
@@ -1512,10 +1552,10 @@ def extract_json_from_llm(result_text: str | None) -> dict | list:
     if not result_text or not result_text.strip():
         raise ValueError("Пустой ответ от LLM")
 
-    # 1. Удаляем теги <think>...</think>, если они присутствуют
+    # 1. Удаляет теги <think>...</think>, если они присутствуют
     cleaned = re.sub(r"<think>.*?</think>", "", result_text, flags=re.DOTALL).strip()
 
-    # 2. Проверяем наличие markdown fenced block: ```json ... ``` или ``` ... ```
+    # 2. Проверяет наличие markdown fenced block: ```json ... ``` или ``` ... ```
     fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned, re.IGNORECASE)
     if fence_match:
         content_candidate = fence_match.group(1).strip()
@@ -1545,7 +1585,7 @@ def extract_json_from_llm(result_text: str | None) -> dict | list:
             except json.JSONDecodeError:
                 pass
 
-    # 4. В качестве fallback пробуем распарсить очищенную строку напрямую
+    # 4. В качестве fallback пытается распарсить очищенную строку напрямую
     return json.loads(cleaned)
 
 

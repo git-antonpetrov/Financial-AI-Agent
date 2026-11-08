@@ -105,6 +105,7 @@ class AutoPayment(Base):
     schedule = Column(String, nullable=False)  # Периодичность: 'monthly', 'weekly'
     next_payment_date = Column(Date, nullable=False, index=True)
     is_active = Column(Boolean, default=True, index=True)
+    idempotency_key = Column(String, nullable=True, unique=True, index=True)
 
     account = relationship("Account", back_populates="auto_payments")
 
@@ -121,7 +122,7 @@ class BankIdempotencyClaim(Base):
     key = Column(String, primary_key=True)
     operation_type = Column(String, nullable=False)
     account_id = Column(String, nullable=False)
-    amount = Column(String, nullable=False)
+    amount = Column(EncryptedDecimal, nullable=False)
     direction = Column(String, nullable=False)
 
 

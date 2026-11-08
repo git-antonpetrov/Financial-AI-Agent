@@ -87,7 +87,10 @@ simulation-api.internal, bank-service.internal {
 
         # Снимает заголовки, которые выставляет сам Caddy.
         # X-Agent-Cert, X-Enclave-Cert, X-Cert и X-Signature клиента внутреннего имени сохраняет.
-        reverse_proxy simulation-api:8002 {
+        # Шифрует последний переход сертификатом банка: SAN содержит simulation-api,
+        # а доверие берётся из корневого сертификата платформы.
+        # Передаёт серийный номер клиентского сертификата, чтобы шлюз сверил его со списком отзыва.
+        reverse_proxy https://simulation-api:8002 {
             header_up -X-Client-Cert-*
             header_up -X-Client-Cert-Verify
             header_up -X-Client-Cert-Subject
@@ -99,8 +102,18 @@ simulation-api.internal, bank-service.internal {
             header_up X-Forwarded-For {remote_host}
             header_up X-Forwarded-Proto https
             header_up X-Proxy-Secret "{$PROXY_INTERNAL_SECRET}"
+            header_up X-Client-Cert-Verify {tls_client_verified}
+            header_up X-Client-Cert-Subject {tls_client_subject}
+            header_up X-Client-Cert-Issuer {tls_client_issuer}
+            header_up X-Client-Cert-Serial {tls_client_serial}
+            header_up X-Client-Cert-Fingerprint {tls_client_fingerprint}
 
             transport http {
+                tls
+                tls_server_name simulation-api
+                tls_trust_pool file {
+                    pem_file /etc/caddy/certs/ca.crt
+                }
                 response_header_timeout 60s
                 read_timeout 60s
                 write_timeout 60s

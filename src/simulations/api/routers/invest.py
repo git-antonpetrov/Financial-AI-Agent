@@ -9,11 +9,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.future import select
 
-from src.simulations.api.bank_claims import (
+from src.simulations.core.bank_claims import (
     begin_bank_movement,
     canonical_amount,
+    movement_state,
     release_bank_claim,
     remember_bank_movement,
+    same_amount,
 )
 from src.simulations.api.core.auth import verify_invest_token
 from src.simulations.api.schemas.responses import (
@@ -28,7 +30,7 @@ from src.simulations.core.utils.console_logger import log_error, log_info, log_s
 from src.simulations.db.bank.db.client import (
     get_async_session_maker as get_bank_session,
 )
-from src.simulations.db.bank.db.models import Account, Transaction
+from src.simulations.db.bank.db.models import Account, BankIdempotencyClaim, Transaction
 from src.simulations.db.invest.db.client import (
     get_async_session_maker as get_invest_session,
 )
@@ -106,6 +108,60 @@ def signed_response(
     if not isinstance(parsed, dict) or not isinstance(parsed.get("signed_receipt"), dict):
         raise ValueError("Сохранённый ответ не содержит подписанный чек")
     return parsed
+
+
+def _receipt_data(stored: dict) -> dict:
+    """Возвращает поля операции из сохранённого чека продукта.
+
+    Аргументы:
+        stored: Ответ, в котором лежит signed_receipt.
+
+    Возвращает:
+        Словарь полей чека либо пустой словарь.
+    """
+    receipt = stored.get("signed_receipt")
+    if not isinstance(receipt, dict):
+        return {}
+    nested = receipt.get("receipt")
+    if isinstance(nested, dict) and isinstance(nested.get("data"), dict):
+        return nested["data"]
+    data = receipt.get("data")
+    return data if isinstance(data, dict) else {}
+
+
+def _open_receipt_matches(stored: dict, req: "OpenProductRequest") -> bool:
+    """Проверяет, что сохранённый ответ открытия описывает тот же запрос.
+
+    Аргументы:
+        stored: Сохранённый JSON ответа.
+        req: Текущий запрос открытия копилки или брокерского счёта.
+
+    Возвращает:
+        True, если клиент, сумма и счёт списания совпадают.
+    """
+    data = _receipt_data(stored)
+    if str(data.get("client_id", "")) != str(req.client_id):
+        return False
+    if not same_amount(data.get("amount"), req.initial_amount):
+        return False
+    from_account = data.get("from_bank_account_id")
+    if from_account is not None and str(from_account) != str(req.from_bank_account_id):
+        return False
+    return True
+
+
+def _close_receipt_matches(stored: dict, to_bank_account_id: str) -> bool:
+    """Проверяет, что сохранённое закрытие вело на тот же счёт.
+
+    Аргументы:
+        stored: Сохранённый JSON закрытия.
+        to_bank_account_id: Счёт зачисления текущего запроса.
+
+    Возвращает:
+        True, если счёт зачисления совпадает.
+    """
+    data = _receipt_data(stored)
+    return str(data.get("to_bank_account_id", "")) == str(to_bank_account_id)
 
 
 def apply_receipt_headers(response: Response | None, receipt: dict) -> None:
@@ -234,30 +290,211 @@ async def debit_bank_once(
         await bdb.commit()
 
 
-async def _remove_invest_row(model_cls: type, row_id: str | None) -> None:
-    """Удаляет актив, если списание банка после его создания не состоялось.
+class _FundedOpen:
+    """Результат списания источника перед появлением активного продукта.
 
-    Баланс банка не увеличивает: списание либо не записано, либо его откатывает сессия банка.
+    Атрибуты:
+        row_id: Идентификатор уже существующей строки. Пустое значение означает, что строку нужно создать.
+        ready_row: Уже оплаченный активный продукт. Пустое значение означает, что актив ещё нужно записать.
+    """
+
+    def __init__(self, row_id: str | None, ready_row: object | None) -> None:
+        self.row_id = row_id
+        self.ready_row = ready_row
+
+
+def _quiesce_unfunded(row: object) -> None:
+    """Переводит продукт в неоплаченное состояние, в котором его нельзя тратить.
+
+    Аргументы:
+        row: Вклад, копилка или брокерский счёт.
+
+    Побочные эффекты:
+        Ставит статус ``unfunded``, обнуляет баланс и ближайшую выплату, если колонка есть.
+    """
+    row.status = "unfunded"
+    row.balance = Decimal("0.00")
+    if "next_payment_amount" in row.__table__.columns:
+        row.next_payment_amount = Decimal("0.00")
+
+
+async def _bank_movement_state(
+    key: str,
+    operation_type: str,
+    account_id: str,
+    amount: Decimal,
+    direction: str,
+) -> str:
+    """Читает состояние банковского движения, не меняя баланс.
+
+    Аргументы:
+        key: Ключ идемпотентности.
+        operation_type: Тип операции.
+        account_id: Счёт движения.
+        amount: Сумма.
+        direction: ``expense`` или ``income``.
+
+    Возвращает:
+        ``posted``, ``absent`` или ``unknown``.
+
+    Вызывает:
+        HTTPException: Ключ уже занят другой операцией.
+    """
+    async with bank_db() as bdb:
+        row = await bdb.scalar(select(BankIdempotencyClaim).where(BankIdempotencyClaim.key == key))
+        state = movement_state(row, key, operation_type, account_id, amount, direction)
+    if state == "conflict":
+        raise HTTPException(409, "Ключ идемпотентности уже использован другой операцией")
+    return state
+
+
+async def _product_is_active(model_cls: type, key: str) -> bool:
+    """Сообщает, что продукт с этим ключом уже активен.
 
     Аргументы:
         model_cls: Модель вклада, копилки или брокерского счёта.
-        row_id: Идентификатор созданной строки.
+        key: Ключ идемпотентности открытия.
+
+    Возвращает:
+        True, если строка с этим ключом имеет статус ``active``.
+    """
+    async with invest_db() as idb:
+        row = await idb.scalar(select(model_cls).where(model_cls.idempotency_key == key))
+        return getattr(row, "idempotency_key", None) == key and getattr(row, "status", None) == "active"
+
+
+async def compensate_bank_debit(account_id: str, amount: Decimal, key: str) -> None:
+    """Возвращает списание на банковский счёт, если актив после него не стал активным.
+
+    Аргументы:
+        account_id: Счёт, с которого списали открытие продукта.
+        amount: Сумма списания.
+        key: Ключ идемпотентности открытия.
 
     Вызывает:
-        RuntimeError: Строка не найдена или удаление не записано.
+        RuntimeError: Счёт не найден.
+
+    Побочные эффекты:
+        Увеличивает баланс, удаляет расходную проводку и снимает запись идемпотентности.
     """
-    if not row_id:
-        raise RuntimeError("Компенсация актива невозможна: идентификатор пуст")
-    try:
-        async with invest_db() as idb:
-            row = await idb.scalar(select(model_cls).where(model_cls.id == row_id))
-            if row is None:
-                raise RuntimeError("Компенсация актива не выполнена: запись не найдена")
-            await idb.delete(row)
+    async with bank_db() as bdb:
+        acc = await bdb.scalar(select(Account).where(Account.id == account_id).with_for_update())
+        if acc is None:
+            raise RuntimeError("Компенсация списания за продукт не выполнена: счёт не найден")
+        acc.balance = Decimal(str(acc.balance))
+        posted = await bdb.scalar(select(Transaction).where(Transaction.idempotency_key == key))
+        claim = await bdb.scalar(select(BankIdempotencyClaim).where(BankIdempotencyClaim.key == key))
+        has_posted = getattr(posted, "idempotency_key", None) == key
+        has_claim = getattr(claim, "key", None) == key
+        if not has_posted and not has_claim:
+            return
+        acc.balance = Decimal(str(acc.balance)) + amount
+        if has_posted:
+            await bdb.delete(posted)
+        await release_bank_claim(bdb, key)
+        await bdb.commit()
+
+
+async def take_source_funds(
+    model_cls: type,
+    *,
+    key: str,
+    client_id: str,
+    account_id: str,
+    amount: Decimal,
+    operation_type: str,
+    description: str,
+    currency_error: str,
+) -> _FundedOpen:
+    """Списывает банк и только потом разрешает сделать продукт активным.
+
+    Повтор после списания и до записи продукта не списывает сумму второй раз.
+    Активный продукт без списания переводится в статус ``unfunded`` и перестаёт быть доступен для выплаты.
+
+    Аргументы:
+        model_cls: Модель вклада, копилки или брокерского счёта.
+        key: Ключ идемпотентности открытия.
+        client_id: Клиент, которому должен принадлежать счёт.
+        account_id: Счёт списания.
+        amount: Сумма открытия.
+        operation_type: Тип банковской операции.
+        description: Назначение проводки.
+        currency_error: Текст отказа, если валюта счёта не RUB.
+
+    Возвращает:
+        Оплаченный активный продукт либо идентификатор строки, которую ещё нужно активировать.
+
+    Вызывает:
+        HTTPException: Счёт не прошёл проверку или ключ занят другой операцией.
+
+    Побочные эффекты:
+        Списывает банк один раз. Неоплаченный активный продукт перестаёт быть активным.
+    """
+    state = await _bank_movement_state(key, operation_type, account_id, amount, "expense")
+    if state != "posted":
+        await assert_bank_funds(account_id, client_id, amount, currency_error)
+    existing_id = None
+    async with invest_db() as idb:
+        existing = await idb.scalar(select(model_cls).where(model_cls.idempotency_key == key))
+        if getattr(existing, "idempotency_key", None) != key:
+            existing = None
+        if existing is not None and existing.id is None:
+            existing.id = str(uuid.uuid4())
+        if existing is not None:
+            existing_id = str(existing.id)
+        if existing is not None and getattr(existing, "status", None) == "active" and state in {"posted", "unknown"}:
+            return _FundedOpen(existing_id, existing)
+        if existing is not None and getattr(existing, "status", None) == "active" and state == "absent":
+            _quiesce_unfunded(existing)
             await idb.commit()
-    except Exception as exc:
-        log_error("InvestAPI", f"Не удалось удалить актив {row_id}: {exc}")
+    await debit_bank_once(account_id, amount, key, operation_type, description)
+    return _FundedOpen(existing_id, None)
+
+
+async def _commit_funded_product(session, row: object) -> None:
+    """Фиксирует активный продукт. При сбое коммита продукт не остаётся активным.
+
+    Аргументы:
+        session: Сессия инвестиций, в которой собран продукт.
+        row: Строка вклада, копилки или брокерского счёта.
+
+    Вызывает:
+        Exception: Коммит не сохранился. Статус строки при этом уже ``unfunded``.
+    """
+    try:
+        await session.commit()
+    except Exception:
+        _quiesce_unfunded(row)
         raise
+
+
+async def _open_failure(
+    exc: Exception,
+    *,
+    active: bool,
+    account_id: str,
+    amount: Decimal,
+    key: str,
+    detail: str,
+) -> None:
+    """Компенсирует списание, если продукт после него не стал активным, и поднимает ошибку открытия.
+
+    Аргументы:
+        exc: Ошибка записи продукта.
+        active: True, если продукт уже активен и компенсация запрещена.
+        account_id: Счёт списания.
+        amount: Сумма списания.
+        key: Ключ идемпотентности.
+        detail: Текст ответа, если ошибка не является HTTPException.
+
+    Вызывает:
+        HTTPException: Продукт не открыт. Исходный код ответа сохраняется.
+    """
+    if not active:
+        await compensate_bank_debit(account_id, amount, key)
+    if isinstance(exc, HTTPException):
+        raise exc
+    raise HTTPException(500, detail) from exc
 
 
 async def generate_unique_invest_account_number(db, model_cls: type, prefix: str, max_attempts: int = 10) -> str:
@@ -304,9 +541,7 @@ class CloseProductRequest(BaseModel):
 
 @router.get("/strategies", response_model=list[InvestmentStrategyResponse])
 async def get_strategies() -> list[InvestmentStrategyResponse]:
-    """
-    Получить список всех доступных инвестиционных стратегий.
-    """
+    """Возвращает доступные инвестиционные стратегии."""
     async with invest_db() as db:
         result = await db.execute(select(InvestmentStrategy))
         return [InvestmentStrategyResponse.model_validate(s) for s in result.scalars().all()]
@@ -349,17 +584,13 @@ def calculate_savings_rate() -> Decimal:
 
 @router.get("/products/terms")
 async def get_terms():
-    """
-    Получить текущие условия по продуктам (ставки, сроки).
-    """
+    """Возвращает текущие ставки и сроки продуктов."""
     return get_product_terms()
 
 
 @router.get("/portfolio/{client_id}", response_model=PortfolioResponse)
 async def get_portfolio(client_id: str) -> PortfolioResponse:
-    """
-    Получить сводный инвестиционный портфель клиента (копилки, вклады, брокерские счета).
-    """
+    """Возвращает копилки, вклады и брокерские счета клиента."""
     async with invest_db() as db:
         savings = (
             (await db.execute(select(SavingsAccount).where(SavingsAccount.client_id == client_id))).scalars().all()
@@ -381,34 +612,52 @@ async def open_deposit(
     request: Request = None,
     response: Response = None,
 ) -> DepositResponse:
-    """
-    Открыть новый вклад.
-    Кросс-доменная операция: списывает средства со счета в банке и создает актив в инвестициях.
-    Реализует Saga-паттерн с автоматической компенсацией при сбое на шаге создания актива.
+    """Списывает банк и только затем открывает вклад.
+
+    Повтор после списания и до записи вклада не списывает сумму второй раз.
+    Если запись вклада не сохранилась, списание компенсируется.
+    Неоплаченный вклад не остаётся активным и не выплачивается как оплаченный.
+
+    Аргументы:
+        req: Клиент, счёт списания, сумма, срок и ключ идемпотентности.
+        request: HTTP-запрос. В модульном тесте может отсутствовать.
+        response: Ответ, в заголовки которого записывается подпись чека.
+
+    Возвращает:
+        Открытый вклад.
+
+    Вызывает:
+        HTTPException: Нет срока или ключа, счёт недоступен, либо вклад не записан.
+
+    Побочные эффекты:
+        Списывает банк и создаёт активный вклад на ту же сумму.
     """
     if not req.term_months:
         log_error("InvestAPI", "Попытка открыть вклад без указания срока (term_months)")
         raise HTTPException(400, "Для вклада необходимо указать срок (term_months)")
-
-    await assert_bank_funds(
-        req.from_bank_account_id,
-        req.client_id,
-        req.initial_amount,
-        "Открытие вклада возможно только со счета в валюте RUB",
-    )
     idem_key = require_idempotency_key(request, req.idempotency_key)
-
-    deposit_id = None
+    funding = await take_source_funds(
+        Deposit,
+        key=idem_key,
+        client_id=req.client_id,
+        account_id=req.from_bank_account_id,
+        amount=req.initial_amount,
+        operation_type="transfer_out_invest",
+        description="Открытие вклада",
+        currency_error="Открытие вклада возможно только со счета в валюте RUB",
+    )
+    if funding.ready_row is not None:
+        return DepositResponse.model_validate(funding.ready_row)
     try:
         async with invest_db() as idb:
-            existing = await idb.scalar(select(Deposit).where(Deposit.idempotency_key == idem_key))
-            if getattr(existing, "idempotency_key", None) == idem_key:
-                dep = existing
-            else:
-                interest_rate = calculate_deposit_rate(req.term_months)
-                monthly_rate = interest_rate / Decimal(100) / Decimal(12)
-                first_payment = (req.initial_amount * monthly_rate).quantize(Decimal("0.01"))
-                next_pay_date = datetime.now() + relativedelta(months=1)
+            dep = None
+            if funding.row_id:
+                dep = await idb.scalar(select(Deposit).where(Deposit.id == funding.row_id))
+            interest_rate = calculate_deposit_rate(req.term_months)
+            monthly_rate = interest_rate / Decimal(100) / Decimal(12)
+            first_payment = (req.initial_amount * monthly_rate).quantize(Decimal("0.01"))
+            next_pay_date = datetime.now() + relativedelta(months=1)
+            if dep is None:
                 account_number = await generate_unique_invest_account_number(idb, Deposit, "4230")
                 dep = Deposit(
                     client_id=req.client_id,
@@ -419,37 +668,32 @@ async def open_deposit(
                     next_payment_date=next_pay_date,
                     next_payment_amount=first_payment,
                     idempotency_key=idem_key,
+                    status="active",
                 )
+                if dep.id is None:
+                    dep.id = str(uuid.uuid4())
                 idb.add(dep)
-                await idb.commit()
-                await idb.refresh(dep)
-            deposit_id = str(dep.id)
+            else:
+                dep.status = "active"
+                dep.balance = req.initial_amount
+                dep.interest_rate = interest_rate
+                dep.term_months = req.term_months
+                dep.next_payment_date = next_pay_date
+                dep.next_payment_amount = first_payment
+            await _commit_funded_product(idb, dep)
+            await idb.refresh(dep)
             result = DepositResponse.model_validate(dep)
-            log_success(
-                "InvestAPI",
-                f"Вклад {dep.account_number} подготовлен для клиента {req.client_id}",
-            )
-    except Exception as e:
-        log_error("InvestAPI", f"Ошибка при открытии вклада до списания банка: {e}")
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(500, f"Ошибка создания вклада: {e}") from e
-
-    try:
-        await debit_bank_once(
-            req.from_bank_account_id,
-            req.initial_amount,
-            idem_key,
-            "transfer_out_invest",
-            "Открытие вклада",
+            deposit_id = str(dep.id)
+    except Exception as exc:
+        log_error("InvestAPI", f"Ошибка записи вклада после списания банка: {exc}")
+        await _open_failure(
+            exc,
+            active=await _product_is_active(Deposit, idem_key),
+            account_id=req.from_bank_account_id,
+            amount=req.initial_amount,
+            key=idem_key,
+            detail=f"Ошибка создания вклада: {exc}",
         )
-    except Exception as e:
-        await _remove_invest_row(Deposit, deposit_id)
-        log_error("InvestAPI", f"Списание за вклад не выполнено, актив удалён: {e}")
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(500, f"Списание за вклад не выполнено, актив отменён: {e}") from e
-
     request_nonce = None
     if request is not None:
         request_nonce = getattr(request.state, "enclave_nonce", None) or request.headers.get("X-Nonce")
@@ -467,6 +711,7 @@ async def open_deposit(
     if response is not None:
         response.headers["X-Bank-Signature"] = receipt["signature"]
         response.headers["X-Receipt-ID"] = receipt["receipt"]["receipt_id"]
+    log_success("InvestAPI", f"Вклад {result.account_number} открыт для клиента {req.client_id}")
     return result
 
 
@@ -476,34 +721,65 @@ async def open_savings(
     request: Request = None,
     response: Response = None,
 ) -> SavingsAccountResponse:
-    """Открывает накопительный счёт после проверки банка и до списания.
+    """Списывает банк и только затем открывает копилку.
 
-    Повтор с тем же ключом возвращает подписанный ответ первого выполнения
-    и не создаёт второе списание.
+    Повтор с тем же ключом возвращает сохранённый чек и не создаёт второе списание.
+    Повтор после списания и до записи копилки только создаёт её.
+    Если запись не сохранилась, списание компенсируется.
+    Неоплаченная копилка не остаётся активной.
+
+    Аргументы:
+        req: Клиент, счёт списания, сумма и ключ идемпотентности.
+        request: HTTP-запрос. В модульном тесте может отсутствовать.
+        response: Ответ, в заголовки которого записывается подпись чека.
+
+    Возвращает:
+        Открытый накопительный счёт.
+
+    Вызывает:
+        HTTPException: Нет ключа, счёт недоступен, либо копилка не записана.
+
+    Побочные эффекты:
+        Списывает банк и создаёт активную копилку на ту же сумму.
     """
-    await assert_bank_funds(
-        req.from_bank_account_id,
-        req.client_id,
-        req.initial_amount,
-        "Открытие накопительного счета возможно только со счета в валюте RUB",
-    )
     idem_key = require_idempotency_key(request, req.idempotency_key)
-    savings_id = None
-    created_now = False
+    async with invest_db() as idb:
+        existing = await idb.scalar(select(SavingsAccount).where(SavingsAccount.idempotency_key == idem_key))
+        stored = signed_response(existing, idem_key)
+    if stored is not None:
+        if not _open_receipt_matches(stored, req):
+            raise HTTPException(409, "Ключ идемпотентности уже использован другой операцией")
+        await _bank_movement_state(
+            idem_key,
+            "transfer_out_savings",
+            req.from_bank_account_id,
+            req.initial_amount,
+            "expense",
+        )
+        apply_receipt_headers(response, stored["signed_receipt"])
+        return SavingsAccountResponse.model_validate(stored["body"])
+    funding = await take_source_funds(
+        SavingsAccount,
+        key=idem_key,
+        client_id=req.client_id,
+        account_id=req.from_bank_account_id,
+        amount=req.initial_amount,
+        operation_type="transfer_out_savings",
+        description="Открытие накопительного счета",
+        currency_error="Открытие накопительного счета возможно только со счета в валюте RUB",
+    )
+    if funding.ready_row is not None:
+        return SavingsAccountResponse.model_validate(funding.ready_row)
     try:
         async with invest_db() as idb:
-            existing = await idb.scalar(select(SavingsAccount).where(SavingsAccount.idempotency_key == idem_key))
-            stored = signed_response(existing, idem_key)
-            if stored is not None:
-                apply_receipt_headers(response, stored["signed_receipt"])
-                return SavingsAccountResponse.model_validate(stored["body"])
-            if getattr(existing, "idempotency_key", None) == idem_key:
-                sav = existing
-            else:
-                interest_rate = calculate_savings_rate()
-                monthly_rate = interest_rate / Decimal(100) / Decimal(12)
-                first_payment = (req.initial_amount * monthly_rate).quantize(Decimal("0.01"))
-                next_pay_date = datetime.now() + relativedelta(months=1)
+            sav = None
+            if funding.row_id:
+                sav = await idb.scalar(select(SavingsAccount).where(SavingsAccount.id == funding.row_id))
+            interest_rate = calculate_savings_rate()
+            monthly_rate = interest_rate / Decimal(100) / Decimal(12)
+            first_payment = (req.initial_amount * monthly_rate).quantize(Decimal("0.01"))
+            next_pay_date = datetime.now() + relativedelta(months=1)
+            if sav is None:
                 account_number = await generate_unique_invest_account_number(idb, SavingsAccount, "4081")
                 sav = SavingsAccount(
                     client_id=req.client_id,
@@ -513,36 +789,31 @@ async def open_savings(
                     next_payment_date=next_pay_date,
                     next_payment_amount=first_payment,
                     idempotency_key=idem_key,
+                    status="active",
                 )
                 if sav.id is None:
                     sav.id = str(uuid.uuid4())
                 idb.add(sav)
-                await idb.commit()
-                await idb.refresh(sav)
-                created_now = True
-            savings_id = str(sav.id)
+            else:
+                sav.status = "active"
+                sav.balance = req.initial_amount
+                sav.interest_rate = interest_rate
+                sav.next_payment_date = next_pay_date
+                sav.next_payment_amount = first_payment
+            await _commit_funded_product(idb, sav)
+            await idb.refresh(sav)
             result = SavingsAccountResponse.model_validate(sav)
+            savings_id = str(sav.id)
     except Exception as exc:
-        log_error("InvestAPI", f"Ошибка создания накопительного счёта до списания: {exc}")
-        if isinstance(exc, HTTPException):
-            raise exc
-        raise HTTPException(500, f"Ошибка создания накопительного счета: {exc}") from exc
-
-    try:
-        await debit_bank_once(
-            req.from_bank_account_id,
-            req.initial_amount,
-            idem_key,
-            "transfer_out_savings",
-            "Открытие накопительного счета",
+        log_error("InvestAPI", f"Ошибка записи копилки после списания банка: {exc}")
+        await _open_failure(
+            exc,
+            active=await _product_is_active(SavingsAccount, idem_key),
+            account_id=req.from_bank_account_id,
+            amount=req.initial_amount,
+            key=idem_key,
+            detail=f"Ошибка создания накопительного счета: {exc}",
         )
-    except Exception as exc:
-        if created_now:
-            await _remove_invest_row(SavingsAccount, savings_id)
-        if isinstance(exc, HTTPException):
-            raise exc
-        raise HTTPException(500, f"Списание за копилку не выполнено, актив отменён: {exc}") from exc
-
     request_nonce = None
     if request is not None:
         request_nonce = getattr(request.state, "enclave_nonce", None) or request.headers.get("X-Nonce")
@@ -550,6 +821,7 @@ async def open_savings(
         action="invest_savings_open",
         data={
             "client_id": req.client_id,
+            "from_bank_account_id": req.from_bank_account_id,
             "amount": str(req.initial_amount),
             "savings_id": savings_id,
             "account_number": result.account_number,
@@ -568,31 +840,62 @@ async def open_broker_account(
     request: Request = None,
     response: Response = None,
 ) -> BrokerAccountResponse:
-    """Открывает брокерский счёт до списания в банке.
+    """Списывает банк и только затем открывает брокерский счёт.
 
-    Повтор с тем же ключом возвращает подписанный ответ первого выполнения
-    и не списывает сумму повторно.
+    Повтор с тем же ключом возвращает сохранённый чек и не списывает сумму второй раз.
+    Повтор после списания и до записи счёта только создаёт его.
+    Если запись не сохранилась, списание компенсируется.
+    Неоплаченный счёт не остаётся активным.
+
+    Аргументы:
+        req: Клиент, счёт списания, сумма и ключ идемпотентности.
+        request: HTTP-запрос. В модульном тесте может отсутствовать.
+        response: Ответ, в заголовки которого записывается подпись чека.
+
+    Возвращает:
+        Открытый брокерский счёт.
+
+    Вызывает:
+        HTTPException: Нет ключа, счёт недоступен, либо брокерский счёт не записан.
+
+    Побочные эффекты:
+        Списывает банк и создаёт активный брокерский счёт на ту же сумму.
     """
-    await assert_bank_funds(
-        req.from_bank_account_id,
-        req.client_id,
-        req.initial_amount,
-        "Пополнение брокерского счета возможно только со счета в валюте RUB",
-    )
     idem_key = require_idempotency_key(request, req.idempotency_key)
-    broker_id = None
-    created_now = False
+    async with invest_db() as idb:
+        existing = await idb.scalar(select(BrokerAccount).where(BrokerAccount.idempotency_key == idem_key))
+        stored = signed_response(existing, idem_key)
+    if stored is not None:
+        if not _open_receipt_matches(stored, req):
+            raise HTTPException(409, "Ключ идемпотентности уже использован другой операцией")
+        await _bank_movement_state(
+            idem_key,
+            "transfer_out_broker",
+            req.from_bank_account_id,
+            req.initial_amount,
+            "expense",
+        )
+        apply_receipt_headers(response, stored["signed_receipt"])
+        return BrokerAccountResponse.model_validate(stored["body"])
+    funding = await take_source_funds(
+        BrokerAccount,
+        key=idem_key,
+        client_id=req.client_id,
+        account_id=req.from_bank_account_id,
+        amount=req.initial_amount,
+        operation_type="transfer_out_broker",
+        description="Пополнение брокерского счета",
+        currency_error="Пополнение брокерского счета возможно только со счета в валюте RUB",
+    )
+    if funding.ready_row is not None:
+        return BrokerAccountResponse.model_validate(funding.ready_row)
     try:
         async with invest_db() as idb:
-            existing = await idb.scalar(select(BrokerAccount).where(BrokerAccount.idempotency_key == idem_key))
-            stored = signed_response(existing, idem_key)
-            if stored is not None:
-                apply_receipt_headers(response, stored["signed_receipt"])
-                return BrokerAccountResponse.model_validate(stored["body"])
-            if getattr(existing, "idempotency_key", None) == idem_key:
-                broker = existing
-            else:
-                next_comm_date = datetime.now() + relativedelta(months=1)
+            broker = None
+            if funding.row_id:
+                broker = await idb.scalar(select(BrokerAccount).where(BrokerAccount.id == funding.row_id))
+            next_comm_date = datetime.now() + relativedelta(months=1)
+            if broker is None:
                 account_number = await generate_unique_invest_account_number(idb, BrokerAccount, "3060")
                 broker = BrokerAccount(
                     client_id=req.client_id,
@@ -600,36 +903,29 @@ async def open_broker_account(
                     balance=req.initial_amount,
                     next_commission_date=next_comm_date,
                     idempotency_key=idem_key,
+                    status="active",
                 )
                 if broker.id is None:
                     broker.id = str(uuid.uuid4())
                 idb.add(broker)
-                await idb.commit()
-                await idb.refresh(broker)
-                created_now = True
-            broker_id = str(broker.id)
+            else:
+                broker.status = "active"
+                broker.balance = req.initial_amount
+                broker.next_commission_date = next_comm_date
+            await _commit_funded_product(idb, broker)
+            await idb.refresh(broker)
             result = BrokerAccountResponse.model_validate(broker)
+            broker_id = str(broker.id)
     except Exception as exc:
-        log_error("InvestAPI", f"Ошибка создания брокерского счёта до списания: {exc}")
-        if isinstance(exc, HTTPException):
-            raise exc
-        raise HTTPException(500, f"Ошибка создания брокерского счета: {exc}") from exc
-
-    try:
-        await debit_bank_once(
-            req.from_bank_account_id,
-            req.initial_amount,
-            idem_key,
-            "transfer_out_broker",
-            "Пополнение брокерского счета",
+        log_error("InvestAPI", f"Ошибка записи брокерского счёта после списания банка: {exc}")
+        await _open_failure(
+            exc,
+            active=await _product_is_active(BrokerAccount, idem_key),
+            account_id=req.from_bank_account_id,
+            amount=req.initial_amount,
+            key=idem_key,
+            detail=f"Ошибка создания брокерского счета: {exc}",
         )
-    except Exception as exc:
-        if created_now:
-            await _remove_invest_row(BrokerAccount, broker_id)
-        if isinstance(exc, HTTPException):
-            raise exc
-        raise HTTPException(500, f"Списание за брокерский счёт не выполнено, актив отменён: {exc}") from exc
-
     request_nonce = None
     if request is not None:
         request_nonce = getattr(request.state, "enclave_nonce", None) or request.headers.get("X-Nonce")
@@ -637,6 +933,7 @@ async def open_broker_account(
         action="invest_broker_open",
         data={
             "client_id": req.client_id,
+            "from_bank_account_id": req.from_bank_account_id,
             "amount": str(req.initial_amount),
             "broker_id": broker_id,
             "account_number": result.account_number,
@@ -647,6 +944,44 @@ async def open_broker_account(
     await store_product_response(BrokerAccount, broker_id, idem_key, payload)
     apply_receipt_headers(response, receipt)
     return result
+
+
+async def _bank_claim_exists(key: str) -> bool:
+    """Сообщает, что банковская заявка с этим ключом уже записана.
+
+    Аргументы:
+        key: Ключ идемпотентности выплаты.
+
+    Возвращает:
+        True, если строка заявки принадлежит этому ключу.
+        False, если заявки нет или банк не ответил.
+    """
+    try:
+        async with bank_db() as bdb:
+            existing = await bdb.scalar(select(BankIdempotencyClaim).where(BankIdempotencyClaim.key == key))
+    except Exception:
+        return False
+    return getattr(existing, "key", None) == key
+
+
+async def _income_claim_matches(key: str, amount: Decimal) -> bool:
+    """Сообщает, что по ключу уже зачислена та же сумма.
+
+    Аргументы:
+        key: Ключ идемпотентности выплаты.
+        amount: Сумма, которую закрытие собиралось вернуть.
+
+    Возвращает:
+        True, если заявка доходная и сумма совпадает.
+    """
+    try:
+        async with bank_db() as bdb:
+            existing = await bdb.scalar(select(BankIdempotencyClaim).where(BankIdempotencyClaim.key == key))
+    except Exception:
+        return False
+    if getattr(existing, "key", None) != key or getattr(existing, "direction", None) != "income":
+        return False
+    return same_amount(getattr(existing, "amount", None), amount)
 
 
 async def _eod_deposit_already_paid(deposit_id: str) -> bool:
@@ -679,6 +1014,8 @@ async def _clear_payout_intent(model_cls: type, row_id: str, key: str) -> None:
     """
     async with invest_db() as idb:
         row = await idb.scalar(select(model_cls).where(model_cls.id == row_id))
+        if await _bank_claim_exists(key):
+            return
         if getattr(row, "payout_key", None) == key and getattr(row, "status", None) != "closed":
             row.payout_key = None
             row.payout_amount = None
@@ -804,6 +1141,9 @@ async def reverse_deposit_credit(
         if acc is None:
             raise RuntimeError("Откат зачисления не выполнен: счёт не найден")
         balance = Decimal(str(acc.balance))
+        claim = await bdb.scalar(select(BankIdempotencyClaim).where(BankIdempotencyClaim.key == key))
+        if getattr(claim, "key", None) != key:
+            return
         if balance < amount:
             raise RuntimeError("Откат зачисления не выполнен: на счёте меньше суммы возврата")
         acc.balance = balance - amount
@@ -820,6 +1160,146 @@ async def reverse_deposit_credit(
         await bdb.commit()
 
 
+def _is_recorded_close_error(exc: HTTPException) -> bool:
+    """Сообщает, что ошибка означает уже закрытый продукт.
+
+    Аргументы:
+        exc: Исключение из фиксации закрытия.
+
+    Возвращает:
+        True, если текст отказа говорит, что продукт уже закрыт.
+    """
+    detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+    return exc.status_code in {400, 409} and "уже закрыт" in detail
+
+
+async def _recorded_close_result(model_cls: type, row_id: str, key: str, response: Response | None) -> dict | None:
+    """Возвращает сохранённый ответ, если продукт уже закрыт.
+
+    Аргументы:
+        model_cls: Модель вклада или копилки.
+        row_id: Идентификатор строки.
+        key: Ключ идемпотентности закрытия.
+        response: HTTP-ответ для подписи чека.
+
+    Возвращает:
+        Сохранённый ответ этого ключа либо None, если продукт не закрыт.
+
+    Вызывает:
+        HTTPException: Продукт закрыт, а чека этого ключа нет. Баланс банка не меняет.
+    """
+    async with invest_db() as idb:
+        row = await idb.scalar(select(model_cls).where(model_cls.id == row_id))
+        if getattr(row, "status", None) != "closed":
+            return None
+        stored = signed_response(row, key, "close_idempotency_key", "close_response_payload")
+        if stored is not None:
+            return emit_close_response(stored, response)
+    raise HTTPException(409, "Продукт уже закрыт, выплата не повторяется")
+
+
+async def _commit_product_close(session, row: object, key: str, payload: dict) -> None:
+    """Фиксирует закрытие продукта. При сбое коммита поля закрытия возвращает назад.
+
+    Аргументы:
+        session: Сессия инвестиций.
+        row: Вклад или копилка.
+        key: Ключ идемпотентности закрытия.
+        payload: Ответ, который получит клиент.
+
+    Вызывает:
+        Exception: Коммит не сохранился. Статус строки при этом прежний.
+    """
+    previous = (
+        row.status,
+        row.balance,
+        row.close_idempotency_key,
+        row.close_response_payload,
+    )
+    row.status = "closed"
+    row.balance = Decimal("0.00")
+    row.close_idempotency_key = key
+    row.close_response_payload = json.dumps(payload, ensure_ascii=False)
+    try:
+        await session.commit()
+    except Exception:
+        row.status, row.balance, row.close_idempotency_key, row.close_response_payload = previous
+        raise
+
+
+async def _settle_failed_close(
+    exc: Exception,
+    *,
+    inserted: bool,
+    account_id: str,
+    amount: Decimal,
+    key: str,
+    model_cls: type,
+    row_id: str,
+    response: Response | None,
+    operation_type: str,
+    description: str,
+    failure_detail: str,
+) -> dict:
+    """Завершает неудачное закрытие, не откатывая уже сохранённую выплату.
+
+    Откат допустим только если этот запрос зачислил деньги, а закрытие после этого не сохранилось.
+    Уже закрытый продукт с выплатой возвращает сохранённый ответ или 409.
+
+    Аргументы:
+        exc: Ошибка фиксации закрытия.
+        inserted: True, если этот запрос сам зачислил выплату.
+        account_id: Счёт зачисления.
+        amount: Сумма зачисления.
+        key: Ключ идемпотентности закрытия.
+        model_cls: Модель вклада или копилки.
+        row_id: Идентификатор продукта.
+        response: HTTP-ответ для подписи чека.
+        operation_type: Тип проводки отката.
+        description: Назначение отката.
+        failure_detail: Текст ответа, если закрытие не сохранилось.
+
+    Возвращает:
+        Сохранённый ответ, если продукт уже закрыт и чек есть.
+
+    Вызывает:
+        HTTPException: Закрытие не сохранилось либо продукт уже закрыт без чека этого ключа.
+
+    Побочные эффекты:
+        Уменьшает баланс банка только когда выплата этого запроса не закреплена закрытием.
+    """
+    if isinstance(exc, HTTPException) and _is_recorded_close_error(exc):
+        recorded = await _recorded_close_result(model_cls, row_id, key, response)
+        if recorded is not None:
+            return recorded
+        if inserted:
+            await reverse_deposit_credit(
+                account_id,
+                amount,
+                key,
+                operation_type=operation_type,
+                description=description,
+            )
+        raise exc
+    try:
+        recorded = await _recorded_close_result(model_cls, row_id, key, response)
+    except HTTPException:
+        raise
+    if recorded is not None:
+        return recorded
+    if inserted:
+        await reverse_deposit_credit(
+            account_id,
+            amount,
+            key,
+            operation_type=operation_type,
+            description=description,
+        )
+    if isinstance(exc, HTTPException):
+        raise exc
+    raise HTTPException(500, failure_detail) from exc
+
+
 @router.post("/deposits/{deposit_id}/close")
 async def close_deposit(
     deposit_id: str,
@@ -830,6 +1310,8 @@ async def close_deposit(
     """Зачисляет остаток вклада на банковский счёт и только затем фиксирует закрытие.
 
     Повтор с тем же ключом возвращает сохранённый чек и не зачисляет сумму второй раз.
+    Откат выплаты выполняется только если этот запрос зачислил деньги, а закрытие после этого не сохранилось.
+    Уже закрытый вклад с выплатой возвращает сохранённый чек или 409 и баланс банка повторно не уменьшает.
 
     Аргументы:
         deposit_id: Идентификатор вклада.
@@ -853,13 +1335,20 @@ async def close_deposit(
             raise HTTPException(404, "Вклад не найден")
         stored = signed_response(dep, idem_key, "close_idempotency_key", "close_response_payload")
         if stored is not None:
+            if not _close_receipt_matches(stored, req.to_bank_account_id):
+                raise HTTPException(409, "Ключ идемпотентности уже использован другой операцией")
             return emit_close_response(stored, response)
         if dep.status == "closed":
-            raise HTTPException(400, "Вклад уже закрыт")
+            raise HTTPException(409, "Вклад уже закрыт, выплата не повторяется")
+        if dep.status != "active":
+            raise HTTPException(409, "Вклад не оплачен")
         amount_to_return = Decimal(str(dep.balance))
         owner_client_id = str(dep.client_id) if dep.client_id else ""
         if dep.payout_key and dep.payout_key != idem_key:
-            raise HTTPException(409, "Выплата по вкладу уже начата другим ключом")
+            unpaid_eod = str(dep.payout_key).startswith("eod-mature:") and not await _bank_claim_exists(dep.payout_key)
+            if not unpaid_eod:
+                raise HTTPException(409, "Выплата по вкладу уже начата другим ключом")
+            dep.payout_key = idem_key
         if not dep.payout_key:
             dep.payout_key = idem_key
             dep.payout_amount = canonical_amount(amount_to_return)
@@ -878,11 +1367,16 @@ async def close_deposit(
                 idem_key,
                 owner_client_id,
             )
-        except HTTPException:
-            await _clear_payout_intent(Deposit, deposit_id, idem_key)
-            raise
+        except HTTPException as exc:
+            if exc.status_code == 409 and await _income_claim_matches(idem_key, amount_to_return):
+                inserted = False
+            else:
+                if exc.status_code != 409 or not await _bank_claim_exists(idem_key):
+                    await _clear_payout_intent(Deposit, deposit_id, idem_key)
+                raise
         except Exception as exc:
-            await _clear_payout_intent(Deposit, deposit_id, idem_key)
+            if not await _bank_claim_exists(idem_key):
+                await _clear_payout_intent(Deposit, deposit_id, idem_key)
             raise HTTPException(500, f"Зачисление закрытия вклада не выполнено: {exc}") from exc
 
     try:
@@ -894,13 +1388,12 @@ async def close_deposit(
             if stored is not None:
                 return emit_close_response(stored, response)
             if dep.status == "closed":
-                raise HTTPException(400, "Вклад уже закрыт")
+                raise HTTPException(409, "Вклад уже закрыт, выплата не повторяется")
+            if dep.status != "active":
+                raise HTTPException(409, "Вклад не оплачен")
             if dep.payout_key != idem_key and not await _eod_deposit_already_paid(deposit_id):
                 raise HTTPException(409, "Выплата по вкладу уже начата другим ключом")
             amount_now = Decimal(str(dep.payout_amount or dep.balance))
-            dep.status = "closed"
-            dep.balance = Decimal("0.00")
-            dep.close_idempotency_key = idem_key
             request_nonce = None
             if request is not None:
                 request_nonce = getattr(request.state, "enclave_nonce", None) or request.headers.get("X-Nonce")
@@ -918,14 +1411,21 @@ async def close_deposit(
                 "returned_amount": str(amount_now),
                 "signed_receipt": receipt,
             }
-            dep.close_response_payload = json.dumps(payload, ensure_ascii=False)
-            await idb.commit()
+            await _commit_product_close(idb, dep, idem_key, payload)
     except Exception as exc:
-        if inserted:
-            await reverse_deposit_credit(req.to_bank_account_id, amount_to_return, idem_key)
-        if isinstance(exc, HTTPException):
-            raise exc
-        raise HTTPException(500, f"Закрытие вклада не зафиксировано, зачисление отменено: {exc}") from exc
+        return await _settle_failed_close(
+            exc,
+            inserted=inserted,
+            account_id=req.to_bank_account_id,
+            amount=amount_to_return,
+            key=idem_key,
+            model_cls=Deposit,
+            row_id=deposit_id,
+            response=response,
+            operation_type="compensation_deposit_close",
+            description="Откат зачисления: закрытие вклада не зафиксировано",
+            failure_detail=f"Закрытие вклада не зафиксировано, зачисление отменено: {exc}",
+        )
 
     log_info("InvestAPI", f"Вклад {deposit_id} закрыт. На счет возвращено: {amount_to_return}")
     return emit_close_response(payload, response)
@@ -941,7 +1441,8 @@ async def close_savings(
     """Зачисляет остаток копилки на банковский счёт и только затем фиксирует закрытие.
 
     Повтор с тем же ключом возвращает сохранённый чек и не зачисляет сумму второй раз.
-    Если фиксация закрытия падает после зачисления, зачисление откатывается.
+    Откат выплаты выполняется только если этот запрос зачислил деньги, а закрытие после этого не сохранилось.
+    Уже закрытая копилка с выплатой возвращает сохранённый чек или 409 и баланс банка повторно не уменьшает.
 
     Аргументы:
         savings_id: Идентификатор накопительного счёта.
@@ -965,9 +1466,13 @@ async def close_savings(
             raise HTTPException(404, "Накопительный счет не найден")
         stored = signed_response(sav, idem_key, "close_idempotency_key", "close_response_payload")
         if stored is not None:
+            if not _close_receipt_matches(stored, req.to_bank_account_id):
+                raise HTTPException(409, "Ключ идемпотентности уже использован другой операцией")
             return emit_close_response(stored, response)
         if sav.status == "closed":
-            raise HTTPException(400, "Счет уже закрыт")
+            raise HTTPException(409, "Счет уже закрыт, выплата не повторяется")
+        if sav.status != "active":
+            raise HTTPException(409, "Копилка не оплачена")
         amount_to_return = Decimal(str(sav.balance))
         owner_client_id = str(sav.client_id) if sav.client_id else ""
         if sav.payout_key and sav.payout_key != idem_key:
@@ -991,11 +1496,16 @@ async def close_savings(
             description="Закрытие накопительного счета",
             operation_type="transfer_in_savings",
         )
-    except HTTPException:
-        await _clear_payout_intent(SavingsAccount, savings_id, idem_key)
-        raise
+    except HTTPException as exc:
+        if exc.status_code == 409 and await _income_claim_matches(idem_key, amount_to_return):
+            inserted = False
+        else:
+            if exc.status_code != 409 or not await _bank_claim_exists(idem_key):
+                await _clear_payout_intent(SavingsAccount, savings_id, idem_key)
+            raise
     except Exception as exc:
-        await _clear_payout_intent(SavingsAccount, savings_id, idem_key)
+        if not await _bank_claim_exists(idem_key):
+            await _clear_payout_intent(SavingsAccount, savings_id, idem_key)
         raise HTTPException(500, f"Зачисление закрытия копилки не выполнено: {exc}") from exc
 
     try:
@@ -1007,13 +1517,12 @@ async def close_savings(
             if stored is not None:
                 return emit_close_response(stored, response)
             if sav.status == "closed":
-                raise HTTPException(400, "Счет уже закрыт")
+                raise HTTPException(409, "Счет уже закрыт, выплата не повторяется")
+            if sav.status != "active":
+                raise HTTPException(409, "Копилка не оплачена")
             if sav.payout_key != idem_key:
                 raise HTTPException(409, "Выплата по копилке уже начата другим ключом")
             amount_now = Decimal(str(sav.payout_amount or sav.balance))
-            sav.status = "closed"
-            sav.balance = Decimal("0.00")
-            sav.close_idempotency_key = idem_key
             request_nonce = None
             if request is not None:
                 request_nonce = getattr(request.state, "enclave_nonce", None) or request.headers.get("X-Nonce")
@@ -1031,20 +1540,21 @@ async def close_savings(
                 "returned_amount": str(amount_now),
                 "signed_receipt": receipt,
             }
-            sav.close_response_payload = json.dumps(payload, ensure_ascii=False)
-            await idb.commit()
+            await _commit_product_close(idb, sav, idem_key, payload)
     except Exception as exc:
-        if inserted:
-            await reverse_deposit_credit(
-                req.to_bank_account_id,
-                amount_to_return,
-                idem_key,
-                operation_type="compensation_savings_close",
-                description="Откат зачисления: закрытие копилки не зафиксировано",
-            )
-        if isinstance(exc, HTTPException):
-            raise exc
-        raise HTTPException(500, f"Закрытие копилки не зафиксировано, зачисление отменено: {exc}") from exc
+        return await _settle_failed_close(
+            exc,
+            inserted=inserted,
+            account_id=req.to_bank_account_id,
+            amount=amount_to_return,
+            key=idem_key,
+            model_cls=SavingsAccount,
+            row_id=savings_id,
+            response=response,
+            operation_type="compensation_savings_close",
+            description="Откат зачисления: закрытие копилки не зафиксировано",
+            failure_detail=f"Закрытие копилки не зафиксировано, зачисление отменено: {exc}",
+        )
 
     log_info("InvestAPI", f"Копилка {savings_id} закрыта. На счет возвращено: {amount_to_return}")
     return emit_close_response(payload, response)
