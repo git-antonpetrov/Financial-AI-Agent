@@ -22,6 +22,7 @@ except ImportError:
 
 try:
     from src.admin_client.backend.core.crypto import (
+        HardwareSigningBridge,
         WindowsCertificateStoreError,
         ZeroTrustClientSigner,
         export_windows_cert_to_cache,
@@ -32,6 +33,7 @@ try:
 except ImportError:
     try:
         from core.crypto import (
+            HardwareSigningBridge,
             WindowsCertificateStoreError,
             ZeroTrustClientSigner,
             export_windows_cert_to_cache,
@@ -40,6 +42,7 @@ except ImportError:
             get_windows_cert_store_help_message,
         )
     except ImportError:
+        HardwareSigningBridge = None
         ZeroTrustClientSigner = None
         find_root_ca_in_windows_store = None
         find_client_cert_in_windows_store = None
@@ -153,7 +156,11 @@ class DocumentPipeline:
             self.signer = signer
         elif ZeroTrustClientSigner is not None and self.use_zero_trust:
             try:
-                signer_mode = "hardware"
+                has_key_file = bool(self.client_key_path and os.path.exists(self.client_key_path))
+                is_hw_available = bool(
+                    HardwareSigningBridge is not None and HardwareSigningBridge.is_tpm_available()
+                )
+                signer_mode = "hardware" if is_hw_available else ("software" if has_key_file else "hardware")
                 self.signer = ZeroTrustClientSigner(
                     mode=signer_mode,
                     cert_path=self.client_cert_path,
