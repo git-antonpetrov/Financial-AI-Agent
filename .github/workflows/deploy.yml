@@ -1,23 +1,23 @@
 name: Deploy to VDS
 
 on:
-  workflow_dispatch: # Позволяет запускать Action вручную по кнопке!
+  workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
     steps:
       - name: Deploy to Server via SSH
-        uses: appleboy/ssh-action@v0.1.10
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ secrets.VDS_HOST }}
           username: ${{ secrets.VDS_USER }}
           key: ${{ secrets.VDS_SSH_KEY }}
+          command_timeout: 60m
           script: |
-            cd Financial-AI-Agent
+            set -euo pipefail
+            cd /opt/financial-ai-agent
             git fetch origin main
             git reset --hard origin/main
-            chmod +x scripts/deploy_vds_prod.sh
+            chmod +x scripts/deploy_vds_prod.sh scripts/host_bootstrap.sh scripts/setup_encrypted_volumes.sh scripts/unlock_volumes.sh
             bash scripts/deploy_vds_prod.sh
-

@@ -174,21 +174,57 @@ def issued_superadmin_common_name(project_dir: str) -> str:
     return _SUPERADMIN_CLIENT_CN
 
 
-def setup_vds(project_dir: str | None = None) -> dict[str, str]:
+def store_initial_admin_password(project_dir: str, password: str, explicit_path: str | None) -> str:
+    """Записывает первичный пароль администратора в файл и не возвращает его в журнал.
+
+    Аргументы:
+        project_dir: Корень проекта, если явный путь не задан.
+        password: Пароль, который только что сгенерирован.
+        explicit_path: Куда записать пароль. Пустое значение означает `.secrets` в проекте.
+
+    Возвращает:
+        Путь к файлу с паролем.
+
+    Побочные эффекты:
+        Создаёт каталог с режимом 0700 и файл с режимом 0600, если ОС позволяет.
+    """
+    if explicit_path:
+        path = Path(explicit_path)
+    else:
+        path = Path(project_dir) / ".secrets" / "initial_admin_password"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
+    path.write_text(password + "\n", encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return str(path)
+
+
+def setup_vds(project_dir: str | None = None, initial_password_file: str | None = None) -> dict[str, str]:
     """Заполняет .env криптостойкими секретами и не трогает исходники admin-server.
 
     Заменяет известные плейсхолдеры из шаблона и оставляет уже случайные значения.
     Пустой ALLOWED_MTLS_SUBJECTS получает CN клиента superadmin-workstation.
-    Сравнение субъектов в security.py не меняет.
+    Сравнение субъектов в security.py не меняет. Пароль администратора пишет
+    в файл и не печатает.
 
     Аргументы:
         project_dir: Корень проекта. Пустое значение означает каталог над scripts.
+        initial_password_file: Файл первичного пароля. Пустое значение означает
+            `.secrets/initial_admin_password` внутри проекта.
 
     Возвращает:
         Словарь с описанием значений, которые функция сгенерировала в этот запуск.
+        Сам пароль в словарь не входит.
 
     Побочные эффекты:
         Создаёт или перезаписывает .env и выставляет права 0600, если ОС позволяет.
+        При смене пароля администратора создаёт файл с этим паролем.
     """
     if project_dir is None:
         project_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -295,9 +331,10 @@ def setup_vds(project_dir: str | None = None) -> dict[str, str]:
             env_dict["ADMIN_PASSWORD_HASH"] = bcrypt.hashpw(
                 initial_admin_password.encode("utf-8"), bcrypt.gensalt()
             ).decode("utf-8")
-            generated_info["INITIAL_ADMIN_PASSWORD"] = initial_admin_password
-        except Exception:
-            pass
+        except Exception as error:
+            raise RuntimeError(
+                "Не удалось вычислить хэш пароля администратора, потому что пакет bcrypt недоступен."
+            ) from error
 
     # 7. Парольная фраза Root CA (AES-256)
     cur_ca_pass = env_dict.get("ROOT_CA_PASSPHRASE", "")
@@ -357,12 +394,10 @@ def setup_vds(project_dir: str | None = None) -> dict[str, str]:
 
     print("[+] Конфигурация безопасности .env успешно инициализирована (Zero-Trust TLS).")
     if initial_admin_password:
-        print("=" * 70)
-        print(" [!] ВНИМАНИЕ: Сгенерирован первичный пароль супер-администратора:")
-        print("     Логин:  admin")
-        print(f"     Пароль: {initial_admin_password}")
-        print("     ОБЯЗАТЕЛЬНО сохраните эти учетные данные!")
-        print("=" * 70)
+        password_path = store_initial_admin_password(project_dir, initial_admin_password, initial_password_file)
+        generated_info["INITIAL_ADMIN_PASSWORD"] = "сохранён в файл с правами 0600"
+        print(f"[+] Первичный пароль администратора записан в {password_path}.")
+        print("    Логин: admin. Пароль в журнал не выводится.")
 
     return generated_info
 

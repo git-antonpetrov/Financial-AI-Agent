@@ -1,10 +1,13 @@
 [tool.ruff]
 line-length = 120
 target-version = "py311"
+cache-dir = ".cache/ruff"
 exclude = [
     ".git",
+    ".cache",
     "venv",
     ".venv",
+    "__pycache__",
     "node_modules",
     "src/admin_client/frontend/node_modules",
     "data",
@@ -13,6 +16,7 @@ exclude = [
 [tool.ruff.lint]
 select = ["E", "F", "W"]
 ignore = ["E203"]
+# W503 в Ruff нет. Flake8 глушит его в .flake8, чтобы перенос перед оператором не расходился.
 
 [tool.ruff.lint.per-file-ignores]
 "src/simulations/api/main.py" = ["E402"]

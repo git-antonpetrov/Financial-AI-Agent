@@ -1,11 +1,21 @@
 #!/usr/bin/env bash
-# ==============================================================================
-# Скрипт инициализации шифрованных томов (Data at Rest / LUKS2)
-# Соответствие стандартам безопасности: PCI-DSS 3.4, GDPR Art. 32, ГОСТ Р 57580
-# ==============================================================================
+# Создаёт файловый том LUKS2 и переносит data-root Docker на него.
+# Парольную фразу читает с терминала и никуда не записывает.
+
 set -euo pipefail
 
-# Сообщает, работает ли служба Docker. Остановленный демон не мешает печати команды переноса.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/paths.sh
+source "${SCRIPT_DIR}/lib/paths.sh"
+
+VOLUME_NAME="${FIN_AGENT_VOLUME_NAME}"
+MOUNT_POINT="${FIN_AGENT_MOUNT}"
+MAPPER_NAME="${FIN_AGENT_MAPPER}"
+STORAGE_DIR="${FIN_AGENT_STORAGE}"
+CONTAINER_FILE="${FIN_AGENT_CONTAINER}"
+DOCKER_DIR="${FIN_AGENT_DOCKER_DIR}"
+SIZE_GB="${FIN_AGENT_VOLUME_GB:-20}"
+
 docker_daemon_is_running() {
     if command -v systemctl >/dev/null 2>&1; then
         if systemctl is-active --quiet docker; then
@@ -20,125 +30,178 @@ docker_daemon_is_running() {
     return 1
 }
 
-VOLUME_NAME=${1:-"fin_agent_secure_data"}
-MOUNT_POINT=${2:-"/mnt/fin_agent_encrypted_volumes"}
-KEYFILE=${3:-"/etc/security/luks_keys/fin_agent.key"}
-SIZE_GB=${4:-20}
-STORAGE_DIR="/var/lib/secure_volumes"
+require_root() {
+    if [[ "${EUID}" -ne 0 ]]; then
+        echo "[-] Скрипт запускается только от root." >&2
+        exit 1
+    fi
+}
 
-echo "======================================================================"
-echo " [Enterprise Security] Настройка шифрованного тома LUKS2: ${VOLUME_NAME}"
-echo "======================================================================"
+require_tty() {
+    if [[ ! -t 0 ]]; then
+        echo "[-] Нужна интерактивная сессия оператора. GitHub Action этот шаг не выполняет." >&2
+        exit 1
+    fi
+}
 
-if [[ $EUID -ne 0 ]]; then
-   echo "[-] Ошибка: Данный скрипт должен быть запущен с правами root (sudo)."
-   exit 1
-fi
+read_passphrase() {
+    local first=""
+    local second=""
+    read -r -s -p "Введите парольную фразу LUKS (не короче 16 символов): " first
+    printf '\n'
+    read -r -s -p "Повторите парольную фразу: " second
+    printf '\n'
+    if [[ "${#first}" -lt 16 ]]; then
+        echo "[-] Парольная фраза короче 16 символов." >&2
+        exit 1
+    fi
+    if [[ "${first}" != "${second}" ]]; then
+        echo "[-] Парольные фразы не совпали." >&2
+        exit 1
+    fi
+    PASSPHRASE="${first}"
+    unset first second
+}
 
-# 1. Проверка утилит
-for cmd in cryptsetup dd mkfs.ext4 blkid; do
-    if ! command -v "$cmd" &> /dev/null; then
-        echo "[-] Ошибка: Утилита $cmd не найдена. Установите: apt-get install cryptsetup e2fsprogs"
+run_cryptsetup() {
+    printf '%s' "${PASSPHRASE}" | cryptsetup "$@" --key-file=-
+}
+
+append_once() {
+    local file="$1"
+    local line="$2"
+    mkdir -p "$(dirname "${file}")"
+    touch "${file}"
+    if ! grep -Fxq "${line}" "${file}"; then
+        printf '%s\n' "${line}" >> "${file}"
+    fi
+}
+
+require_root
+require_tty
+
+for cmd in cryptsetup mkfs.ext4 blkid rsync mountpoint; do
+    if ! command -v "${cmd}" >/dev/null 2>&1; then
+        echo "[-] Не найдена утилита ${cmd}." >&2
         exit 1
     fi
 done
 
-# Останавливает монтирование поверх живого каталога Docker, потому что
-# такой mount скрывает существующие тома.
-if [[ "$MOUNT_POINT" == "/var/lib/docker/volumes" || "$MOUNT_POINT" == "/var/lib/docker" ]]; then
-    if docker_daemon_is_running; then
-        echo "[-] Ошибка: нельзя монтировать том поверх живого каталога Docker ${MOUNT_POINT}."
-        echo "    Остановите Docker и перенесите data-root на отдельную точку монтирования."
-        exit 1
-    fi
-    if [[ "${FIN_AGENT_FORCE_MOUNT:-}" != "1" ]]; then
-        echo "[-] Ошибка: точка монтирования ${MOUNT_POINT} совпадает с каталогом Docker."
-        echo "    Укажите отдельный каталог и перенесите data-root Docker на расшифрованный том."
-        echo "    Повторный запуск поверх остановленного Docker требует FIN_AGENT_FORCE_MOUNT=1."
-        exit 1
-    fi
-fi
-
-if [[ -d "$MOUNT_POINT" ]] && [[ -n "$(ls -A "$MOUNT_POINT" 2>/dev/null || true)" ]]; then
-    if [[ "${FIN_AGENT_FORCE_MOUNT:-}" != "1" ]]; then
-        echo "[-] Ошибка: каталог ${MOUNT_POINT} не пуст. Монтирование прервано."
-        exit 1
-    fi
-fi
-
-mkdir -p "$STORAGE_DIR"
-mkdir -p "$(dirname "$KEYFILE")"
-
-# Отклоняет ключ на том же блочном устройстве, что и контейнер LUKS, потому что
-# снимок диска хостера тогда содержит и ключ, и шифротекст.
-container_fs=$(df -P "$STORAGE_DIR" | awk 'NR==2 {print $1}')
-key_fs=$(df -P "$(dirname "$KEYFILE")" | awk 'NR==2 {print $1}')
-if [[ "$container_fs" == "$key_fs" && "${FIN_AGENT_ALLOW_SAME_DISK_LUKS_KEY:-}" != "1" ]]; then
-    echo "[-] Ошибка: ключ ${KEYFILE} и контейнер ${STORAGE_DIR} лежат на одном устройстве ${container_fs}."
-    echo "    Передайте ключ с носителя вне снимка виртуальной машины или через TPM."
+if [[ "${MOUNT_POINT}" == "/var/lib/docker" || "${MOUNT_POINT}" == "/var/lib/docker/volumes" ]]; then
+    echo "[-] Ошибка: нельзя монтировать том поверх живого каталога Docker ${MOUNT_POINT}." >&2
     exit 1
 fi
 
-# 2. Создание защищенного каталога ключей
-mkdir -p "$(dirname "$KEYFILE")"
-chmod 700 "$(dirname "$KEYFILE")"
-
-if [[ ! -f "$KEYFILE" ]]; then
-    echo "[+] Генерация 512-битного случайного ключа для LUKS2..."
-    dd if=/dev/urandom of="$KEYFILE" bs=64 count=1 status=none
-    chmod 400 "$KEYFILE"
-    echo "[+] Ключ сохранен с правами 0400: ${KEYFILE}"
-else
-    echo "[*] Используется существующий ключ: ${KEYFILE}"
-fi
-
-# 3. Создание блочного файла-контейнера
-mkdir -p "$STORAGE_DIR"
-CONTAINER_FILE="${STORAGE_DIR}/${VOLUME_NAME}.img"
-
-if [[ ! -f "$CONTAINER_FILE" ]]; then
-    echo "[+] Выделение файла-контейнера объемом ${SIZE_GB}GB..."
-    fallocate -l "${SIZE_GB}G" "$CONTAINER_FILE" || dd if=/dev/zero of="$CONTAINER_FILE" bs=1M count=$((SIZE_GB * 1024)) status=progress
-    chmod 600 "$CONTAINER_FILE"
-    
-    echo "[+] Форматирование контейнера LUKS2 (AES-XTS-plain64, 512-bit)..."
-    cryptsetup luksFormat --type luks2 --cipher aes-xts-plain64 --key-size 512 --hash sha512 --pbkdf argon2id --key-file "$KEYFILE" "$CONTAINER_FILE"
-else
-    echo "[*] Файл-контейнер уже существует: ${CONTAINER_FILE}"
-fi
-
-# 4. Открытие зашифрованного устройства
-MAPPER_NAME="dm_${VOLUME_NAME}"
-if [[ ! -b "/dev/mapper/${MAPPER_NAME}" ]]; then
-    echo "[+] Открытие зашифрованного тома через dm-crypt..."
-    cryptsetup open --type luks2 --key-file "$KEYFILE" "$CONTAINER_FILE" "$MAPPER_NAME"
-fi
-
-# 5. Создание файловой системы ext4, если она еще не создана
-if ! blkid "/dev/mapper/${MAPPER_NAME}" | grep -q "ext4"; then
-    echo "[+] Создание файловой системы ext4 на зашифрованном устройстве..."
-    mkfs.ext4 -L "$VOLUME_NAME" "/dev/mapper/${MAPPER_NAME}"
-fi
-
-# 6. Монтирование в точку назначения
-mkdir -p "$MOUNT_POINT"
-if ! mount | grep -q "/dev/mapper/${MAPPER_NAME}"; then
-    echo "[+] Монтирование зашифрованного тома в ${MOUNT_POINT}..."
-    mount -o noatime,nodev,nosuid "/dev/mapper/${MAPPER_NAME}" "$MOUNT_POINT"
-fi
-
-chmod 700 "$MOUNT_POINT"
-
 if docker_daemon_is_running; then
-    echo "[!] Docker запущен. Команда переноса data-root не выдаётся, пока служба не остановлена."
-else
-    echo "[+] Docker остановлен. Команда переноса data-root Docker на этот том:"
-    printf '%s\n' "mkdir -p '${MOUNT_POINT}/docker' && rsync -aHAX /var/lib/docker/ '${MOUNT_POINT}/docker/' && mkdir -p /etc/docker && printf '%s\n' '{\"data-root\":\"${MOUNT_POINT}/docker\"}' > /etc/docker/daemon.json"
+    echo "[-] Ошибка: нельзя монтировать том поверх живого каталога Docker и переносить data-root, пока служба запущена." >&2
+    echo "    Остановите Docker и запустите скрипт снова." >&2
+    exit 1
 fi
 
-echo "======================================================================"
-echo "[+] УСПЕШНО: Зашифрованный том LUKS2 смонтирован и готов к работе:"
-echo "    Точка монтирования: ${MOUNT_POINT}"
-echo "    Блочное устройство: /dev/mapper/${MAPPER_NAME}"
-echo "    Шифр: AES-XTS 512-bit (Argon2id KDF)"
-echo "======================================================================"
+mkdir -p "${STORAGE_DIR}"
+chmod 700 "${STORAGE_DIR}"
+
+if [[ ! -f "${CONTAINER_FILE}" ]]; then
+    echo "[+] Выделяет контейнер ${SIZE_GB} ГБ: ${CONTAINER_FILE}"
+    if ! fallocate -l "${SIZE_GB}G" "${CONTAINER_FILE}"; then
+        dd if=/dev/zero of="${CONTAINER_FILE}" bs=1M count="$((SIZE_GB * 1024))" status=progress
+    fi
+    chmod 600 "${CONTAINER_FILE}"
+    read_passphrase
+    echo "[+] Форматирует LUKS2 aes-xts-plain64, ключ 512 бит."
+    run_cryptsetup luksFormat \
+        --type luks2 \
+        --cipher aes-xts-plain64 \
+        --key-size 512 \
+        --hash sha512 \
+        --pbkdf argon2id \
+        --batch-mode \
+        "${CONTAINER_FILE}"
+else
+    echo "[*] Контейнер уже существует: ${CONTAINER_FILE}"
+    read_passphrase
+fi
+
+if [[ ! -b "/dev/mapper/${MAPPER_NAME}" ]]; then
+    echo "[+] Открывает том ${MAPPER_NAME}."
+    run_cryptsetup open --type luks2 "${CONTAINER_FILE}" "${MAPPER_NAME}"
+fi
+unset PASSPHRASE
+
+if ! blkid "/dev/mapper/${MAPPER_NAME}" | grep -q 'ext4'; then
+    echo "[+] Создаёт файловую систему ext4."
+    mkfs.ext4 -L "${VOLUME_NAME}" "/dev/mapper/${MAPPER_NAME}"
+fi
+
+mkdir -p "${MOUNT_POINT}"
+if ! mountpoint -q "${MOUNT_POINT}"; then
+    mount -o noatime,nodev,nosuid "/dev/mapper/${MAPPER_NAME}" "${MOUNT_POINT}"
+fi
+chmod 750 "${MOUNT_POINT}"
+if getent group "${FIN_AGENT_GROUP}" >/dev/null 2>&1; then
+    chown "root:${FIN_AGENT_GROUP}" "${MOUNT_POINT}"
+fi
+
+mkdir -p "${DOCKER_DIR}" "${FIN_AGENT_APP_DIR}"
+chmod 700 "${DOCKER_DIR}"
+
+append_once /etc/crypttab "${MAPPER_NAME} ${CONTAINER_FILE} none luks,noauto"
+append_once /etc/fstab "/dev/mapper/${MAPPER_NAME} ${MOUNT_POINT} ext4 noatime,nodev,nosuid,noauto 0 2"
+
+if [[ -d /var/lib/docker ]]; then
+    current_root="$(realpath /var/lib/docker)"
+    next_root="$(realpath "${DOCKER_DIR}")"
+    case "${next_root}" in
+        "${current_root}"|"${current_root}"/*)
+            echo "[-] data-root назначения находится внутри текущего каталога Docker." >&2
+            exit 1
+            ;;
+    esac
+    if [[ "${current_root}" != "${next_root}" ]]; then
+        echo "[+] Переносит data-root Docker на ${DOCKER_DIR}."
+        rsync -aHAX /var/lib/docker/ "${DOCKER_DIR}/"
+        mkdir -p /etc/docker
+        if [[ ! -f /etc/docker/daemon.json ]]; then
+            printf '%s\n' "{\"data-root\":\"${DOCKER_DIR}\"}" > /etc/docker/daemon.json
+            chmod 644 /etc/docker/daemon.json
+        elif ! grep -Fq "\"${DOCKER_DIR}\"" /etc/docker/daemon.json; then
+            echo "[-] /etc/docker/daemon.json не указывает data-root на ${DOCKER_DIR}." >&2
+            exit 1
+        fi
+        rm -rf /var/lib/docker
+        if command -v fstrim >/dev/null 2>&1; then
+            fstrim -v / || true
+        fi
+    fi
+else
+    mkdir -p /etc/docker
+    if [[ ! -f /etc/docker/daemon.json ]]; then
+        printf '%s\n' "{\"data-root\":\"${DOCKER_DIR}\"}" > /etc/docker/daemon.json
+        chmod 644 /etc/docker/daemon.json
+    fi
+fi
+
+mkdir -p /etc/systemd/system/docker.service.d
+cat > /etc/systemd/system/fin-agent-storage.service <<EOF
+[Unit]
+Description=Проверяет, что том Financial AI Agent смонтирован
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$(command -v mountpoint) -q ${MOUNT_POINT}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+cat > /etc/systemd/system/docker.service.d/fin-agent-luks.conf <<EOF
+[Unit]
+Requires=fin-agent-storage.service
+After=fin-agent-storage.service
+EOF
+systemctl daemon-reload
+systemctl disable docker >/dev/null 2>&1 || true
+
+echo "[+] Том LUKS2 смонтирован в ${MOUNT_POINT}."
+echo "    Docker не стартует при загрузке. После перезагрузки: sudo bash scripts/unlock_volumes.sh"

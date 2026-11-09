@@ -38,7 +38,8 @@ htmlcov/
 .nox/
 .coverage
 .coverage.*
-.cache
+# Локальные кэши Ruff, pytest и остальных инструментов. Каталог целиком вне репозитория.
+.cache/
 nosetests.xml
 coverage.xml
 *.cover
@@ -185,13 +186,14 @@ __marimo__/
 !.env.example
 *.key
 *.pem
+.secrets/
+admin_2fa_qr.html
 # 2. Local vector databases
 chroma_db/
 .chroma/
 vectordb/
 # 3. Heavy source data and documents
 raw_data/
-docs/
 datasets/
 test_docs/
 scratch_report.txt
@@ -211,7 +213,15 @@ venv/
 .venv/
 env/
 .idea/
-.cursor/
+# Личные файлы Cursor остаются в стороне. Агенты, правила и ссылка на навыки входят в репозиторий.
+.cursor/*
+!.cursor/agents/
+!.cursor/agents/**
+!.cursor/rules/
+!.cursor/rules/**
+!.cursor/skills
+.cursor/skills/
+!.cursor/README.md
 .vscode/*
 !.vscode/settings.json
 
@@ -243,6 +253,6 @@ arch.txt
 certs/
 src/simulations/core/crypto/certs/
 
-# Autonomous agent teamwork workspaces & temporary audit logs
-.agents/
+# Журналы многоагентных прогонов. Навыки в .agents/skills в репозиторий входят.
+.agents/teamwork/
 ORIGINAL_REQUEST.md

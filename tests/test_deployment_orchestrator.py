@@ -1,3 +1,4 @@
+import os
 import shutil
 from pathlib import Path
 
@@ -55,30 +56,27 @@ def test_setup_vds_security_env_creates_and_hardens_env(tmp_path):
 
 
 def test_deploy_vds_prod_bash_script_structure():
-    """
-    Проверяет целостность и синтаксическую структуру scripts/deploy_vds_prod.sh:
-    - шебанг bash и безопасный режим -euo pipefail;
-    - вызов шагов: setup_vds_security_env.py, docker compose up -d;
-    - валидация томов Zero-Trust PKI и контроль healthcheck.
-    """
+    """Проверяет, что shell-вход только готовит интерпретатор и вызывает один оркестратор."""
     root_dir = Path(__file__).resolve().parent.parent
-    sh_path = root_dir / "scripts" / "deploy_vds_prod.sh"
-    assert sh_path.exists(), "scripts/deploy_vds_prod.sh должен присутствовать"
+    shell_path = root_dir / "scripts" / "deploy_vds_prod.sh"
+    python_path = root_dir / "scripts" / "deploy_vds_prod.py"
+    content = shell_path.read_text(encoding="utf-8")
+    program = python_path.read_text(encoding="utf-8")
 
-    content = sh_path.read_text(encoding="utf-8")
-    assert "#!/usr/bin/env bash" in content
+    assert content.startswith("#!/usr/bin/env bash\n")
     assert "set -euo pipefail" in content
-    assert "setup_vds_security_env.py" in content
-    assert "up -d --build" in content
-    assert "DOCKER_COMPOSE_CMD" in content
-    assert "certs_data" in content
-    assert "admin-server" in content
-    assert "caddy-ingress" in content
-    assert "aes-xts" in content
-    assert "512" in content
-    assert "encrypted_docker_volumes" not in content
-    assert "verify_host_private_key_modes" in content
-    assert "ещё не создан" in content
+    assert "host-requirements.txt" in content
+    assert 'exec "${VENV}/bin/python" "${SCRIPT_DIR}/deploy_vds_prod.py" "$@"' in content
+    assert "cryptsetup" not in content
+    assert "aes-xts" in program
+    assert "512" in program
+    assert "--build" in program
+    assert "--remove-orphans" in program
+    assert "caddy-ingress" in program
+    assert "verify_host_private_key_modes" in program
+    assert "ещё не создан" in program
+    assert "encrypted_docker_volumes" not in program
+    assert "sys.exit(1)" in program
 
 
 def test_deploy_vds_prod_python_orchestrator_no_docker(tmp_path, monkeypatch):
@@ -370,14 +368,21 @@ def test_luks_status_rejects_non_luks_and_non_xts():
 
 
 def test_encrypted_volume_script_refuses_live_docker_and_prints_move():
-    """Проверяет запрет монтирования поверх живого Docker и команду переноса data-root."""
+    """Проверяет, что подготовка тома не хранит ключ и не трогает живой Docker."""
     root_dir = Path(__file__).resolve().parent.parent
     content = (root_dir / "scripts" / "setup_encrypted_volumes.sh").read_text(encoding="utf-8")
+    unlock = (root_dir / "scripts" / "unlock_volumes.sh").read_text(encoding="utf-8")
     assert "docker_daemon_is_running" in content
     assert "нельзя монтировать том поверх живого каталога Docker" in content
     assert "rsync -aHAX /var/lib/docker/" in content
     assert "data-root" in content
     assert "encrypted_docker_volumes" not in content
+    assert "--key-file=-" in content
+    assert "unset PASSPHRASE" in content
+    assert "luks,noauto" in content
+    assert "/etc/security/luks_keys" not in content
+    assert "unset PASSPHRASE" in unlock
+    assert "noauto" not in unlock
 
 
 def test_luks_gate_rejects_closed_mapper(monkeypatch):
@@ -437,3 +442,61 @@ def test_run_deployment_stops_before_compose_up_without_luks(tmp_path, monkeypat
     with pytest.raises(SystemExit) as exc:
         deploy_mod.run_deployment(skip_build=True, no_docker=False)
     assert exc.value.code == 1
+
+
+def test_container_ready_requires_healthy_when_healthcheck_exists():
+    """Проверяет, что running не подменяет неготовый healthcheck."""
+    from scripts.deploy_vds_prod import container_is_ready, deployment_succeeded
+
+    assert container_is_ready("health:healthy") is True
+    assert container_is_ready("health:starting") is False
+    assert container_is_ready("state:running") is True
+    assert container_is_ready("state:restarting") is False
+    assert container_is_ready("running") is False
+    assert deployment_succeeded({"api": "health:healthy"}, edge_ok=False) is False
+    assert deployment_succeeded({"api": "health:healthy", "worker": "state:running"}, edge_ok=True) is True
+
+
+def test_setup_vds_does_not_print_admin_password(tmp_path, capsys):
+    """Проверяет, что первичный пароль попадает в файл и не попадает в журнал."""
+    pytest.importorskip("bcrypt")
+    pytest.importorskip("cryptography")
+    root_dir = Path(__file__).resolve().parent.parent
+    shutil.copy(root_dir / ".env.example", tmp_path / ".env.example")
+
+    setup_vds(str(tmp_path))
+    captured = capsys.readouterr()
+    secret_file = tmp_path / ".secrets" / "initial_admin_password"
+    assert secret_file.is_file()
+    password = secret_file.read_text(encoding="utf-8").strip()
+    assert password
+    assert password not in captured.out
+    assert password not in captured.err
+    assert "Пароль:" not in captured.out
+    if os.name == "posix":
+        assert secret_file.stat().st_mode & 0o777 == 0o600
+
+
+def test_qr_html_stays_out_of_tracked_tree(tmp_path):
+    """Проверяет отказ писать секрет TOTP в отслеживаемый каталог."""
+    from scripts.setup_2fa import assert_qr_html_path
+
+    with pytest.raises(SystemExit):
+        assert_qr_html_path(tmp_path / "admin_2fa_qr.html", tmp_path)
+    assert_qr_html_path(tmp_path / ".secrets" / "admin_2fa_qr.html", tmp_path)
+    outside = tmp_path.parent / "qr-outside.html"
+    assert_qr_html_path(outside, tmp_path)
+
+
+def test_project_must_share_mount_with_docker(monkeypatch):
+    """Проверяет отказ, если репозиторий лежит не на томе Docker."""
+    import scripts.deploy_vds_prod as deploy_mod
+
+    def fake_mount(path: str) -> str:
+        if path.endswith("repo"):
+            return "/var"
+        return "/mnt/fin_agent_encrypted_volumes"
+
+    monkeypatch.setattr(deploy_mod, "mount_target", fake_mount)
+    with pytest.raises(SystemExit):
+        deploy_mod.assert_project_on_mount("/srv/repo", "/mnt/fin_agent_encrypted_volumes")

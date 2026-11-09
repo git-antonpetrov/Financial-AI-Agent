@@ -16,6 +16,7 @@ import argparse
 import base64
 import secrets
 import io
+from pathlib import Path
 
 # Настройка UTF-8 для корректного вывода символов QR-кода в консоли Windows
 if hasattr(sys.stdout, "reconfigure"):
@@ -100,6 +101,26 @@ def print_terminal_qr(uri: str):
 def format_secret_chunks(secret: str) -> str:
     """Форматирует ключ блоками по 4 символа для удобного ручного ввода."""
     return " ".join([secret[i:i+4] for i in range(0, len(secret), 4)])
+
+
+def assert_qr_html_path(path: Path, project_root: Path) -> None:
+    """Останавливает запись QR-кода в отслеживаемый каталог репозитория.
+
+    Аргументы:
+        path: Куда оператор просит сохранить HTML.
+        project_root: Корень репозитория.
+
+    Вызывает:
+        SystemExit: Путь лежит в репозитории и не находится в каталоге .secrets.
+    """
+    resolved = path.resolve()
+    root = project_root.resolve()
+    secrets = root / ".secrets"
+    if resolved == root or root in resolved.parents:
+        if resolved != secrets and secrets not in resolved.parents:
+            print("[-] HTML с секретом TOTP нельзя сохранять в отслеживаемый каталог репозитория.")
+            print(f"    Допустим путь вне репозитория или внутри {secrets}.")
+            sys.exit(1)
 
 
 def save_html_qr(uri: str, secret: str, output_path: str = "admin_2fa_qr.html"):
@@ -245,7 +266,12 @@ def main():
     parser.add_argument("--secret", type=str, default="", help="Использовать конкретный секретный Base32-ключ")
     parser.add_argument("--verify", type=str, default="", help="Проверить 6-значный код и завершить работу")
     parser.add_argument("--no-save", action="store_true", help="Не предлагать сохранение в .env")
-    parser.add_argument("--html", type=str, default="admin_2fa_qr.html", help="Путь для сохранения HTML с QR-кодом")
+    parser.add_argument(
+        "--html",
+        type=str,
+        default="",
+        help="Куда сохранить HTML с QR-кодом. Пустое значение файл не создаёт.",
+    )
     args = parser.parse_args()
 
     # Режим быстрой проверки кода
@@ -296,9 +322,20 @@ def main():
     print("\n3. Ссылка для приложений аутентификации (otpauth):")
     print(f"   --> {uri}")
 
-    html_file = save_html_qr(uri, secret, os.path.join(project_root, args.html))
-    print("\n4. Создан HTML-файл с QR-кодом для открытия в браузере:")
-    print(f"   --> {html_file}")
+    if args.html:
+        html_path = Path(args.html)
+        if not html_path.is_absolute():
+            html_path = Path(project_root) / html_path
+        assert_qr_html_path(html_path, Path(project_root))
+        html_file = save_html_qr(uri, secret, str(html_path))
+        try:
+            os.chmod(html_file, 0o600)
+        except OSError:
+            pass
+        print("\n4. Создан HTML-файл с QR-кодом для открытия в браузере:")
+        print(f"   --> {html_file}")
+    else:
+        print("\n4. HTML-файл не создан. Для файла вне репозитория укажите --html.")
 
     print("\n" + "-" * 60)
 
