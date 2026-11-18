@@ -14,10 +14,15 @@
         }
     }
 
-    # Обрывает публичный вход, если субъект клиентского сертификата принадлежит банку.
-    @bank_client expression `string({http.request.tls.client.subject}).contains("bank_service") || string({http.request.tls.client.subject}).contains("bank_operator") || string({http.request.tls.client.subject}).contains("bank-simulation")`
-
+    # Субъект сертификата в CEL имеет тип pkix.Name. Приведение string()
+    # в Caddy 2.11 не имеет перегрузки и обрывает любой запрос пустым 500.
+    # Replacer вызывает String() и кладёт DN в заголовок, по которому
+    # публичный вход узнаёт сертификат банка.
     route {
+        request_header X-Edge-Client-Subject {tls_client_subject}
+
+        @bank_client header_regexp X-Edge-Client-Subject bank_service|bank_operator|bank-simulation
+
         header {
             Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
             X-Content-Type-Options "nosniff"
@@ -29,20 +34,21 @@
 
         abort @bank_client
 
+        # header_up удаляет поле после записи, поэтому маска там стирает
+        # уже проверенные значения. Подделку снимает request_header.
+        request_header -X-Client-Cert-*
+        request_header -X-Proxy-Secret
+
         reverse_proxy admin-server:8000 {
-            header_up -X-Client-Cert-*
-            header_up -X-Client-Cert-Verify
-            header_up -X-Client-Cert-Subject
-            header_up -X-Client-Cert-Issuer
-            header_up -X-Client-Cert-Serial
-            header_up -X-Client-Cert-Fingerprint
-            header_up -X-Client-Cert-Pem
+            header_up -X-Edge-Client-Subject
             header_up Host {host}
             header_up X-Real-IP {remote_host}
             header_up X-Forwarded-For {remote_host}
             header_up X-Forwarded-Proto https
             header_up X-Proxy-Secret "{$PROXY_INTERNAL_SECRET}"
-            header_up X-Client-Cert-Verify {tls_client_verified}
+            # Плейсхолдера статуса проверки нет: непроверенный сертификат
+            # обрывается на рукопожатии require_and_verify и сюда не доходит.
+            header_up X-Client-Cert-Verify SUCCESS
             header_up X-Client-Cert-Subject {tls_client_subject}
             header_up X-Client-Cert-Issuer {tls_client_issuer}
             header_up X-Client-Cert-Serial {tls_client_serial}
@@ -90,19 +96,19 @@ simulation-api.internal, bank-service.internal {
         # Шифрует последний переход сертификатом банка: SAN содержит simulation-api,
         # а доверие берётся из корневого сертификата платформы.
         # Передаёт серийный номер клиентского сертификата, чтобы шлюз сверил его со списком отзыва.
+        # Поддельные заголовки сертификата снимаются до записи проверенных значений.
+        request_header -X-Client-Cert-*
+        request_header -X-Proxy-Secret
+
         reverse_proxy https://simulation-api:8002 {
-            header_up -X-Client-Cert-*
-            header_up -X-Client-Cert-Verify
-            header_up -X-Client-Cert-Subject
-            header_up -X-Client-Cert-Issuer
-            header_up -X-Client-Cert-Serial
-            header_up -X-Client-Cert-Fingerprint
             header_up Host {host}
             header_up X-Real-IP {remote_host}
             header_up X-Forwarded-For {remote_host}
             header_up X-Forwarded-Proto https
             header_up X-Proxy-Secret "{$PROXY_INTERNAL_SECRET}"
-            header_up X-Client-Cert-Verify {tls_client_verified}
+            # Плейсхолдера статуса проверки нет: непроверенный сертификат
+            # обрывается на рукопожатии require_and_verify и сюда не доходит.
+            header_up X-Client-Cert-Verify SUCCESS
             header_up X-Client-Cert-Subject {tls_client_subject}
             header_up X-Client-Cert-Issuer {tls_client_issuer}
             header_up X-Client-Cert-Serial {tls_client_serial}
@@ -148,20 +154,18 @@ admin-server.internal {
         abort @docker_proxy
         abort @outside
 
+        request_header -X-Client-Cert-*
+        request_header -X-Proxy-Secret
+
         reverse_proxy admin-server:8000 {
-            header_up -X-Client-Cert-*
-            header_up -X-Client-Cert-Verify
-            header_up -X-Client-Cert-Subject
-            header_up -X-Client-Cert-Issuer
-            header_up -X-Client-Cert-Serial
-            header_up -X-Client-Cert-Fingerprint
-            header_up -X-Client-Cert-Pem
             header_up Host {host}
             header_up X-Real-IP {remote_host}
             header_up X-Forwarded-For {remote_host}
             header_up X-Forwarded-Proto https
             header_up X-Proxy-Secret "{$PROXY_INTERNAL_SECRET}"
-            header_up X-Client-Cert-Verify {tls_client_verified}
+            # Плейсхолдера статуса проверки нет: непроверенный сертификат
+            # обрывается на рукопожатии require_and_verify и сюда не доходит.
+            header_up X-Client-Cert-Verify SUCCESS
             header_up X-Client-Cert-Subject {tls_client_subject}
             header_up X-Client-Cert-Issuer {tls_client_issuer}
             header_up X-Client-Cert-Serial {tls_client_serial}

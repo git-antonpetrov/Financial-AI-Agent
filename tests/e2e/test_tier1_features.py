@@ -204,8 +204,9 @@ def test_caddyfile_ingress_invariants():
     assert "protocols tls1.2 tls1.3" not in content
     assert "client_auth" in content
     assert "trusted_ca_cert_file /etc/caddy/certs/ca.crt" in content
-    assert "header_up -X-Client-Cert-*" in content
-    assert "header_up X-Client-Cert-Verify {tls_client_verified}" in content
+    assert "request_header -X-Client-Cert-*" in content
+    assert "header_up -X-Client-Cert-*" not in content
+    assert "header_up X-Client-Cert-Verify SUCCESS" in content
     assert "Strict-Transport-Security" in content
 
 

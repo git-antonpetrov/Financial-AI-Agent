@@ -33,8 +33,10 @@ def test_caddyfile_client_auth_configuration():
 def test_caddyfile_mtls_headers_forwarded():
     """Проверяет, что проверенные метаданные клиентского сертификата пробрасываются в бэкенд и очищаются от подделки."""
     content = load_caddyfile()
-    assert "header_up -X-Client-Cert-*" in content, "Caddyfile должен очищать входящие клиентские заголовки mTLS"
-    assert "header_up X-Client-Cert-Verify {tls_client_verified}" in content
+    assert "request_header -X-Client-Cert-*" in content, "Caddyfile должен очищать входящие клиентские заголовки mTLS"
+    assert "header_up -X-Client-Cert-*" not in content
+    assert "header_up X-Client-Cert-Verify SUCCESS" in content
+    assert "{tls_client_verified}" not in content
     assert "header_up X-Client-Cert-Subject {tls_client_subject}" in content
     assert "header_up X-Client-Cert-Issuer {tls_client_issuer}" in content
     assert "header_up X-Client-Cert-Serial {tls_client_serial}" in content
@@ -94,9 +96,10 @@ def test_public_site_presents_platform_certificate_and_rejects_bank_client():
     content = load_caddyfile()
     assert "tls /etc/caddy/edge/caddy.crt /etc/caddy/edge/caddy.key" in content
     assert "admin_server.key" not in content
-    assert "bank_service" in content
-    assert "bank_operator" in content
-    assert "bank-simulation" in content
+    assert "request_header X-Edge-Client-Subject {tls_client_subject}" in content
+    assert "header_regexp X-Edge-Client-Subject bank_service|bank_operator|bank-simulation" in content
+    assert "header_up -X-Edge-Client-Subject" in content
+    assert "string({http.request.tls.client.subject})" not in content
     assert "abort @bank_client" in content
 
 
@@ -104,7 +107,8 @@ def test_simulation_proxy_keeps_internal_agent_headers():
     """Проверяет, что прокси симуляции снимает только заголовки, которые ставит Caddy."""
     content = load_caddyfile()
     simulation = content.split("simulation-api.internal", 1)[1].split("admin-server.internal", 1)[0]
-    assert "header_up -X-Client-Cert-*" in simulation
+    assert "request_header -X-Client-Cert-*" in simulation
+    assert "header_up -X-Client-Cert-*" not in simulation
     assert "header_up -X-Agent-Cert" not in simulation
     assert "header_up -X-Enclave-Cert" not in simulation
     assert "header_up -X-Signature" not in simulation

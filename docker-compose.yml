@@ -577,13 +577,19 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    # Docker отправляет опубликованные порты на адрес сети с наибольшим
+    # gw_priority. Имя admin_backend_net идёт раньше edge_net, поэтому без
+    # приоритета хостовые 80 и 443 попадают на 10.90.20.10. Публичный site
+    # block там не слушает, и Caddy отвечает пустым 200.
     networks:
       edge_net:
         ipv4_address: 10.90.10.10
+        gw_priority: 100
         aliases:
           - caddy
       admin_backend_net:
         ipv4_address: 10.90.20.10
+        gw_priority: 0
         aliases:
           - caddy-backend
           - admin-server.internal
@@ -591,6 +597,7 @@ services:
           - bank-service.internal
       simulation_net:
         ipv4_address: 10.90.30.10
+        gw_priority: 0
         aliases:
           - caddy-sim
           - simulation-api.internal

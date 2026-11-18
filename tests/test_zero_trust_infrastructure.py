@@ -137,7 +137,7 @@ def test_caddyfile_mtls_ingress_rules():
     assert "/etc/caddy/certs/ca.crt" in content
 
     # 2. Проброс заголовков mTLS к backend
-    assert "header_up X-Client-Cert-Verify {tls_client_verified}" in content
+    assert "header_up X-Client-Cert-Verify SUCCESS" in content
     assert "header_up X-Client-Cert-Subject {tls_client_subject}" in content
     assert "header_up X-Client-Cert-Serial {tls_client_serial}" in content
     assert "header_up X-Client-Cert-Fingerprint {tls_client_fingerprint}" in content

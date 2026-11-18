@@ -347,6 +347,9 @@ def test_caddy_mounts_platform_cert_on_docker_addresses():
     assert caddy["networks"]["edge_net"]["ipv4_address"] == "10.90.10.10"
     assert caddy["networks"]["admin_backend_net"]["ipv4_address"] == "10.90.20.10"
     assert caddy["networks"]["simulation_net"]["ipv4_address"] == "10.90.30.10"
+    edge_priority = caddy["networks"]["edge_net"]["gw_priority"]
+    assert edge_priority > caddy["networks"]["admin_backend_net"]["gw_priority"]
+    assert edge_priority > caddy["networks"]["simulation_net"]["gw_priority"]
 
     networks = compose_data["networks"]
     assert networks["edge_net"]["ipam"]["config"][0]["gateway"] == "10.90.10.1"
