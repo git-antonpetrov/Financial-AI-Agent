@@ -269,10 +269,9 @@ async def submit_rag_document(
             any(ou in allowed_roles for ou in leaf_ous)
             or any(cn in ("superadmin-workstation", "admin-server") for cn in leaf_cns)
         )
-        is_enclave_agent = bool(x_enclave_cert) and any(
-            "agent" in cn.lower() or ou in ("bank_operator", "agent")
-            for cn in leaf_cns
-            for ou in (leaf_ous or ["agent"])
+        is_enclave_agent = bool(x_enclave_cert) and (
+            any("agent" in cn.lower() for cn in leaf_cns)
+            or any(ou in ("bank_operator", "agent") for ou in leaf_ous)
         )
 
         if not (has_valid_role or is_enclave_agent):
@@ -586,41 +585,48 @@ async def submit_rag_documents_delete(
         or request.headers.get("x-client-cert")
         or request.headers.get("x-client-cert-pem")
     )
-    if not raw_cert:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Клиентский сертификат X.509 обязателен (отсутствует заголовок X-Cert / X-Agent-Cert)",
+    try:
+        if not raw_cert:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Клиентский сертификат X.509 обязателен (отсутствует заголовок X-Cert / X-Agent-Cert)",
+            )
+
+        leaf_cert, client_pub_key = validate_x509_certificate_chain(
+            cert_input=raw_cert, enclave_cert_input=x_enclave_cert, redis_conn=redis_client
         )
 
-    leaf_cert, client_pub_key = validate_x509_certificate_chain(
-        cert_input=raw_cert, enclave_cert_input=x_enclave_cert, redis_conn=redis_client
-    )
+        from cryptography.x509.oid import NameOID
 
-    # 3.1. Проверка роли и субъекта
-    from cryptography.x509.oid import NameOID
+        leaf_subject_str = leaf_cert.subject.rfc4514_string()
+        leaf_ous = [attr.value for attr in leaf_cert.subject.get_attributes_for_oid(NameOID.ORGANIZATIONAL_UNIT_NAME)]
+        leaf_cns = [attr.value for attr in leaf_cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)]
 
-    leaf_subject_str = leaf_cert.subject.rfc4514_string()
-    leaf_ous = [attr.value for attr in leaf_cert.subject.get_attributes_for_oid(NameOID.ORGANIZATIONAL_UNIT_NAME)]
-    leaf_cns = [attr.value for attr in leaf_cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)]
-
-    allowed_roles = {"admin_operator", "Security Operations"}
-    has_valid_role = (
-        any(ou in allowed_roles for ou in leaf_ous)
-        or any(cn in ("superadmin-workstation", "admin-server") for cn in leaf_cns)
-    )
-    is_enclave_agent = bool(x_enclave_cert) and any(
-        "agent" in cn.lower() or ou in ("bank_operator", "agent") for cn in leaf_cns for ou in (leaf_ous or ["agent"])
-    )
-
-    if not (has_valid_role or is_enclave_agent):
-        log_warning(
-            "RAG Security",
-            f"Отказ в доступе на удаление: роль '{leaf_subject_str}' не авторизована",
+        allowed_roles = {"admin_operator", "Security Operations"}
+        has_valid_role = (
+            any(ou in allowed_roles for ou in leaf_ous)
+            or any(cn in ("superadmin-workstation", "admin-server") for cn in leaf_cns)
         )
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Недостаточно прав: роль субъекта сертификата '{leaf_subject_str}' не авторизована для удаления",
+        is_enclave_agent = bool(x_enclave_cert) and (
+            any("agent" in cn.lower() for cn in leaf_cns)
+            or any(ou in ("bank_operator", "agent") for ou in leaf_ous)
         )
+
+        if not (has_valid_role or is_enclave_agent):
+            log_warning(
+                "RAG Security",
+                f"Отказ в доступе на удаление: роль '{leaf_subject_str}' не авторизована",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"Недостаточно прав: роль субъекта сертификата '{leaf_subject_str}' "
+                    "не авторизована для удаления"
+                ),
+            )
+    except HTTPException:
+        discard_admin_nonce(x_nonce, redis_conn=redis_client)
+        raise
 
     # 4. Верификация цифровой подписи (X-Signature)
     raw_body = await request.body()

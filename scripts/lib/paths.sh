@@ -1,0 +1,10 @@
+# Задаёт общие пути тома LUKS. Скрипты подключают файл и не копируют эти значения.
+FIN_AGENT_VOLUME_NAME="fin_agent_secure_data"
+FIN_AGENT_MOUNT="/mnt/fin_agent_encrypted_volumes"
+FIN_AGENT_MAPPER="dm_fin_agent_secure_data"
+FIN_AGENT_STORAGE="/var/lib/secure_volumes"
+FIN_AGENT_CONTAINER="${FIN_AGENT_STORAGE}/${FIN_AGENT_VOLUME_NAME}.img"
+FIN_AGENT_DOCKER_DIR="${FIN_AGENT_MOUNT}/docker"
+FIN_AGENT_APP_DIR="${FIN_AGENT_MOUNT}/app"
+FIN_AGENT_APP_LINK="/opt/financial-ai-agent"
+FIN_AGENT_GROUP="finagent"

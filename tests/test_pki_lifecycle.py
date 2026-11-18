@@ -165,6 +165,10 @@ def test_pki_x509_extensions_and_key_usage(pki_test_env):
     assert (admin_dir / "admin_server.key").exists()
     assert not (admin_dir / "admin_client.key").exists()
     assert not (admin_dir / "bank.key").exists()
+    edge_dir = export_dir / "edge_certs"
+    assert (edge_dir / "caddy.crt").exists()
+    assert (edge_dir / "caddy.key").exists()
+    assert not (edge_dir / "admin_server.key").exists()
 
     # 3. Клиентский сертификат (admin_client.crt)
     client_bytes = (export_dir / "admin_client.crt").read_bytes()
@@ -179,7 +183,7 @@ def test_pki_chain_validation_across_all_services(pki_test_env):
     ca_cert_path = str(export_dir / "ca.crt")
     validator = X509ChainValidator(ca_cert_path=ca_cert_path)
 
-    for svc in ["admin_server", "admin_client", "bank", "postgres", "redis", "minio"]:
+    for svc in ["admin_server", "caddy", "admin_client", "bank", "postgres", "redis", "minio"]:
         cert_path = str(export_dir / f"{svc}.crt")
         valid, msg = validator.validate_certificate_chain(cert_path)
         assert valid is True, f"Сертификат {svc} не прошел валидацию цепочки: {msg}"

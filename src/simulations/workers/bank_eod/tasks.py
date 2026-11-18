@@ -111,10 +111,11 @@ async def process_auto_payments(session: AsyncSession, current_date: date) -> No
                         status="failed",
                         date=current_date,
                         time=get_moscow_time(),
+                        idempotency_key=autopay_key,
                     )
                     session.add(tx)
-                    # Сдвигает на завтра чтобы попробовать снова
-                    ap.next_payment_date = ap.next_payment_date + timedelta(days=1)
+                    # Следующая попытка не раньше завтрашнего календарного дня.
+                    ap.next_payment_date = current_date + timedelta(days=1)
         except Exception as e:
             log_error("Bank EOD", f"Ошибка при обработке автоплатежа {ap.id}: {e}")
             continue

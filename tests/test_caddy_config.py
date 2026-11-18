@@ -92,7 +92,8 @@ def test_internal_sites_bind_only_docker_networks():
 def test_public_site_presents_platform_certificate_and_rejects_bank_client():
     """Проверяет сертификат платформы и отказ банку на публичном входе."""
     content = load_caddyfile()
-    assert "tls /etc/caddy/admin/admin_server.crt /etc/caddy/admin/admin_server.key" in content
+    assert "tls /etc/caddy/edge/caddy.crt /etc/caddy/edge/caddy.key" in content
+    assert "admin_server.key" not in content
     assert "bank_service" in content
     assert "bank_operator" in content
     assert "bank-simulation" in content

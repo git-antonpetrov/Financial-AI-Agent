@@ -523,12 +523,18 @@ def pytest_addoption(parser):
 
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_call(item):
-    """Execution hook enforcing the test timeout limit."""
+    """Останавливает тест, который идёт дольше заданного предела."""
     import time
 
-    timeout = item.config.getoption("--timeout", 30.0)
+    raw_timeout = item.config.getoption("--timeout", default=30.0)
     start_time = time.monotonic()
     yield
+    # Плагин pytest-timeout занимает тот же флаг и без аргумента отдаёт None.
+    if raw_timeout is None:
+        raw_timeout = 30.0
+    timeout = float(raw_timeout)
+    if timeout <= 0:
+        return
     duration = time.monotonic() - start_time
     if duration > timeout:
         raise TimeoutError(f"Test '{item.name}' exceeded timeout limit of {timeout}s (took {duration:.2f}s)")

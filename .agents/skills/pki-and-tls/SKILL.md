@@ -9,7 +9,7 @@ description: Выпуск сертификатов и TLS между серви�
 
 Каждый сервис получает свой том: `admin_certs`, `bank_certs`, `postgres_certs`, `redis_certs`, `minio_certs`, `ca_public`. Ключ клиента администратора в общий экспорт не кладут: у `root-ca` включено `ISOLATE_ADMIN_CLIENT_KEY=true`.
 
-Публичное имя Caddy берёт сертификат из `admin_certs`. Имена `simulation-api.internal` и `bank-service.internal` используют `tls internal`. `SSL_CERT_FILE` указывает на `ca.crt` платформы, не на внутренний корень Caddy.
+Публичное имя Caddy берёт сертификат из `edge_certs`. Ключ JWT остаётся в `admin_certs` и в том Caddy не входит. Имена `simulation-api.internal` и `bank-service.internal` используют `tls internal`. `SSL_CERT_FILE` указывает на `ca.crt` платформы, не на внутренний корень Caddy.
 
 `FORCE_REGENERATE=true` переписывает уже выпущенные сертификаты. Без явной просьбы его не включают.
 

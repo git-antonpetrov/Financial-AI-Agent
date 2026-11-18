@@ -423,7 +423,8 @@ def test_enclave_signed_request_and_replay_protection():
     client = TestClient(app)
 
     verifier = get_enclave_verifier()
-    priv_key = verifier.key_manager.get_private_key()
+    assert verifier.key_manager.get_private_key() is None
+    priv_key = EnclaveKeyManager().get_private_key()
 
     method = "GET"
     path = "/invest/products/terms"

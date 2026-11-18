@@ -175,11 +175,15 @@ def test_enclave_signature_with_agent_token_joint_validation(test_app):
     import base64
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import padding
-    from src.simulations.core.crypto.enclave_verifier import get_enclave_verifier, EnclaveVerifier
+    from src.simulations.core.crypto.enclave_verifier import (
+        EnclaveKeyManager,
+        EnclaveVerifier,
+        get_enclave_verifier,
+    )
 
     client = TestClient(test_app)
-    verifier = get_enclave_verifier()
-    key_mgr = verifier.key_manager
+    get_enclave_verifier()
+    key_mgr = EnclaveKeyManager()
 
     method = "GET"
     path = "/invest/test"
@@ -255,12 +259,16 @@ def test_enclave_signature_strict_passes_with_valid_signature(test_app, monkeypa
     import base64
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import padding
-    from src.simulations.core.crypto.enclave_verifier import get_enclave_verifier, EnclaveVerifier
+    from src.simulations.core.crypto.enclave_verifier import (
+        EnclaveKeyManager,
+        EnclaveVerifier,
+        get_enclave_verifier,
+    )
 
     monkeypatch.setenv("REQUIRE_ENCLAVE_SIGNATURE", "true")
     client = TestClient(test_app)
-    verifier = get_enclave_verifier()
-    key_mgr = verifier.key_manager
+    get_enclave_verifier()
+    key_mgr = EnclaveKeyManager()
 
     method = "GET"
     path = "/bank/test"

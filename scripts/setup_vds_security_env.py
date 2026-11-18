@@ -299,6 +299,8 @@ def setup_vds(project_dir: str | None = None, initial_password_file: str | None 
         "ORACLE_BOOTSTRAP_TOKEN": ("bootstrap_token_oracle_secret", lambda: secrets.token_urlsafe(32)),
         "AGENT_ORACLE_BOOTSTRAP_TOKEN": ("bootstrap_token_oracle_agent_secret", lambda: secrets.token_urlsafe(32)),
         "PROXY_INTERNAL_SECRET": ("change_this_proxy_internal_secret", lambda: secrets.token_urlsafe(32)),
+        "TAVILY_API_KEY": ("tvly-example-key", lambda: secrets.token_urlsafe(32)),
+        "CONTENTAI_PASSWORD": ("contentai_password", lambda: secrets.token_urlsafe(24)),
     }
 
     for key, (placeholder_val, gen_fn) in placeholders.items():

@@ -5,9 +5,9 @@ from pathlib import Path
 # Добавляет корень проекта в sys.path.
 sys.path.append(str(Path(__file__).resolve().parents[4]))
 
-from dotenv import load_dotenv
+from src.common.runtime_env import load_runtime_dotenv
 
-load_dotenv()
+load_runtime_dotenv()
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 

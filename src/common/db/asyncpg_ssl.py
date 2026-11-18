@@ -109,4 +109,9 @@ def libpq_sslmode(sslmode: str | None, ca_file: str | None = None) -> str | None
         return "verify-full"
     if normalized == "require" and os.path.isfile(_ca_path(ca_file)):
         return "verify-full"
+    if normalized == "require" and not os.path.isfile(_ca_path(ca_file)):
+        from src.common.production_secrets import strict_security_enabled
+
+        if strict_security_enabled():
+            raise RuntimeError("POSTGRES_SSLMODE=require без файла CA запрещён в строгом режиме")
     return normalized

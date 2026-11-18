@@ -7,9 +7,9 @@ from urllib.parse import urlparse
 
 # pyrefly: ignore [missing-import]
 import asyncpg
-from dotenv import load_dotenv
+from src.common.runtime_env import load_runtime_dotenv
 
-load_dotenv()
+load_runtime_dotenv()
 
 from src.simulations.db.bank.db.client import get_async_session_maker, init_db
 from src.simulations.db.bank.db.models import (

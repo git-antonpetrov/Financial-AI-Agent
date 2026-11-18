@@ -426,8 +426,8 @@ class Settings:
         if missing:
             raise RuntimeError(f"Отсутствуют обязательные переменные окружения безопасности: {', '.join(missing)}")
 
-        # Проверяет флаги и плейсхолдеры, потому что STRICT_SECURITY включён в compose.
-        if os.getenv("STRICT_SECURITY", "true").lower() == "true":
+        # Проверяет флаги и плейсхолдеры для true, 1 и yes, как и остальные флаги строгого режима.
+        if _strict_security_enabled():
             if self.REQUIRE_MTLS is not True:
                 raise RuntimeError("STRICT_SECURITY: REQUIRE_MTLS must be true")
             if self.REQUIRE_2FA is not True:
@@ -1870,6 +1870,10 @@ verify_mtls_client_identity = verify_mtls_client_certificate
 
 # --- ЗАЩИТА ОТ АТАК ПОВТОРЕНИЯ (NONCE / REPLAY ATTACK PREVENTION) ---
 
+class ReplayStoreUnavailable(RuntimeError):
+    """Хранилище повторов не подтвердило уникальность запроса."""
+
+
 _admin_nonces_memory: dict[str, float] = {}
 _admin_nonces_lock = threading.Lock()
 
@@ -1894,10 +1898,12 @@ def record_admin_nonce_if_new(nonce: str, ttl_seconds: int = 300, redis_conn=Non
             if success in (False, None):
                 return False
         except Exception as e:
-            log_warning(
-                "ReplayProtection",
-                f"Redis недоступен для проверки nonce ({e}), резервное использование памяти",
-            )
+            log_warning("ReplayProtection", f"Redis недоступен для проверки nonce ({e})")
+            if _strict_security_enabled():
+                raise ReplayStoreUnavailable("Проверка nonce недоступна") from e
+
+    if client is None and _strict_security_enabled():
+        raise ReplayStoreUnavailable("Проверка nonce недоступна")
 
     now = time.time()
     with _admin_nonces_lock:

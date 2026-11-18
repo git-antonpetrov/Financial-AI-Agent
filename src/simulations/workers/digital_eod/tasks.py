@@ -190,14 +190,11 @@ async def process_smart_contracts(session: AsyncSession) -> None:
                 elif status == "pending":
                     pending += 1
         except Exception as e:
-            failed += 1
             log_error(
                 "Ruble EOD",
                 f"Критический сбой при обработке контракта {contract.id}: {e}",
             )
-            contract.status = "failed"
-            contract.error_message = f"Внутренний сбой обработчика: {e}"
-            # Гарантированный возврат замороженного депозита создателю контракта
+            refunded = False
             try:
                 creator = await session.get(Wallet, contract.creator_wallet_id)
                 if creator:
@@ -207,8 +204,17 @@ async def process_smart_contracts(session: AsyncSession) -> None:
                     refund = min(c_frozen, c_amount)
                     creator.frozen_balance = c_frozen - refund
                     creator.balance = c_bal + refund
+                    refunded = True
             except Exception as refund_err:
-                log_error("Ruble EOD", f"Не удалось разблокировать средства контракта {contract.id}: {refund_err}")
+                log_error(
+                    "Ruble EOD",
+                    f"Не удалось разблокировать средства контракта {contract.id}: {refund_err}",
+                )
+            if not refunded:
+                continue
+            contract.status = "failed"
+            contract.error_message = f"Внутренний сбой обработчика: {e}"
+            failed += 1
 
     await session.commit()
     log_info(

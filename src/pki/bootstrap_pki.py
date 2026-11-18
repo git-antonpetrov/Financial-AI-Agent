@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from cryptography import x509
-from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import hashes, serialization
 
 try:
     from src.pki.core.ca_engine import RootCAEngine
@@ -243,6 +243,23 @@ def bootstrap_pki(
             "is_client": True,
             "validity_days": 365,
         },
+        # Публичный TLS границы. Это не ключ подписи JWT.
+        {
+            "name": "caddy",
+            "cert_filename": "caddy.crt",
+            "key_filename": "caddy.key",
+            "cn": PUBLIC_ADMIN_DNS_NAME,
+            "role": "edge_tls",
+            "san_dns": [
+                PUBLIC_ADMIN_DNS_NAME,
+                "admin.fin-ai-agent.local",
+                "localhost",
+            ],
+            "san_ip": ["127.0.0.1"],
+            "is_server": True,
+            "is_client": False,
+            "validity_days": 365,
+        },
         # 3. Клиент Администратора (Admin Client mTLS)
         {
             "name": "admin-client",
@@ -400,11 +417,24 @@ def bootstrap_pki(
     shutil.copyfile(export_path / "admin_server.crt", admin_dir / "admin_server.crt")
     shutil.copyfile(export_path / "admin_server.key", admin_dir / "admin_server.key")
 
+    # edge_certs: только сертификат публичного TLS. Ключа JWT здесь нет.
+    edge_dir = export_path / "edge_certs"
+    edge_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(export_path / "ca.crt", edge_dir / "ca.crt")
+    shutil.copyfile(export_path / "caddy.crt", edge_dir / "caddy.crt")
+    shutil.copyfile(export_path / "caddy.key", edge_dir / "caddy.key")
+
     # enclave_certs: изолированное хранилище ключей промежуточного УЦ Анклава
     enclave_dir = export_path / "enclave_certs"
     enclave_dir.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(export_path / "ca.crt", enclave_dir / "ca.crt")
     shutil.copyfile(export_path / "enclave_ca.crt", enclave_dir / "enclave_ca.crt")
+    enclave_certificate = x509.load_pem_x509_certificate((export_path / "enclave_ca.crt").read_bytes())
+    enclave_public = enclave_certificate.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    (enclave_dir / "enclave_public.pem").write_bytes(enclave_public)
 
     # postgres_certs: изолированное хранилище ключей и сертификатов PostgreSQL (SEC-02)
     postgres_dir = export_path / "postgres_certs"
@@ -446,10 +476,14 @@ def bootstrap_pki(
     dedicated_mounts = {
         "CA_PUBLIC_DIR": (ca_public_dir, ["ca.crt", "ca.crl"]),
         "BANK_CERTS_DIR": (bank_dir, ["ca.crt", "ca.crl", "bank.crt", "bank.key"]),
-        "ENCLAVE_CERTS_DIR": (enclave_dir, ["ca.crt", "enclave_ca.crt"]),
+        "ENCLAVE_CERTS_DIR": (enclave_dir, ["ca.crt", "enclave_ca.crt", "enclave_public.pem"]),
         "ADMIN_CERTS_DIR": (
             admin_dir,
             ["ca.crt", "ca.crl", "admin_server.crt", "admin_server.key"],
+        ),
+        "EDGE_CERTS_DIR": (
+            edge_dir,
+            ["ca.crt", "caddy.crt", "caddy.key"],
         ),
         "ADMIN_CLIENT_CERTS_DIR": (
             admin_client_dir,
@@ -508,6 +542,7 @@ def bootstrap_pki(
             "bank.key",
             "admin_server.key",
             "server.key",
+            "caddy.key",
             "postgres.key",
             "redis.key",
             "minio.key",

@@ -11,6 +11,7 @@ services:
       - SHARED_CERTS_DIR=/shared_certs
       - CA_PUBLIC_DIR=/export/ca_public
       - ADMIN_CERTS_DIR=/export/admin_certs
+      - EDGE_CERTS_DIR=/export/edge_certs
       - BANK_CERTS_DIR=/export/bank_certs
       - ADMIN_CLIENT_CERTS_DIR=/export/admin_client_certs
       - ENCLAVE_CERTS_DIR=/export/enclave_certs
@@ -26,6 +27,7 @@ services:
       - certs_data:/shared_certs
       - ca_public:/export/ca_public
       - admin_certs:/export/admin_certs
+      - edge_certs:/export/edge_certs
       - bank_certs:/export/bank_certs
       - admin_client_certs:/export/admin_client_certs
       - enclave_certs:/export/enclave_certs
@@ -292,8 +294,10 @@ services:
       - ORACLE_BOOTSTRAP_TOKEN=${ORACLE_BOOTSTRAP_TOKEN}
       - AGENT_ORACLE_BOOTSTRAP_TOKEN=${AGENT_ORACLE_BOOTSTRAP_TOKEN}
       - REQUIRE_ENCLAVE_SIGNATURE=${REQUIRE_ENCLAVE_SIGNATURE:-true}
+      - ENCLAVE_PUBLIC_KEY_PATH=/enclave/enclave_public.pem
     volumes:
       - bank_certs:/certs:ro
+      - enclave_certs:/enclave:ro
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import ssl,urllib.request; ctx=ssl.create_default_context(cafile='/certs/ca.crt'); urllib.request.urlopen('https://localhost:8002/health', context=ctx)\" || exit 1"]
       interval: 10s
@@ -457,7 +461,7 @@ services:
     volumes:
       - chroma_data:/chroma/chroma
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/heartbeat')\" || exit 1"]
+      test: ["CMD-SHELL", "perl -e 'use IO::Socket::INET; my $$s=IO::Socket::INET->new(PeerAddr=>q{127.0.0.1},PeerPort=>8000,Timeout=>2) or exit 1; print $$s qq{GET /api/v2/heartbeat HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n}; my $$line=<$$s>; exit($$line=~/200/?0:1)'"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -545,7 +549,7 @@ services:
   caddy:
     image: caddy:2-alpine
     container_name: caddy-server
-    # Читает ключ платформы с режимом 0600. Root открывает файл, принадлежащий uid сервиса.
+    # Читает только ключ публичного TLS. Ключ JWT в этот том не входит.
     user: "0:0"
     restart: unless-stopped
     depends_on:
@@ -564,7 +568,7 @@ services:
     volumes:
       - ./src/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - ca_public:/etc/caddy/certs:ro
-      - admin_certs:/etc/caddy/admin:ro
+      - edge_certs:/etc/caddy/edge:ro
       - caddy_data:/data
       - caddy_config:/config
     healthcheck:
@@ -652,6 +656,7 @@ volumes:
   minio_certs:
   ca_public:
   admin_certs:
+  edge_certs:
   bank_certs:
   admin_client_certs:
   postgres_data:

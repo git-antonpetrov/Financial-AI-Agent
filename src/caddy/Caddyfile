@@ -2,11 +2,11 @@
 # Внутренние имена слушают адреса сетей Docker и не принимают соединение
 # с опубликованного порта, потому что docker-proxy приходит со шлюза .1.
 
-# Публичный вход администратора предъявляет сертификат платформы из тома admin_certs.
+# Публичный вход предъявляет отдельный сертификат границы. Ключ JWT сюда не монтируется.
 {$ADMIN_DOMAIN:admin.fin-ai-agent.ru}, {$ADMIN_LOCAL_DOMAIN:admin.fin-ai-agent.local} {
     bind 10.90.10.10
 
-    tls /etc/caddy/admin/admin_server.crt /etc/caddy/admin/admin_server.key {
+    tls /etc/caddy/edge/caddy.crt /etc/caddy/edge/caddy.key {
         protocols tls1.3
         client_auth {
             mode {$CADDY_CLIENT_AUTH_MODE:require_and_verify}

@@ -285,11 +285,14 @@ class X509ChainValidator:
             if ca_path_len is not None and ca_path_len < 1:
                 return False, "Сертификат эмитента исчерпал лимит вложенности центров сертификации (path_length < 1)"
 
-        # 5. Проверка по локальному CRL, если список передан или найден рядом с корневым сертификатом
+        # 5. Промежуточный издатель без списка отзыва не принимается.
+        if issuer_ca_input is not None and not self.crl_pem:
+            return False, "Список отзыва отсутствует, промежуточный издатель не принимается"
         if self.crl_pem:
             try:
                 crl_obj = x509.load_pem_x509_crl(self.crl_pem.encode("utf-8"), default_backend())
-                if not crl_obj.is_signature_valid(issuer_ca.public_key()):
+                crl_authority = self.root_ca_cert or issuer_ca
+                if not crl_obj.is_signature_valid(crl_authority.public_key()):
                     return False, "Подпись списка отзыва не совпадает с корневым сертификатом"
                 if crl_obj.get_revoked_certificate_by_serial_number(leaf_cert.serial_number):
                     return False, f"Сертификат с серийным номером {leaf_cert.serial_number} отозван (CRL)"

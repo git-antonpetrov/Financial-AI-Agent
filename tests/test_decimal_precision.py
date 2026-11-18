@@ -260,3 +260,27 @@ def test_product_terms_returns_decimal():
     assert isinstance(terms["savings_account_rate"], Decimal)
     for rate in terms["deposit_rates"].values():
         assert isinstance(rate, Decimal)
+
+
+def test_calculate_deposit_rate_selects_term_and_savings(monkeypatch):
+    """Проверяет, что срок 6 и 12 месяцев и накопительный счёт берут свою ставку из сетки."""
+    from src.simulations.api.routers import invest
+
+    monkeypatch.setitem(invest.PRODUCT_CONDITIONS["deposit_rates"], "6_months", Decimal("11.10"))
+    monkeypatch.setitem(invest.PRODUCT_CONDITIONS["deposit_rates"], "12_months", Decimal("12.20"))
+    monkeypatch.setitem(invest.PRODUCT_CONDITIONS, "savings_account_rate", Decimal("7.70"))
+    assert invest.calculate_deposit_rate(6) == Decimal("11.10")
+    assert invest.calculate_deposit_rate(12) == Decimal("12.20")
+    assert invest.calculate_savings_rate() == Decimal("7.70")
+
+
+def test_calculate_deposit_rate_falls_back_when_term_is_unknown(monkeypatch):
+    """Проверяет, что пустой, короткий и отсутствующий в сетке срок получают ставку по умолчанию."""
+    from src.simulations.api.routers import invest
+
+    monkeypatch.setitem(invest.PRODUCT_CONDITIONS, "default_deposit_rate", Decimal("9.90"))
+    monkeypatch.setitem(invest.PRODUCT_CONDITIONS["deposit_rates"], "6_months", Decimal("11.10"))
+    monkeypatch.delitem(invest.PRODUCT_CONDITIONS["deposit_rates"], "12_months", raising=False)
+    assert invest.calculate_deposit_rate(None) == Decimal("9.90")
+    assert invest.calculate_deposit_rate(3) == Decimal("9.90")
+    assert invest.calculate_deposit_rate(12) == Decimal("9.90")

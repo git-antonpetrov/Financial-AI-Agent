@@ -39,6 +39,7 @@ from security import (
     get_totp_uri,
     is_agent_key_revoked_in_redis,
     oauth2_scheme,
+    ReplayStoreUnavailable,
     record_admin_nonce_if_new,
     require_permission,
     revoke_agent_key_in_redis,
@@ -350,6 +351,10 @@ def get_client_ip(request: Request) -> str:
 
 _in_memory_rate_limits: dict[str, list[float]] = {}
 _rate_limit_lock = threading.Lock()
+_in_memory_login_failures: dict[str, list[float]] = {}
+_login_failure_lock = threading.Lock()
+_LOGIN_FAILURE_WINDOW_SECONDS = 300
+_LOGIN_FAILURE_LIMIT = 5
 _in_memory_totp_replays: dict[str, float] = {}
 _totp_replay_lock = threading.Lock()
 
@@ -386,6 +391,47 @@ def check_rate_limit(key: str, max_requests: int = 15, window_seconds: int = 60)
         return True
 
 
+def _memory_login_failure_count(key: str, now: float) -> int:
+    """Считает недавние неудачные входы в памяти процесса.
+
+    Аргументы:
+        key: Ключ адреса клиента.
+        now: Текущее время в секундах.
+
+    Возвращает:
+        Число попыток внутри окна блокировки.
+    """
+    with _login_failure_lock:
+        stamps = [
+            stamp
+            for stamp in _in_memory_login_failures.get(key, [])
+            if now - stamp < _LOGIN_FAILURE_WINDOW_SECONDS
+        ]
+        _in_memory_login_failures[key] = stamps
+        return len(stamps)
+
+
+def _memory_record_login_failure(key: str, now: float) -> int:
+    """Запоминает неудачный вход, когда Redis не ответил.
+
+    Аргументы:
+        key: Ключ адреса клиента.
+        now: Текущее время в секундах.
+
+    Возвращает:
+        Число попыток после записи.
+    """
+    with _login_failure_lock:
+        stamps = [
+            stamp
+            for stamp in _in_memory_login_failures.get(key, [])
+            if now - stamp < _LOGIN_FAILURE_WINDOW_SECONDS
+        ]
+        stamps.append(now)
+        _in_memory_login_failures[key] = stamps
+        return len(stamps)
+
+
 def check_and_record_totp_replay(username: str, totp_code: str, window_seconds: int = 90) -> bool:
     """
     Атомарно проверяет и регистрирует одноразовый TOTP код (защита от Replay Attack и TOCTOU гонок).
@@ -399,10 +445,16 @@ def check_and_record_totp_replay(username: str, totp_code: str, window_seconds: 
             acquired = redis_client.set(replay_key, "used", nx=True, ex=window_seconds)
             return bool(acquired)
         except Exception as e:
-            log_warning(
-                "Auth",
-                f"Redis недоступен для TOTP replay check ({e}), переключение на in-memory fallback",
-            )
+            log_warning("Auth", f"Redis недоступен для TOTP replay check ({e})")
+            if os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1", "yes"):
+                from src.admin_server.fastapi.security import ReplayStoreUnavailable
+
+                raise ReplayStoreUnavailable("Проверка TOTP недоступна") from e
+
+    if not redis_client and os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1", "yes"):
+        from src.admin_server.fastapi.security import ReplayStoreUnavailable
+
+        raise ReplayStoreUnavailable("Проверка TOTP недоступна")
 
     # In-memory fallback с потокобезопасной блокировкой
     with _totp_replay_lock:
@@ -468,6 +520,20 @@ async def login(
         raise
     except Exception as e:
         log_warning("Auth", f"Failed to check failed attempts in Redis: {e}")
+        if _memory_login_failure_count(failed_key, time.time()) >= _LOGIN_FAILURE_LIMIT:
+            log_warning("Auth", f"Account lockout: IP {client_ip} has 5+ failed login attempts")
+            await audit.log_audit_event(
+                db,
+                actor=form_data.username,
+                action="AUTH_LOCKOUT",
+                status="WARNING",
+                actor_ip=client_ip,
+                details="Account lockout (5+ failed attempts)",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many failed login attempts. IP temporarily blocked for 5 minutes.",
+            )
 
     matched_user = next(
         (u for u in VALID_ADMIN_USERS if secrets.compare_digest(form_data.username, u)),
@@ -480,6 +546,7 @@ async def login(
                 redis_client.expire(failed_key, 300)
         except Exception as e:
             log_warning("RateLimit", f"Failed to increment login failed attempts in Redis: {e}")
+            _memory_record_login_failure(failed_key, time.time())
         log_warning(
             "Auth",
             f"Failed login attempt for user: {form_data.username} from IP: {client_ip}",
@@ -506,6 +573,7 @@ async def login(
                 redis_client.expire(failed_key, 300)
         except Exception as e:
             log_warning("RateLimit", f"Failed to increment login failed attempts in Redis: {e}")
+            _memory_record_login_failure(failed_key, time.time())
         log_warning("Auth", f"Failed login attempt (bad password) from IP: {client_ip}")
         await audit.log_audit_event(
             db,
@@ -538,8 +606,13 @@ async def login(
                 headers={"WWW-Authenticate": "Bearer", "X-2FA-Required": "true"},
             )
 
-        # Целевой секрет для валидации: постоянный ключ сервера либо pending-ключ онбординга
-        target_secret = settings.ADMIN_TOTP_SECRET or pending_secret
+        if form_data.username.lower() == "admin":
+            target_secret = settings.ADMIN_TOTP_SECRET or pending_secret
+        else:
+            stored_secret = await crud.get_system_setting(
+                db, f"{form_data.username.upper()}_TOTP_SECRET"
+            )
+            target_secret = stored_secret or pending_secret
 
         if not target_secret or not verify_totp_code(target_secret, totp_code):
             try:
@@ -551,6 +624,7 @@ async def login(
                     "RateLimit",
                     f"Failed to increment login failed attempts in Redis: {e}",
                 )
+                _memory_record_login_failure(failed_key, time.time())
             log_warning("Auth", f"Failed login attempt (bad 2FA TOTP code) from IP: {client_ip}")
             await audit.log_audit_event(
                 db,
@@ -566,8 +640,16 @@ async def login(
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-        # Защита от Replay Attack: атомарная проверка и фиксация кода (исключает TOCTOU гонки)
-        if not check_and_record_totp_replay(form_data.username, totp_code, window_seconds=90):
+        try:
+            totp_is_fresh = check_and_record_totp_replay(
+                form_data.username, totp_code, window_seconds=90
+            )
+        except ReplayStoreUnavailable as replay_error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Проверка TOTP недоступна",
+            ) from replay_error
+        if not totp_is_fresh:
             masked_otp = f"{totp_code[:2]}****" if len(totp_code) >= 2 else "******"
             log_warning(
                 "Auth",
@@ -602,10 +684,11 @@ async def login(
                     description="Admin TOTP 2FA secret (AES-256-GCM encrypted)",
                 )
             except Exception as e:
-                log_warning(
-                    "Auth",
-                    f"Не удалось персистентно сохранить 2FA секрет в БД (fallback): {e}",
-                )
+                log_warning("Auth", f"Не удалось сохранить 2FA секрет в БД: {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Не удалось сохранить секрет 2FA",
+                ) from e
             if form_data.username.lower() == "admin":
                 settings.ADMIN_TOTP_SECRET = pending_secret
             clear_pending_totp_secret(form_data.username, redis_conn=redis_client)
@@ -1493,13 +1576,23 @@ async def create_agent_request(req: schemas.AgentRequestJWT, db: AsyncSession = 
                     detail="Request timestamp is outside the allowed ±300s window",
                 )
         except (ValueError, TypeError):
-            pass
+            raise HTTPException(
+                status_code=400,
+                detail="Некорректный формат iat",
+            )
 
     # Атомарная фиксация идентификатора запроса для предотвращения повторного использования (Replay Attack)
     token_fp = hashlib.sha256(req.token.encode("utf-8")).hexdigest()[:32]
     replay_id = f"agent_req:{agent_name}:{jti or token_fp}"
     ttl = max(60, int(exp - now_ts)) if exp else 900
-    if not record_admin_nonce_if_new(replay_id, ttl_seconds=ttl, redis_conn=redis_client):
+    try:
+        nonce_is_new = record_admin_nonce_if_new(replay_id, ttl_seconds=ttl, redis_conn=redis_client)
+    except ReplayStoreUnavailable as replay_error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Проверка nonce недоступна",
+        ) from replay_error
+    if not nonce_is_new:
         log_warning(
             "Agent Request",
             f"Replay attack detected: duplicate request from {agent_name} (id={jti or token_fp})",

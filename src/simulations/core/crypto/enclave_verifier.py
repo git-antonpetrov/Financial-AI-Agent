@@ -9,7 +9,12 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa
 
+from src.common.production_secrets import strict_security_enabled
 from src.simulations.core.utils.console_logger import log_warning
+
+
+class NonceStoreUnavailable(RuntimeError):
+    """Redis не подтвердил уникальность nonce, и строгий режим запрещает память."""
 
 
 class NonceStore:
@@ -56,6 +61,9 @@ class NonceStore:
         nonce = nonce.strip()
         actual_ttl = ttl or self.default_ttl
 
+        if self.redis_client is None and strict_security_enabled():
+            raise NonceStoreUnavailable("Проверка nonce недоступна")
+
         # 1. Попытка через Redis, если подключен
         if self.redis_client is not None:
             try:
@@ -68,6 +76,9 @@ class NonceStore:
                 if success in (False, None):
                     return False
             except Exception as e:
+                if strict_security_enabled():
+                    log_warning("NonceStore", f"Redis недоступен для проверки nonce ({e})")
+                    raise NonceStoreUnavailable("Проверка nonce недоступна") from e
                 log_warning(
                     "NonceStore",
                     f"Redis недоступен для проверки nonce ({e}), откат к памяти",
@@ -124,9 +135,12 @@ class EnclaveKeyManager:
         self,
         public_key_pem: str | None = None,
         private_key_pem: str | None = None,
+        load_private_key: bool = True,
     ):
         self._public_key_pem = public_key_pem or os.getenv("ENCLAVE_PUBLIC_KEY_PEM")
-        self._private_key_pem = private_key_pem or os.getenv("ENCLAVE_PRIVATE_KEY_PEM")
+        self._private_key_pem = private_key_pem if load_private_key else None
+        if load_private_key and not self._private_key_pem:
+            self._private_key_pem = os.getenv("ENCLAVE_PRIVATE_KEY_PEM")
         self._private_key = None
 
         if not self._public_key_pem:
@@ -151,7 +165,7 @@ class EnclaveKeyManager:
                 "Генерация случайных ключей в оперативной памяти запрещена моделью Zero-Trust."
             )
 
-        if not self._private_key_pem:
+        if load_private_key and not self._private_key_pem:
             priv_paths = [
                 os.getenv("ENCLAVE_PRIVATE_KEY_PATH", ""),
                 "/certs/enclave.key",
@@ -166,7 +180,7 @@ class EnclaveKeyManager:
                     except Exception:
                         pass
 
-        if self._private_key_pem:
+        if load_private_key and self._private_key_pem:
             try:
                 self._private_key = serialization.load_pem_private_key(
                     self._private_key_pem.encode("utf-8"),
@@ -212,7 +226,7 @@ class EnclaveVerifier:
         nonce_store: NonceStore | None = None,
         max_time_skew_seconds: int = 300,
     ):
-        self.key_manager = key_manager or EnclaveKeyManager()
+        self.key_manager = key_manager or EnclaveKeyManager(load_private_key=False)
         self.nonce_store = nonce_store or NonceStore()
         self.max_time_skew_seconds = max_time_skew_seconds
 
@@ -276,6 +290,7 @@ class EnclaveVerifier:
         try:
             signature_bytes = base64.b64decode(signature_b64.encode("ascii"))
         except Exception:
+            self.nonce_store.discard_nonce(nonce)
             return False, "Неверный base64 формат цифровой подписи X-Enclave-Signature"
 
         body_sha256 = hashlib.sha256(body_bytes).hexdigest()

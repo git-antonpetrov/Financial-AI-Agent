@@ -2,7 +2,6 @@
 
 from decimal import Decimal, InvalidOperation
 
-from fastapi import HTTPException
 from sqlalchemy.future import select
 
 from src.simulations.db.bank.db.models import BankIdempotencyClaim
@@ -116,14 +115,20 @@ async def begin_bank_movement(
         True, если движение нужно выполнить. False, если это точный повтор.
 
     Вызывает:
-        HTTPException: Ключ уже принадлежит другой операции.
+        HTTPException: Ключ уже принадлежит другой операции, если установлен FastAPI.
+        RuntimeError: Тот же конфликт в процессе без FastAPI.
     """
     existing = await session.scalar(select(BankIdempotencyClaim).where(BankIdempotencyClaim.key == key))
     if getattr(existing, "key", None) != key:
         return True
     if claim_matches(existing, key, operation_type, account_id, amount, direction):
         return False
-    raise HTTPException(status_code=409, detail="Ключ идемпотентности уже использован другой операцией")
+    detail = "Ключ идемпотентности уже использован другой операцией"
+    try:
+        from fastapi import HTTPException
+    except ImportError:
+        raise RuntimeError(detail)
+    raise HTTPException(status_code=409, detail=detail)
 
 
 def remember_bank_movement(

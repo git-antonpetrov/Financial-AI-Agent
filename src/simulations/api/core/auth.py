@@ -8,7 +8,7 @@ from cryptography.x509.oid import NameOID
 from fastapi import Header, HTTPException, Request, status
 
 from src.simulations.core.crypto.chain_validator import get_chain_validator
-from src.simulations.core.crypto.enclave_verifier import get_enclave_verifier
+from src.simulations.core.crypto.enclave_verifier import NonceStoreUnavailable, get_enclave_verifier
 from src.simulations.core.utils.console_logger import log_error, log_info, log_warning
 
 # Локальный in-memory кэш отозванных сущностей для мгновенной блокировки (Instant Revocation 0 секунд)
@@ -258,7 +258,14 @@ async def check_enclave_or_token_auth(
 
         # 2. Атомарная фиксация Nonce для защиты от атак повторения (Replay Attacks)
         verifier = get_enclave_verifier()
-        if not verifier.nonce_cache.record_nonce_if_new(nonce):
+        try:
+            nonce_is_new = verifier.nonce_cache.record_nonce_if_new(nonce)
+        except NonceStoreUnavailable as nonce_error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Проверка nonce недоступна",
+            ) from nonce_error
+        if not nonce_is_new:
             log_warning("Simulation Auth", f"Replay attack на '{domain_name}': nonce '{nonce}' уже использован")
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -486,14 +493,20 @@ async def check_enclave_or_token_auth(
         body = await request.body()
         verifier = get_enclave_verifier()
 
-        is_valid, reason = verifier.verify_request(
-            method=request.method,
-            path=request.url.path,
-            timestamp_val=timestamp,
-            nonce=nonce,
-            body_bytes=body,
-            signature_b64=signature,
-        )
+        try:
+            is_valid, reason = verifier.verify_request(
+                method=request.method,
+                path=request.url.path,
+                timestamp_val=timestamp,
+                nonce=nonce,
+                body_bytes=body,
+                signature_b64=signature,
+            )
+        except NonceStoreUnavailable as nonce_error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Проверка nonce недоступна",
+            ) from nonce_error
 
         if not is_valid:
             if "Replay Attack" in reason or "уже был использован" in reason:

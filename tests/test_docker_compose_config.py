@@ -336,7 +336,8 @@ def test_caddy_mounts_platform_cert_on_docker_addresses():
         compose_data = yaml.safe_load(f)
 
     caddy = compose_data["services"]["caddy"]
-    assert "admin_certs:/etc/caddy/admin:ro" in caddy["volumes"]
+    assert "edge_certs:/etc/caddy/edge:ro" in caddy["volumes"]
+    assert not any("admin_certs" in item or "admin_server.key" in item for item in caddy["volumes"])
     assert "443:443" in caddy["ports"]
     assert "80:80" in caddy["ports"]
     for volume in caddy["volumes"]:

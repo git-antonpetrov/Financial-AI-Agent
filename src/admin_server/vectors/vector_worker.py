@@ -38,7 +38,7 @@ except ImportError:
             is_envelope_encryption_enabled,
         )
 
-_strict_sec = os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1")
+_strict_sec = os.getenv("STRICT_SECURITY", "true").lower() in ("true", "1", "yes")
 # Redis
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))

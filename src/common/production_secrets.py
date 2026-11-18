@@ -31,6 +31,8 @@ _EXACT_PLACEHOLDER_SECRETS: frozenset[str] = frozenset(
         "bootstrap_token_main_agent_secret",
         "bootstrap_token_oracle_secret",
         "bootstrap_token_oracle_agent_secret",
+        "tvly-example-key",
+        "contentai_password",
     }
 )
 
